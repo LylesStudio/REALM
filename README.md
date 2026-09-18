@@ -14,6 +14,18 @@
 
 ## 我只想马上玩
 
+还没有项目文件夹？一条终端命令即可拉取并完成全部设置（Linux/macOS；安装任何内容前都会先问你）：
+
+```bash
+curl -fsSL <本仓库 scripts/install.sh 的 raw 地址> | bash
+```
+
+或者在你已经克隆好的文件夹里运行：
+
+```bash
+bash scripts/install.sh
+```
+
 如果你已经拿到了 REALM 项目文件夹，按系统选择一个入口：
 
 ### Windows

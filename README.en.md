@@ -14,6 +14,18 @@ Inside a demo world with its cast (interface in English; world content language 
 
 ## I just want to play
 
+Don't have the project folder yet? One terminal command fetches it and sets everything up (Linux/macOS; it asks before installing anything):
+
+```bash
+curl -fsSL <raw URL of scripts/install.sh in this repo> | bash
+```
+
+Or from a folder you already cloned:
+
+```bash
+bash scripts/install.sh
+```
+
 If you already have the REALM project folder, choose the entry point for your system.
 
 ### Windows
