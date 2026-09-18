@@ -90,10 +90,16 @@ test("mergeEnvText preserves comments and replaces one key without duplicates", 
 test("Node-less wrappers offer explicit package-manager installation paths", () => {
   const unix = readFileSync(new URL("../scripts/setup-web.sh", import.meta.url), "utf8");
   const windows = readFileSync(new URL("../scripts/setup-web.ps1", import.meta.url), "utf8");
+  const windowsLauncher = readFileSync(new URL("../START-REALM-Windows.cmd", import.meta.url), "utf8");
+  const macLauncher = readFileSync(new URL("../START-REALM.command", import.meta.url), "utf8");
+  const linuxLauncher = readFileSync(new URL("../START-REALM-Linux.sh", import.meta.url), "utf8");
   assert.match(unix, /brew install node@22/);
   assert.match(unix, /setup-web\.mjs/);
   assert.match(windows, /OpenJS\.NodeJS\.LTS/);
   assert.match(windows, /setup-web\.mjs/);
+  assert.match(windowsLauncher, /ExecutionPolicy Bypass/);
+  assert.match(macLauncher, /scripts\/setup-web\.sh/);
+  assert.match(linuxLauncher, /scripts\/setup-web\.sh/);
 });
 
 test("local postgres has an explicit Docker mode with pinned pgvector image and loopback publish", () => {
