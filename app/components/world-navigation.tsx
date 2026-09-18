@@ -1,4 +1,5 @@
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { demoNavRecordText, demoStoryText, demoWorldText } from "../demo-content.ts";
 import type { RecordProjection } from "./record-types";
 
 interface WorldNavigationProps {
@@ -15,6 +16,7 @@ export function WorldNavigation({
   onOpenStory,
   onOpenRecord,
 }: WorldNavigationProps) {
+  const world = demoWorldText(projection.world, uiLanguage);
   return (
     <aside className="world-nav" aria-label="世界、故事与记录导航">
       <div className="nav-context">
@@ -24,8 +26,8 @@ export function WorldNavigation({
             界
           </span>
           <div>
-            <h2>{projection.world.name || "——"}</h2>
-            {projection.world.era ? <p>{projection.world.era}</p> : null}
+            <h2>{world.name || "——"}</h2>
+            {world.era ? <p>{world.era}</p> : null}
           </div>
         </div>
       </div>
@@ -36,7 +38,8 @@ export function WorldNavigation({
           {projection.story.status ? <span>{projection.story.status}</span> : null}
         </div>
         <ul className="nav-list">
-          {projection.stories.map((story) => {
+          {projection.stories.map((storyItem) => {
+            const story = demoStoryText(storyItem, uiLanguage);
             const isCurrent = story.id === projection.story.id;
             return (
               <li className={isCurrent ? "nav-item is-current" : "nav-item"} key={story.id}>
@@ -61,7 +64,8 @@ export function WorldNavigation({
       <div className="nav-section record-section">
         <p className="eyebrow">{uiText("ui.nav.record", uiLanguage)}</p>
         <ul className="nav-list record-list">
-          {projection.records.map((record, index) => {
+          {projection.records.map((recordItem, index) => {
+            const record = demoNavRecordText(recordItem, projection.world.id, uiLanguage);
             const isCurrent = record.id === projection.record.id;
             return (
               <li className={isCurrent ? "nav-item is-current" : "nav-item"} key={record.id}>

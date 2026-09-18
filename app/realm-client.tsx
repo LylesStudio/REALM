@@ -6,6 +6,16 @@ import { EventTimeline } from "./components/event-timeline";
 import { BranchTreePanel } from "./components/branch-tree-panel";
 import { LobbyPanel } from "./components/lobby-panel";
 import { LanguageMenu } from "./components/language-menu.tsx";
+import {
+  DEMO_IDS,
+  demoAffordanceText,
+  demoEventText,
+  localizeDemoLibrary,
+  demoRecordTitle,
+  demoSceneText,
+  demoStoryText,
+  demoWorldText,
+} from "./demo-content.ts";
 import { ThemeToggle } from "./components/theme-toggle.tsx";
 import { KnowledgeGraphPanel } from "./components/knowledge-graph-panel";
 import { createMemoryRefreshScheduler } from "./memory-refresh";
@@ -215,8 +225,10 @@ export function RealmClient() {
         .find((record) => record.id === projection.record.id) ?? null
     : null;
   // 批次 T12-C：当前世界/故事在 Library snapshot 中的条目（世界/故事视图数据源）。
+  // 演示世界条目为固定模板内容，随界面语言本地化（仅显示层，回写仍用原文 id 语义）。
+  const displayLibrary = localizeDemoLibrary(library, uiLanguage);
   const currentLibraryWorld = projection
-    ? library.worlds.find((world) => world.id === projection.world.id) ?? null
+    ? displayLibrary.worlds.find((world) => world.id === projection.world.id) ?? null
     : null;
   // 批次 T12 验收修正：故事视图按显式选择渲染，缺省跟随当前 Record 的故事。
   const effectiveStoryId = selectedStoryId ?? projection?.story.id ?? "";
@@ -227,6 +239,10 @@ export function RealmClient() {
   // 由交付投影携带；缺省跟随本机界面语言。
   const worldLanguage = normalizeUiLanguage(projection?.world.language)
     ?? uiLanguage;
+  // 演示世界例外：固定模板内容随界面语言（三层边界内模板层，契约测试锚定）。
+  const timelineLanguage = projection?.world.id === DEMO_IDS.world
+    ? uiLanguage
+    : worldLanguage;
 
   const loadLibrary = useCallback(async () => {
     try {
@@ -565,7 +581,7 @@ export function RealmClient() {
         <LobbyPanel
           uiLanguage={uiLanguage}
           inviteRoomId={lobbyInvite}
-          ownWorlds={library.worlds
+          ownWorlds={displayLibrary.worlds
             .filter((world) => world.membershipRole === "owner")
             .map((world) => ({ id: world.id, name: world.name }))}
           onEnterWorld={(worldId) => {
@@ -1120,7 +1136,7 @@ export function RealmClient() {
       <>
         <WorldOnboarding
           uiLanguage={uiLanguage}
-          library={library}
+          library={displayLibrary}
           onOpenChat={() => openCreation("chat", "onboarding")}
           onOpenGuided={() => openCreation("guided", "onboarding")}
           onOpenLobby={() => setLobbyOpen(true)}
@@ -1183,7 +1199,7 @@ export function RealmClient() {
             onClick={() => setMainView("world")}
             type="button"
           >
-            {projection.world.name}
+            {demoWorldText(projection.world, uiLanguage).name}
           </button>
           <i aria-hidden="true">/</i>
           <button
@@ -1193,7 +1209,7 @@ export function RealmClient() {
             onClick={() => setMainView("story")}
             type="button"
           >
-            {projection.story.title}
+            {demoStoryText(projection.story, uiLanguage).title}
           </button>
           <i aria-hidden="true">/</i>
           <button
@@ -1203,7 +1219,7 @@ export function RealmClient() {
             onClick={() => setMainView("record")}
             type="button"
           >
-            {projection.record.title}
+            {demoRecordTitle(projection.record.id, projection.record.title, uiLanguage)}
           </button>
         </nav>
         <div className="header-status">
@@ -1264,7 +1280,7 @@ export function RealmClient() {
         {mainView === "world" ? (
           <WorldView
             world={currentLibraryWorld}
-            worldSummary={projection.world.summary ?? ""}
+            worldSummary={demoWorldText(projection.world, uiLanguage).summary ?? ""}
             currentRecordId={projection.record.id}
             uiLanguage={uiLanguage}
             onOpenRecord={openRecord}
@@ -1276,7 +1292,7 @@ export function RealmClient() {
         ) : mainView === "story" ? (
           <StoryView
             story={selectedLibraryStory}
-            worldName={projection.world.name}
+            worldName={demoWorldText(projection.world, uiLanguage).name}
             currentRecordId={projection.record.id}
             uiLanguage={uiLanguage}
             onOpenRecord={openRecord}
@@ -1287,12 +1303,13 @@ export function RealmClient() {
           <header className="record-heading">
             <div>
               <p className="eyebrow">{uiText("ui.record.eyebrow", uiLanguage)}</p>
-              <h1>{projection.record.title}</h1>
+              <h1>{demoRecordTitle(projection.record.id, projection.record.title, uiLanguage)}</h1>
               {(() => {
                 if (!envelope.viewer.dynamicKnowledgeVisible) {
                   return <p className="record-subtitle">{uiText("ui.record.hiddenScene", uiLanguage)}</p>;
                 }
-                const subtitle = [projection.scene.location, projection.scene.worldTime]
+                const subtitleScene = demoSceneText(projection.scene, projection.world.id, uiLanguage);
+                const subtitle = [subtitleScene.location, subtitleScene.worldTime]
                   .filter((part) => part.trim().length > 0)
                   .join(" · ");
                 return subtitle
@@ -1435,9 +1452,9 @@ export function RealmClient() {
 
           <div className="timeline-scroll">
             <EventTimeline
-              events={projection.events}
+              events={projection.events.map((event) => demoEventText(event, uiLanguage))}
               style={normalizeWorldStyle(projection.world.style)}
-              uiLanguage={worldLanguage}
+              uiLanguage={timelineLanguage}
             />
             <PreviewCards
               key={streamRecordId}
@@ -1454,7 +1471,7 @@ export function RealmClient() {
           ) : null}
 
           <MessageComposer
-            affordances={envelope.affordances}
+            affordances={envelope.affordances.map((affordance) => demoAffordanceText(affordance, uiLanguage))}
             disabled={isSending || !envelope.writeToken}
             suggestions={
               envelope.suggestions.length > 0
@@ -1496,7 +1513,7 @@ export function RealmClient() {
           role="dialog"
         >
           <LibraryPanel
-            snapshot={library}
+            snapshot={displayLibrary}
             uiLanguage={uiLanguage}
             onRefresh={loadLibrary}
             onCreate={createLibraryItem}

@@ -21,9 +21,10 @@ export function normalizeUiLanguage(value: unknown): UiLanguage {
 
 type MessageTable = Record<UiLanguage, string>;
 
-/** 批次注册表：按面板分批维护（settings 设置页 / panels 知识图谱与世界库面板）。 */
+/** 批次注册表：按面板分批维护（settings 设置页 / panels 图谱与世界库 / demo 演示世界）。 */
 import { SETTINGS_MESSAGES } from "./messages-settings.ts";
 import { PANEL_MESSAGES } from "./messages-panels.ts";
+import { DEMO_MESSAGES } from "./messages-demo.ts";
 
 function interpolate(template: string, params?: Record<string, string>): string {
   if (!params) return template;
@@ -523,13 +524,16 @@ const MESSAGES: Record<string, MessageTable> = {
   "ui.composer.pending": M("正在生成", "Generating", "生成中"),
   "ui.composer.pendingAria": M("正在生成：你提交的内容已送出，正在等待世界回应。", "Generating: your submission was sent and the world is responding.", "生成中：送信済みの内容について、世界からの応答を待っています。"),
   "ui.dice.rolling": M("掷骰中", "Rolling", "判定中"),
+  // 时间线投递状态。
+  "ui.timeline.pending": M("正在等待世界回应…", "Waiting for the world to respond…", "世界の応答を待っています…"),
+  "ui.timeline.failed": M("发送失败，内容尚未写入记录", "Delivery failed — the text was not written to the record", "送信に失敗しました。内容は記録に書き込まれていません"),
   // 界面语言菜单（header / 设置页 / 登录页常驻入口）。
   "ui.lang.label": M("界面语言", "Interface language", "表示言語"),
   "ui.lang.toggleAria": M("切换界面语言", "Switch interface language", "表示言語を切り替える"),
 };
 
 /** 批次注册表：按面板分批维护，统一并入主表（契约测试覆盖全部 key）。 */
-for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES }) as [string, MessageTable][]) {
+for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES, ...DEMO_MESSAGES }) as [string, MessageTable][]) {
   if (!(key in MESSAGES)) MESSAGES[key] = table;
 }
 

@@ -1,4 +1,5 @@
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { demoCharacterText, demoSceneText, demoStoryText } from "../demo-content.ts";
 import type { RecordProjection, ViewerContext } from "./record-types";
 
 interface SceneInspectorProps {
@@ -35,14 +36,14 @@ export function SceneInspector({
   const perspectiveDescription = omniscient
     ? uiText("ui.inspector.omniscientHint", uiLanguage)
     : uiText("ui.inspector.characterHint", uiLanguage);
-  const scene = projection.scene;
+  const scene = demoSceneText(projection.scene, projection.world.id, uiLanguage);
   // 结构性消隐：空字段折叠不占位，由数据生长驱动逐步显现。
   const sceneFacts = [
     { term: uiText("ui.inspector.worldTime", uiLanguage), value: scene.worldTime },
     { term: uiText("ui.inspector.weather", uiLanguage), value: scene.weather },
     { term: uiText("ui.inspector.tension", uiLanguage), value: scene.tension },
   ].filter((fact) => fact.value.trim().length > 0);
-  const sceneTitle = scene.location || projection.story.title || "——";
+  const sceneTitle = scene.location || demoStoryText(projection.story, uiLanguage).title || "——";
   // 批次 S：CAST_SQL 不过滤 is_active（席位永不删除），展示层只列在席成员；
   // 观察者切换后本人角色席位以 isActive=false 退出阵容显示。
   const visibleCast = projection.cast.filter((member) => member.isActive);
@@ -90,7 +91,9 @@ export function SceneInspector({
                 <span>{uiText("ui.inspector.castCount", uiLanguage, { count: String(visibleCast.length) })}</span>
               </div>
               <ul className="cast-list">
-                {visibleCast.map((member) => (
+                {visibleCast.map((castMember) => {
+                  const member = demoCharacterText(castMember, uiLanguage);
+                  return (
                   <li key={member.id}>
                     <span className="cast-monogram" aria-hidden="true">
                       {member.name.slice(0, 1)}
@@ -109,7 +112,8 @@ export function SceneInspector({
                       {member.status}
                     </span>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             </section>
           ) : null}

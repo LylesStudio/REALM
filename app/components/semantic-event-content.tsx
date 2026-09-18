@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   semanticSegmentLabel,
   type SemanticSegment,
@@ -14,8 +14,19 @@ interface SemanticEventContentProps {
 
 /**
  * Segment nodes are also future speech boundaries. No visible sentinel or
- * punctuation is injected into the narrative content.
+ * punctuation is injected into the narrative content; the only layout text
+ * node added between spans is a single inter-segment space for Latin-script
+ * sentence boundaries (zh segments end with 。and never match this rule).
  */
+function needsInterSegmentSpace(previous: string, next: string): boolean {
+  const prevTail = previous.trimEnd();
+  const nextHead = next.trimStart();
+  if (!prevTail || !nextHead) return false;
+  const latinSentenceEnd = /[.!?…]["'”’)\]]?$/.test(prevTail);
+  const wordStart = /^[\p{L}\p{N}(['"“‘]/u.test(nextHead);
+  return latinSentenceEnd && wordStart;
+}
+
 export function SemanticEventContent({ segments, reveal = false }: SemanticEventContentProps) {
   const [visible, setVisible] = useState<{
     signature: string;
@@ -53,7 +64,12 @@ export function SemanticEventContent({ segments, reveal = false }: SemanticEvent
 
   return (
     <p className="semantic-content" data-speech-sequence="semantic-v1">
-      {stableSegments.map((segment) => (
+      {stableSegments.map((segment, index) => (
+        <Fragment key={segment.id}>
+          {index > 0 &&
+          needsInterSegmentSpace(stableSegments[index - 1]?.content ?? "", segment.content)
+            ? " "
+            : null}
         <span
           aria-label={`${semanticSegmentLabel(segment.kind)}：${segment.content}`}
           className={`semantic-segment semantic-${segment.kind}`}
@@ -68,6 +84,7 @@ export function SemanticEventContent({ segments, reveal = false }: SemanticEvent
             ? (visible.signature === segmentSignature ? visible.values[segment.id] ?? "" : "")
             : segment.content}
         </span>
+        </Fragment>
       ))}
     </p>
   );

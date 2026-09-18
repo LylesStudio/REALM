@@ -195,8 +195,8 @@ export function EventTimeline({ events, style, uiLanguage = "zh-CN" }: EventTime
               {event.status !== "committed" ? (
                 <p className={`delivery-state delivery-${event.status}`} role="status">
                   {event.status === "pending"
-                    ? "正在等待世界回应…"
-                    : "发送失败，内容尚未写入记录"}
+                    ? uiText("ui.timeline.pending", uiLanguage)
+                    : uiText("ui.timeline.failed", uiLanguage)}
                 </p>
               ) : null}
             </article>
