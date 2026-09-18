@@ -50,7 +50,6 @@ bash scripts/install.sh --embedded-pg   # Linux / macOS
 ```
 
 > macOS requires Apple Silicon (M-series). On an Intel Mac, install PostgreSQL 17 + pgvector with Homebrew and setup-web will detect it.
-> The raw URLs above work as soon as the repository is made Public; while it is private, clone first and run the local scripts.
 
 ### Upgrading
 

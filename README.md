@@ -50,7 +50,6 @@ bash scripts/install.sh --embedded-pg   # Linux / macOS
 ```
 
 > macOS 仅支持 Apple Silicon（M 系芯片）；Intel Mac 请用 Homebrew 安装 PostgreSQL 17 + pgvector，setup-web 会自动探测到。
-> 以上 raw 地址在仓库转为 Public 后立即可用；私有阶段请先克隆再运行本地脚本。
 
 ### 升级
 

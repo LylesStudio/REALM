@@ -97,3 +97,12 @@ test("install.cmd bridges cmd.exe users into PowerShell", () => {
   // cmd 不认识 iex/irm：入口必须显式交给 PowerShell。
   assert.match(cmd, /iex/);
 });
+
+test("installers pin the organization repo as the default clone source", () => {
+  const ps1 = readFileSync(new URL("../scripts/install.ps1", import.meta.url), "utf8");
+  // 默认克隆源必须精确指向组织仓库，任何其他 GitHub 拥有者都拒绝。
+  assert.match(installer, /github\.com\/Silver-Aurora\/REALM\.git/);
+  assert.doesNotMatch(installer, /github\.com\/(?!Silver-Aurora\/)[A-Za-z0-9-]+\/REALM/);
+  assert.match(ps1, /github\.com\/Silver-Aurora\/REALM\.git/);
+  assert.doesNotMatch(ps1, /github\.com\/(?!Silver-Aurora\/)[A-Za-z0-9-]+\/REALM/);
+});
