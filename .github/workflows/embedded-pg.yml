@@ -1,0 +1,236 @@
+# REALM 嵌入式 PostgreSQL 17 + pgvector 0.8.6 构件矩阵。
+#
+# 三平台同构：zonkyio 可重定位基座（npm 分发）+ 对应平台编译的 pgvector +
+# 原生冒烟门（initdb → 启动 → CREATE EXTENSION vector → 停）。
+# 产物统一 tar.gz 命名 realm-embedded-pg-<platform>-17.10.tar.gz。
+#
+# 触发：手动 workflow_dispatch，或 push tag `pg/*`。
+name: embedded-pg-artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "pg/*"
+
+concurrency:
+  group: embedded-pg-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_VERSION: "17.10"
+  PGVECTOR_VERSION: "0.8.6"
+  NPM_BASE_VERSION: "17.10.0-beta.17"
+
+jobs:
+  linux-x64:
+    name: linux-x64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Dockerfile 内含容器冒烟门)
+        run: |
+          docker build -f scripts/embedded-pg/Dockerfile.linux-x64 \
+            -t realm-embedded-pg:linux-x64 scripts/embedded-pg
+          docker rm -f realm-epg >/dev/null 2>&1 || true
+          docker create --name realm-epg realm-embedded-pg:linux-x64 >/dev/null
+          docker cp realm-epg:/out/realm-embedded-pg-linux-x64.tar.gz .
+          docker rm realm-epg >/dev/null
+          ls -lh realm-embedded-pg-linux-x64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: realm-embedded-pg-linux-x64-17.10
+          path: realm-embedded-pg-linux-x64.tar.gz
+          if-no-files-found: error
+
+  darwin:
+    name: darwin-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            brew_prefix: /opt/homebrew
+          - arch: x64
+            runner: macos-13
+            brew_prefix: /usr/local
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 基座解包（zonkyio 可重定位 PG 17.10）
+        run: |
+          npm pack "@embedded-postgres/darwin-${{ matrix.arch }}@${{ env.NPM_BASE_VERSION }}"
+          tar -xzf "embedded-postgres-darwin-${{ matrix.arch }}-"*.tgz
+          mkdir -p "$HOME/bundle"
+          cp -a package/native/. "$HOME/bundle/"
+          ls "$HOME/bundle/bin"
+      - name: 构建环境（brew postgresql@17 提供 pg_config/pgxs/headers）
+        run: |
+          brew install postgresql@17
+          brew --prefix postgresql@17
+      - name: 编译 pgvector ${{ env.PGVECTOR_VERSION }}
+        run: |
+          curl -fsSL "https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v${{ env.PGVECTOR_VERSION }}" -o /tmp/pgvector.tar.gz
+          tar -xzf /tmp/pgvector.tar.gz -C /tmp
+          cd "/tmp/pgvector-${{ env.PGVECTOR_VERSION }}"
+          make "PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config" USE_PGXS=1 OPTFLAGS="" -j3
+          make "PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config" USE_PGXS=1 install DESTDIR=/tmp/stage
+          so=$(find /tmp/stage -name 'vector.so' | head -1)
+          cp "$so" "$HOME/bundle/lib/postgresql/vector.so"
+          cp "$(find /tmp/stage -name 'vector.control' | head -1)" "$HOME/bundle/share/postgresql/extension/"
+          cp "$(find /tmp/stage -name 'vector--0.8.6.sql' | head -1)" "$HOME/bundle/share/postgresql/extension/"
+      - name: 客户端闭包（brew psql/createdb/pg_isready + dylib 重定向）
+        run: |
+          set -e
+          BREW_LIB="$(brew --prefix postgresql@17)/lib"
+          BUNDLE="$HOME/bundle"
+          mkdir -p "$BUNDLE/deps"
+          for tool in psql createdb pg_isready; do
+            cp "$BREW_LIB/$tool" "$BUNDLE/bin/$tool"
+            install_name_tool -change "$BREW_LIB/libpq.5.dylib" @rpath/libpq.5.dylib "$BUNDLE/bin/$tool" || true
+            install_name_tool -add_rpath @loader_path/../lib "$BUNDLE/bin/$tool" || true
+          done
+          cp "$BREW_LIB/libpq.5.dylib" "$BUNDLE/lib/libpq.5.dylib"
+          # libpq 的 ssl/crypto 引用重定向到 bundle/deps
+          SSL_PATH=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk '/libssl/{print $1; exit}')
+          CRYPTO_PATH=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk '/libcrypto/{print $1; exit}')
+          for pair in "libssl:libssl.3.dylib" "libcrypto:libcrypto.3.dylib"; do
+            src_var="${pair%%:*}"; file="${pair##*:}"
+            src_path=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk -v n="$file" 'index($0,n){print $1; exit}')
+            if [ -n "$src_path" ] && [ -f "$src_path" ]; then
+              cp "$src_path" "$BUNDLE/deps/$file"
+              install_name_tool -change "$src_path" "@loader_path/../deps/$file" "$BUNDLE/lib/libpq.5.dylib" || true
+            fi
+          done
+          install_name_tool -add_rpath @loader_path/../lib "$BUNDLE/lib/libpq.5.dylib" || true
+      - name: pg_config（重定位感知 sh 版）
+        run: |
+          cat > "$HOME/bundle/bin/pg_config" <<'EOF'
+          #!/bin/sh
+          bindir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          prefix=$(CDPATH= cd -- "$bindir/.." && pwd)
+          case "$1" in
+            --version) echo "PostgreSQL 17.10" ;;
+            --bindir) echo "$bindir" ;;
+            --libdir) echo "$prefix/lib" ;;
+            --pkglibdir) echo "$prefix/lib/postgresql" ;;
+            --sharedir) echo "$prefix/share/postgresql" ;;
+            *) echo "usage: pg_config [--version|--bindir|--libdir|--pkglibdir|--sharedir]" >&2; exit 1 ;;
+          esac
+          EOF
+          chmod +x "$HOME/bundle/bin/pg_config"
+      - name: 原生冒烟（initdb → 启动 → CREATE EXTENSION vector）
+        run: |
+          set -e
+          BUNDLE="$HOME/bundle"
+          "$BUNDLE/bin/postgres" --version
+          mkdir -p "$HOME/smoke/data" "$HOME/smoke/run"
+          "$BUNDLE/bin/initdb" -D "$HOME/smoke/data" --locale=C --encoding=UTF8 -U postgres -A trust >"$HOME/smoke/initdb.log" 2>&1 || { tail -12 "$HOME/smoke/initdb.log"; exit 1; }
+          "$BUNDLE/bin/pg_ctl" -D "$HOME/smoke/data" -l "$HOME/smoke/server.log" -o "-h 127.0.0.1 -p 55499 -k $HOME/smoke/run" -w start || { tail -12 "$HOME/smoke/server.log"; exit 1; }
+          printf '%s\n' "CREATE EXTENSION vector;" "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';" > "$HOME/smoke/smoke.sql"
+          "$BUNDLE/bin/psql" -h 127.0.0.1 -p 55499 -U postgres -d postgres -f "$HOME/smoke/smoke.sql" || { tail -8 "$HOME/smoke/server.log"; exit 1; }
+          "$BUNDLE/bin/pg_ctl" -D "$HOME/smoke/data" stop
+      - name: 打包
+        run: |
+          tar -C "$HOME/bundle" -czf "realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz" .
+          ls -lh "realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: realm-embedded-pg-darwin-${{ matrix.arch }}-17.10
+          path: realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz
+          if-no-files-found: error
+
+  windows-x64:
+    name: windows-x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: 基座解包（zonkyio 可重定位 PG 17.10）
+        shell: pwsh
+        run: |
+          npm pack "@embedded-postgres/windows-x64@${{ env.NPM_BASE_VERSION }}"
+          tar -xzf "embedded-postgres-windows-x64-"*.tgz
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\bundle" | Out-Null
+          Copy-Item -Recurse -Force "package\native\*" "$env:USERPROFILE\bundle\"
+          # 剥掉 GUI 工具链 DLL（wx* 属于 pgAdmin，服务端/客户端均不链接）
+          Remove-Item -Force "$env:USERPROFILE\bundle\bin\wx*.dll" -ErrorAction SilentlyContinue
+          Get-ChildItem "$env:USERPROFILE\bundle\bin" | Select-Object -ExpandProperty Name
+      - name: 安装 EDB PostgreSQL 17（构建期：headers/pg_config/客户端）
+        shell: pwsh
+        run: |
+          $installer = "$env:TEMP\pg17.exe"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://get.enterprisedb.com/postgresql/postgresql-17.6-1-windows-x64.exe" -OutFile $installer
+          Start-Process -Wait -FilePath $installer -ArgumentList '--mode','unattended','--unattendedmodeui','none','--superpassword','buildpw','--disable-components','stackbuilder'
+          & "C:\Program Files\PostgreSQL\17\bin\pg_config.exe" --version
+      - name: MSVC 环境 + 编译 pgvector ${{ env.PGVECTOR_VERSION }}
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: 编译 pgvector（nmake）
+        shell: cmd
+        run: |
+          curl -fsSL https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.6 -o %TEMP%\pgvector.tar.gz
+          tar -xzf %TEMP%\pgvector.tar.gz -C %TEMP%
+          cd /d %TEMP%\pgvector-0.8.6
+          set PG_CONFIG=C:\Program Files\PostgreSQL\17\bin\pg_config.exe
+          nmake /f Makefile.win
+          nmake /f Makefile.win install
+      - name: 组装（vector.dll + 客户端 + pg_config shim）
+        shell: pwsh
+        run: |
+          $pg = "C:\Program Files\PostgreSQL\17"
+          $bundle = "$env:USERPROFILE\bundle"
+          # pgvector 安装到了 EDB 树：拷进 bundle
+          $pkglibdir = & "$pg\bin\pg_config.exe" --pkglibdir
+          $sharedir = & "$pg\bin\pg_config.exe" --sharedir
+          Copy-Item -Force (Join-Path $pkglibdir "vector.dll") (Join-Path $bundle "lib\vector.dll")
+          Copy-Item -Force (Join-Path $sharedir "extension\vector.control") (Join-Path $bundle "share\extension\vector.control")
+          Copy-Item -Force (Join-Path $sharedir "extension\vector--0.8.6.sql") (Join-Path $bundle "share\extension\vector--0.8.6.sql")
+          # 客户端工具（psql/createdb/pg_isready + 可能的 intl/iconv 依赖）
+          foreach ($tool in 'psql.exe','createdb.exe','pg_isready.exe','libintl-*.dll','libiconv-*.dll','libxml2-*.dll','libssl-*.dll','libcrypto-*.dll','zlib1.dll') {
+            Get-ChildItem "$pg\bin\$tool" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item -Force $_.FullName "$bundle\bin\" }
+          }
+          # 重定位感知 pg_config：cmd 批处理（setup-web 的 win 可执行探测按 .cmd 解析）
+          @'
+          @echo off
+          setlocal
+          set "bindir=%~dp0"
+          set "prefix=%bindir:~0,-1%\.."
+          if "%~1"=="--version" echo PostgreSQL 17.10
+          if "%~1"=="--bindir" echo %bindir:~0,-1%
+          if "%~1"=="--libdir" echo %prefix%\lib
+          if "%~1"=="--pkglibdir" echo %prefix%\lib
+          if "%~1"=="--sharedir" echo %prefix%\share
+          if "%~1"=="--version" exit /b 0
+          if "%~1"=="--bindir" exit /b 0
+          if "%~1"=="--libdir" exit /b 0
+          if "%~1"=="--pkglibdir" exit /b 0
+          if "%~1"=="--sharedir" exit /b 0
+          echo usage: pg_config [--version^|--bindir^|--libdir^|--pkglibdir^|--sharedir] 1>&2
+          exit /b 1
+          '@ | Set-Content -Encoding ascii "$bundle\bin\pg_config.cmd"
+      - name: 原生冒烟（initdb → 启动 → CREATE EXTENSION vector）
+        shell: pwsh
+        run: |
+          $bundle = "$env:USERPROFILE\bundle"
+          & "$bundle\bin\postgres.exe" --version
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\smoke\data" | Out-Null
+          # Windows 走纯 TCP loopback（与 local-postgres.mjs 的 win32 分支一致）
+          & "$bundle\bin\initdb.exe" -D "$env:USERPROFILE\smoke\data" --locale=C --encoding=UTF8 -U postgres -A trust *> "$env:USERPROFILE\smoke\initdb.log"
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:USERPROFILE\smoke\initdb.log" -Tail 12; exit 1 }
+          & "$bundle\bin\pg_ctl.exe" -D "$env:USERPROFILE\smoke\data" -l "$env:USERPROFILE\smoke\server.log" -o '-h 127.0.0.1 -p 55499' -w start
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:USERPROFILE\smoke\server.log" -Tail 12; exit 1 }
+          "CREATE EXTENSION vector;", "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';" | Set-Content "$env:USERPROFILE\smoke\smoke.sql"
+          & "$bundle\bin\psql.exe" -h 127.0.0.1 -p 55499 -U postgres -d postgres -f "$env:USERPROFILE\smoke\smoke.sql"
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:USERPROFILE\smoke\server.log" -Tail 8; exit 1 }
+          & "$bundle\bin\pg_ctl.exe" -D "$env:USERPROFILE\smoke\data" stop
+      - name: 打包
+        shell: pwsh
+        run: |
+          $out = "realm-embedded-pg-windows-x64-17.10.tar.gz"
+          tar -C "$env:USERPROFILE\bundle" -czf "$out" .
+          Get-Item $out | Select-Object Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: realm-embedded-pg-windows-x64-17.10
+          path: realm-embedded-pg-windows-x64-17.10.tar.gz
+          if-no-files-found: error
