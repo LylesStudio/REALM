@@ -4,7 +4,11 @@
 
 [简体中文](./README.md) · [English](./README.en.md) · [日本語](./README.ja.md)
 
-![REALM WebUI 世界入口](./public/screenshots/webui-home.png)
+![REALM WebUI 世界入口](./public/screenshots/webui-home.zh.png)
+
+在演示世界中与角色同行（界面为中文，世界内容语言由世界设定决定）：
+
+![REALM WebUI 记录视图](./public/screenshots/webui-record.zh.png)
 
 > 双击启动器，跟着提示走，浏览器打开后就是上面的世界入口。第一次启动时，启动器会告诉你电脑里缺什么，并在你确认后装好。
 

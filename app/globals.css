@@ -367,6 +367,60 @@ button:disabled {
   color: var(--onchip);
 }
 
+/* 界面语言菜单：header / 设置页 / 登录页共用；矩形弹层，无圆角。 */
+.language-menu {
+  display: inline-flex;
+  position: relative;
+}
+
+.language-menu-popover {
+  background: var(--paper-strong);
+  border: 1px solid var(--line-mid);
+  box-shadow: 0 6px 0 rgba(0, 0, 0, 0.18);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  min-width: 128px;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 70;
+}
+
+.language-menu-option {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--paper-deep);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 9px 12px;
+  text-align: left;
+}
+
+.language-menu-option:last-child {
+  border-bottom: 0;
+}
+
+.language-menu-option:hover {
+  background: var(--paper-active);
+}
+
+.language-menu-option.is-active {
+  background: var(--chip);
+  color: var(--onchip);
+}
+
+/* 登录页右上角常驻语言入口。 */
+.login-language-corner {
+  position: absolute;
+  right: 20px;
+  top: 20px;
+  z-index: 5;
+}
+
 .view-mode.is-omniscient {
   border-color: var(--tint-gold-line);
   color: var(--tint-gold-bright);
@@ -4376,6 +4430,7 @@ button:disabled {
   min-height: 100vh;
   min-height: 100dvh;
   padding: 20px;
+  position: relative;
 }
 
 .login-card {

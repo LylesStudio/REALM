@@ -4,7 +4,11 @@ A single-player world-building game that runs on your own computer. You talk wit
 
 [简体中文](./README.md) · [English](./README.en.md) · [日本語](./README.ja.md)
 
-![REALM WebUI world entry](./public/screenshots/webui-home.png)
+![REALM WebUI world entry](./public/screenshots/webui-home.en.png)
+
+Inside a demo world with its cast (interface in English; world content language follows the world's own setting):
+
+![REALM WebUI record view](./public/screenshots/webui-record.en.png)
 
 > Double-click the launcher, follow the prompts, and the world entry above opens in your browser. On the first launch, the installer checks what is missing and asks before installing anything.
 

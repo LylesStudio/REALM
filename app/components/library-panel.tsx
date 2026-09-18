@@ -366,11 +366,11 @@ export function LibraryPanel({
               <span aria-hidden="true">{manualOpen ? "▾" : "▸"}</span>
               {uiText("ui.library.manual", uiLanguage)}
             </button>
-            {manualOpen ? <ManualCreateForm onCreate={onCreate} snapshot={snapshot} /> : null}
+            {manualOpen ? <ManualCreateForm onCreate={onCreate} snapshot={snapshot} uiLanguage={uiLanguage} /> : null}
           </section>
 
           {/* v37 H.2：.realm 导入向导 + 导入历史（前端零身份字段）。 */}
-          <section className="library-realm-transfer" aria-label="世界传输">
+          <section className="library-realm-transfer" aria-label={uiText("ui.library.transferAria", uiLanguage)}>
             <WorldImportWizard onImported={onRefresh} uiLanguage={uiLanguage} />
             <WorldImportHistory uiLanguage={uiLanguage} />
           </section>
@@ -687,9 +687,11 @@ function AddCharacterForm({
 
 function ManualCreateForm({
   snapshot,
+  uiLanguage,
   onCreate,
 }: {
   snapshot: LibrarySnapshot;
+  uiLanguage: UiLanguage;
   onCreate: (command: LibraryCreateCommand) => Promise<boolean>;
 }) {
   const [mode, setMode] = useState<CreateMode>("world");
@@ -741,49 +743,49 @@ function ManualCreateForm({
   return (
     <form className="library-form" onSubmit={submit}>
       <div className="library-tabs" role="tablist">
-        <button className={mode === "world" ? "is-active" : ""} onClick={() => setMode("world")} type="button">世界</button>
-        <button className={mode === "story" ? "is-active" : ""} onClick={() => setMode("story")} type="button">故事</button>
-        <button className={mode === "record" ? "is-active" : ""} onClick={() => setMode("record")} type="button">记录</button>
-        <button className={mode === "character" ? "is-active" : ""} onClick={() => setMode("character")} type="button">角色</button>
+        <button className={mode === "world" ? "is-active" : ""} onClick={() => setMode("world")} type="button">{uiText("ui.library.tabWorld", uiLanguage)}</button>
+        <button className={mode === "story" ? "is-active" : ""} onClick={() => setMode("story")} type="button">{uiText("ui.library.tabStory", uiLanguage)}</button>
+        <button className={mode === "record" ? "is-active" : ""} onClick={() => setMode("record")} type="button">{uiText("ui.library.tabRecord", uiLanguage)}</button>
+        <button className={mode === "character" ? "is-active" : ""} onClick={() => setMode("character")} type="button">{uiText("ui.library.tabCharacter", uiLanguage)}</button>
       </div>
 
       {mode === "world" ? (
         <div className="library-fields">
-          <label>世界名称<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-          <label>时代<input value={era} onChange={(event) => setEra(event.target.value)} /></label>
-          <label>摘要<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+          <label>{uiText("ui.library.fieldWorldName", uiLanguage)}<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <label>{uiText("ui.library.fieldEra", uiLanguage)}<input value={era} onChange={(event) => setEra(event.target.value)} /></label>
+          <label>{uiText("ui.library.fieldSummary", uiLanguage)}<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
         </div>
       ) : null}
 
       {mode === "story" ? (
         <div className="library-fields">
-          <label>所属世界<select value={worldId} onChange={(event) => setWorldId(event.target.value)} required>{snapshot.worlds.map((world) => <option key={world.id} value={world.id}>{world.name}</option>)}</select></label>
-          <label>故事标题<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
-          <label>前提<textarea rows={3} value={premise} onChange={(event) => setPremise(event.target.value)} /></label>
+          <label>{uiText("ui.library.fieldWorld", uiLanguage)}<select value={worldId} onChange={(event) => setWorldId(event.target.value)} required>{snapshot.worlds.map((world) => <option key={world.id} value={world.id}>{world.name}</option>)}</select></label>
+          <label>{uiText("ui.library.fieldStoryTitle", uiLanguage)}<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+          <label>{uiText("ui.library.fieldPremise", uiLanguage)}<textarea rows={3} value={premise} onChange={(event) => setPremise(event.target.value)} /></label>
         </div>
       ) : null}
 
       {mode === "record" ? (
         <div className="library-fields">
-          <label>所属故事<select value={storyId} onChange={(event) => setStoryId(event.target.value)} required>{stories.map((story) => <option key={story.id} value={story.id}>{story.title}</option>)}</select></label>
-          <label>记录标题<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+          <label>{uiText("ui.library.fieldStory", uiLanguage)}<select value={storyId} onChange={(event) => setStoryId(event.target.value)} required>{stories.map((story) => <option key={story.id} value={story.id}>{story.title}</option>)}</select></label>
+          <label>{uiText("ui.library.fieldRecordTitle", uiLanguage)}<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
           <label className="library-checkbox">
             <input
               checked={retrospection}
               onChange={(event) => setRetrospection(event.target.checked)}
               type="checkbox"
             />
-            回溯记录
+            {uiText("ui.library.retrospection", uiLanguage)}
           </label>
         </div>
       ) : null}
 
       {mode === "character" ? (
         <div className="library-fields">
-          <label>所属世界<select value={worldId} onChange={(event) => setWorldId(event.target.value)} required>{snapshot.worlds.map((world) => <option key={world.id} value={world.id}>{world.name}</option>)}</select></label>
-          <label>角色名<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-          <label>身份<textarea rows={2} value={role} onChange={(event) => setRole(event.target.value)} /></label>
-          <label>摘要<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+          <label>{uiText("ui.library.fieldWorld", uiLanguage)}<select value={worldId} onChange={(event) => setWorldId(event.target.value)} required>{snapshot.worlds.map((world) => <option key={world.id} value={world.id}>{world.name}</option>)}</select></label>
+          <label>{uiText("ui.library.fieldCharacterName", uiLanguage)}<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <label>{uiText("ui.library.fieldRole", uiLanguage)}<textarea rows={2} value={role} onChange={(event) => setRole(event.target.value)} /></label>
+          <label>{uiText("ui.library.fieldSummary", uiLanguage)}<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
         </div>
       ) : null}
 

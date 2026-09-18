@@ -21,6 +21,10 @@ export function normalizeUiLanguage(value: unknown): UiLanguage {
 
 type MessageTable = Record<UiLanguage, string>;
 
+/** 批次注册表：按面板分批维护（settings 设置页 / panels 知识图谱与世界库面板）。 */
+import { SETTINGS_MESSAGES } from "./messages-settings.ts";
+import { PANEL_MESSAGES } from "./messages-panels.ts";
+
 function interpolate(template: string, params?: Record<string, string>): string {
   if (!params) return template;
   return template.replace(/\{(\w+)\}/g, (match, key: string) =>
@@ -519,7 +523,15 @@ const MESSAGES: Record<string, MessageTable> = {
   "ui.composer.pending": M("正在生成", "Generating", "生成中"),
   "ui.composer.pendingAria": M("正在生成：你提交的内容已送出，正在等待世界回应。", "Generating: your submission was sent and the world is responding.", "生成中：送信済みの内容について、世界からの応答を待っています。"),
   "ui.dice.rolling": M("掷骰中", "Rolling", "判定中"),
+  // 界面语言菜单（header / 设置页 / 登录页常驻入口）。
+  "ui.lang.label": M("界面语言", "Interface language", "表示言語"),
+  "ui.lang.toggleAria": M("切换界面语言", "Switch interface language", "表示言語を切り替える"),
 };
+
+/** 批次注册表：按面板分批维护，统一并入主表（契约测试覆盖全部 key）。 */
+for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES }) as [string, MessageTable][]) {
+  if (!(key in MESSAGES)) MESSAGES[key] = table;
+}
 
 /** 界面文案查找：缺失 key 回落 zh-CN 并告警，绝不暴露裸 key。 */
 export function uiText(

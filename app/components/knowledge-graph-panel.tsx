@@ -6,6 +6,7 @@ import {
   uiText,
   type UiLanguage,
 } from "../../modules/i18n/public.ts";
+import { readUiLanguage } from "../ui-language.ts";
 import {
   ARTICLE_QUALIFICATION_LABELS,
   ENTITY_KIND_COLORS,
@@ -41,7 +42,7 @@ export function KnowledgeGraphPanel({
   /** 批次 T9：目标世界 id——图谱/正史请求显式携带（去 demo 硬编码）。 */
   worldId: string;
   worldName: string;
-  /** 批次 T11-D：界面语言（仅本批新增文案走 key；既有图谱硬编码文案不动）。 */
+  /** 批次 T11-D：界面语言；本批已把面板全部硬编码文案接入 ui.knowledge.* 键表。 */
   uiLanguage?: UiLanguage;
   onClose: () => void;
 }) {
@@ -115,7 +116,7 @@ export function KnowledgeGraphPanel({
     } catch {
       if (!mountedRef.current || seq !== loadSeqRef.current) return;
       setLoadedOnce(true);
-      setNotice("暂时无法读取世界知识。");
+      setNotice(uiText("ui.knowledge.loadFailed", readUiLanguage()));
     } finally {
       if (mountedRef.current && seq === loadSeqRef.current) setLoading(false);
     }
@@ -178,13 +179,13 @@ export function KnowledgeGraphPanel({
       });
       const payload = (await response.json()) as { ok: boolean; error?: { message?: string } };
       if (!response.ok || !payload.ok) {
-        setNotice(payload.error?.message ?? "操作没有完成，请重试。");
+        setNotice(payload.error?.message ?? uiText("ui.knowledge.actionFailed", uiLanguage));
         return false;
       }
       await load();
       return true;
     } catch {
-      setNotice("操作没有完成，请重试。");
+      setNotice(uiText("ui.knowledge.actionFailed", uiLanguage));
       return false;
     } finally {
       setBusy(false);
@@ -223,20 +224,20 @@ export function KnowledgeGraphPanel({
     : [];
 
   return (
-    <section className="graph-panel" aria-label="世界知识图谱">
+    <section className="graph-panel" aria-label={uiText("ui.knowledge.ariaPanel", uiLanguage)}>
       <header className="graph-panel-heading">
         <div>
-          <p className="eyebrow">世界知识 / Knowledge</p>
+          <p className="eyebrow">{uiText("ui.knowledge.eyebrow", uiLanguage)}</p>
           <h2>{worldName}</h2>
         </div>
-        <span className="graph-worldline-tag">原初世界线</span>
-        <button aria-label="关闭知识图谱" onClick={onClose} type="button">×</button>
+        <span className="graph-worldline-tag">{uiText("ui.knowledge.originalWorldline", uiLanguage)}</span>
+        <button aria-label={uiText("ui.knowledge.close", uiLanguage)} onClick={onClose} type="button">×</button>
       </header>
 
       {notice ? (
         <div className="notice-bar" role="alert">
           <span>{notice}</span>
-          <button aria-label="关闭提示" onClick={() => setNotice(null)} type="button">×</button>
+          <button aria-label={uiText("ui.knowledge.dismissNotice", uiLanguage)} onClick={() => setNotice(null)} type="button">×</button>
         </div>
       ) : null}
 
@@ -246,6 +247,7 @@ export function KnowledgeGraphPanel({
             entities={snapshot.entities}
             relations={snapshot.relations}
             selectedId={selectedId}
+            uiLanguage={uiLanguage}
             onSelect={(id) => {
               setSelectedId(id);
               setShowAllClaims(false);
@@ -253,7 +255,7 @@ export function KnowledgeGraphPanel({
               setReviewClaimId(null);
             }}
           />
-          <div className="graph-legend" aria-label="实体类型图例">
+          <div className="graph-legend" aria-label={uiText("ui.knowledge.entityLegend", uiLanguage)}>
             {(Object.keys(ENTITY_KIND_LABELS) as GraphEntity["entityKind"][]).map((kind) => (
               <span key={kind}>
                 <i style={{ background: ENTITY_KIND_COLORS[kind] }} aria-hidden="true" />
@@ -262,45 +264,45 @@ export function KnowledgeGraphPanel({
             ))}
           </div>
           <div className="graph-actions">
-            <button disabled={busy} onClick={() => setMode("entity")} type="button">新建实体</button>
+            <button disabled={busy} onClick={() => setMode("entity")} type="button">{uiText("ui.knowledge.newEntity", uiLanguage)}</button>
             <button
               disabled={busy || !selected}
               onClick={() => setMode("summary")}
               type="button"
             >
-              编辑摘要
+              {uiText("ui.knowledge.editSummary", uiLanguage)}
             </button>
             <button
               disabled={busy || !selected}
               onClick={() => setMode("relation")}
               type="button"
             >
-              建立关系
+              {uiText("ui.knowledge.addRelation", uiLanguage)}
             </button>
             <button
               disabled={busy || !selected}
               onClick={() => setMode("claim")}
               type="button"
             >
-              提交 Claim
+              {uiText("ui.knowledge.submitClaim", uiLanguage)}
             </button>
             <button
-              aria-label="刷新图谱"
+              aria-label={uiText("ui.knowledge.refresh", uiLanguage)}
               disabled={busy || loading}
               onClick={refresh}
               type="button"
             >
-              {loading && loadedOnce ? "刷新中…" : "刷新图谱"}
+              {loading && loadedOnce ? uiText("ui.knowledge.refreshing", uiLanguage) : uiText("ui.knowledge.refresh", uiLanguage)}
             </button>
           </div>
           {loading ? (
             <p className="graph-status" role="status">
-              {loadedOnce ? "正在刷新…" : "正在加载图谱…"}
+              {loadedOnce ? uiText("ui.knowledge.statusRefreshing", uiLanguage) : uiText("ui.knowledge.statusLoading", uiLanguage)}
             </p>
           ) : null}
           {sseDisconnected ? (
             <p className="graph-status" role="status">
-              实时同步已断开，正在重连…可手动刷新。
+              {uiText("ui.knowledge.sseDisconnected", uiLanguage)}
             </p>
           ) : null}
         </div>
@@ -312,21 +314,29 @@ export function KnowledgeGraphPanel({
               onClick={() => setTab("detail")}
               type="button"
             >
-              详情
+              {uiText("ui.knowledge.detailTab", uiLanguage)}
             </button>
             <button
               className={tab === "canon" ? "is-active" : ""}
               onClick={() => setTab("canon")}
               type="button"
             >
-              正史审核{proposals.length > 0 ? ` · ${proposals.length}` : ""}
+              {proposals.length > 0
+                ? uiText("ui.knowledge.canonTabCount", uiLanguage, {
+                    count: String(proposals.length),
+                  })
+                : uiText("ui.knowledge.canonTab", uiLanguage)}
             </button>
             <button
               className={tab === "articles" ? "is-active" : ""}
               onClick={() => setTab("articles")}
               type="button"
             >
-              文章{snapshot.articles.length > 0 ? ` · ${snapshot.articles.length}` : ""}
+              {snapshot.articles.length > 0
+                ? uiText("ui.knowledge.articlesTabCount", uiLanguage, {
+                    count: String(snapshot.articles.length),
+                  })
+                : uiText("ui.knowledge.articlesTab", uiLanguage)}
             </button>
           </div>
 
@@ -334,6 +344,7 @@ export function KnowledgeGraphPanel({
             <GraphEditForm
               mode={mode}
               busy={busy}
+              uiLanguage={uiLanguage}
               entities={snapshot.entities}
               selected={selected}
               selectedClaims={selectedClaims}
@@ -348,13 +359,13 @@ export function KnowledgeGraphPanel({
             selected ? (
               <div className="graph-detail">
                 <div className="inspector-heading">
-                  <p className="eyebrow">实体 / Entity</p>
+                  <p className="eyebrow">{uiText("ui.knowledge.entityEyebrow", uiLanguage)}</p>
                   <span className="graph-kind-tag">{ENTITY_KIND_LABELS[selected.entityKind]}</span>
                 </div>
                 <h3>{selected.name}</h3>
-                <p className="graph-summary">{selected.summary || "（暂无摘要）"}</p>
+                <p className="graph-summary">{selected.summary || uiText("ui.knowledge.noSummary", uiLanguage)}</p>
 
-                <p className="eyebrow">事实 / Claims</p>
+                <p className="eyebrow">{uiText("ui.knowledge.claimsEyebrow", uiLanguage)}</p>
                 {visibleClaims.length > 0 ? (
                   <ul className="graph-claim-list">
                     {visibleClaims.map((claim) => (
@@ -377,7 +388,7 @@ export function KnowledgeGraphPanel({
                     ))}
                   </ul>
                 ) : (
-                  <p className="graph-empty-line">该实体还没有 Claim。</p>
+                  <p className="graph-empty-line">{uiText("ui.knowledge.noClaims", uiLanguage)}</p>
                 )}
                 {selectedClaims.length > 5 && !showAllClaims ? (
                   <button
@@ -385,7 +396,9 @@ export function KnowledgeGraphPanel({
                     onClick={() => setShowAllClaims(true)}
                     type="button"
                   >
-                    显示全部 {selectedClaims.length} 条
+                    {uiText("ui.knowledge.showAll", uiLanguage, {
+                      count: String(selectedClaims.length),
+                    })}
                   </button>
                 ) : null}
                 {reviewClaim ? (
@@ -398,7 +411,7 @@ export function KnowledgeGraphPanel({
                   />
                 ) : null}
 
-                <p className="eyebrow">关系 / Relations</p>
+                <p className="eyebrow">{uiText("ui.knowledge.relationsEyebrow", uiLanguage)}</p>
                 {selectedRelations.length > 0 ? (
                   <ul className="graph-claim-list">
                     {selectedRelations.map((relation) => (
@@ -413,10 +426,10 @@ export function KnowledgeGraphPanel({
                     ))}
                   </ul>
                 ) : (
-                  <p className="graph-empty-line">暂无关系。</p>
+                  <p className="graph-empty-line">{uiText("ui.knowledge.noRelations", uiLanguage)}</p>
                 )}
 
-                <p className="eyebrow">文章 / Articles</p>
+                <p className="eyebrow">{uiText("ui.knowledge.articlesEyebrow", uiLanguage)}</p>
                 {relatedArticles.length > 0 ? (
                   <ul className="graph-claim-list">
                     {relatedArticles.map((article) => (
@@ -439,19 +452,20 @@ export function KnowledgeGraphPanel({
                     ))}
                   </ul>
                 ) : (
-                  <p className="graph-empty-line">暂无关联文章。</p>
+                  <p className="graph-empty-line">{uiText("ui.knowledge.noRelatedArticles", uiLanguage)}</p>
                 )}
               </div>
             ) : (
               <div className="graph-empty">
                 <span aria-hidden="true">◇</span>
-                <p>点击左侧节点查看实体详情。</p>
+                <p>{uiText("ui.knowledge.selectHint", uiLanguage)}</p>
               </div>
             )
           ) : tab === "articles" ? (
             <GraphArticleList
               articles={snapshot.articles}
               busy={busy}
+              uiLanguage={uiLanguage}
               expandedArticleId={expandedArticleId}
               isOwner={qualification?.membershipRole === "owner"}
               onQualify={qualifyArticle}
@@ -491,9 +505,11 @@ function GraphCanvas({
   entities,
   relations,
   selectedId,
+  uiLanguage,
   onSelect,
 }: {
   entities: readonly GraphEntity[];
+  uiLanguage: UiLanguage;
   relations: readonly {
     id: string;
     subjectEntityId: string;
@@ -507,7 +523,7 @@ function GraphCanvas({
     return (
       <div className="graph-empty graph-canvas-empty">
         <span aria-hidden="true">◇</span>
-        <p>这个世界还没有结构化知识。</p>
+        <p>{uiText("ui.knowledge.emptyGraph", uiLanguage)}</p>
       </div>
     );
   }
@@ -538,7 +554,7 @@ function GraphCanvas({
 
   return (
     <svg
-      aria-label="知识图谱视图"
+      aria-label={uiText("ui.knowledge.graphViewAria", uiLanguage)}
       className="graph-canvas"
       onClick={(event) => {
         if (event.target === event.currentTarget) onSelect(null);
@@ -609,6 +625,7 @@ function GraphCanvas({
 function GraphEditForm({
   mode,
   busy,
+  uiLanguage,
   entities,
   selected,
   selectedClaims,
@@ -617,6 +634,7 @@ function GraphEditForm({
 }: {
   mode: NonNullable<EditMode>;
   busy: boolean;
+  uiLanguage: UiLanguage;
   entities: readonly GraphEntity[];
   selected: GraphEntity | null;
   selectedClaims: readonly { id: string; predicate: string; objectValue: string }[];
@@ -671,10 +689,10 @@ function GraphEditForm({
   }
 
   const titles: Record<NonNullable<EditMode>, string> = {
-    entity: "新建实体",
-    summary: "编辑摘要",
-    relation: "建立关系",
-    claim: "提交 Claim",
+    entity: uiText("ui.knowledge.newEntity", uiLanguage),
+    summary: uiText("ui.knowledge.editSummary", uiLanguage),
+    relation: uiText("ui.knowledge.addRelation", uiLanguage),
+    claim: uiText("ui.knowledge.submitClaim", uiLanguage),
   };
 
   return (
@@ -683,7 +701,7 @@ function GraphEditForm({
       {mode === "entity" ? (
         <>
           <label>
-            名称
+            {uiText("ui.knowledge.fieldName", uiLanguage)}
             <input
               onChange={(event) => setName(event.target.value)}
               required
@@ -691,7 +709,7 @@ function GraphEditForm({
             />
           </label>
           <label>
-            类型
+            {uiText("ui.knowledge.fieldKind", uiLanguage)}
             <select
               onChange={(event) =>
                 setKind(event.target.value as GraphEntity["entityKind"])
@@ -707,7 +725,7 @@ function GraphEditForm({
       ) : null}
       {mode === "entity" || mode === "summary" ? (
         <label>
-          摘要
+          {uiText("ui.knowledge.fieldSummary", uiLanguage)}
           <textarea
             onChange={(event) => setSummary(event.target.value)}
             rows={3}
@@ -718,13 +736,13 @@ function GraphEditForm({
       {mode === "relation" ? (
         <>
           <label>
-            目标实体
+            {uiText("ui.knowledge.fieldTarget", uiLanguage)}
             <select
               onChange={(event) => setTargetId(event.target.value)}
               required
               value={targetId}
             >
-              <option value="">选择目标…</option>
+              <option value="">{uiText("ui.knowledge.selectTarget", uiLanguage)}</option>
               {entities
                 .filter((entity) => entity.id !== selected?.id)
                 .map((entity) => (
@@ -733,22 +751,22 @@ function GraphEditForm({
             </select>
           </label>
           <label>
-            谓词
+            {uiText("ui.knowledge.fieldPredicate", uiLanguage)}
             <input
               onChange={(event) => setPredicate(event.target.value)}
-              placeholder="如：知晓、隶属于、统治"
+              placeholder={uiText("ui.knowledge.predicatePlaceholder", uiLanguage)}
               required
               value={predicate}
             />
           </label>
           <label>
-            来源 Claim
+            {uiText("ui.knowledge.fieldSourceClaim", uiLanguage)}
             <select
               onChange={(event) => setClaimId(event.target.value)}
               required
               value={claimId}
             >
-              <option value="">选择来源 Claim…</option>
+              <option value="">{uiText("ui.knowledge.selectSourceClaim", uiLanguage)}</option>
               {selectedClaims.map((claim) => (
                 <option key={claim.id} value={claim.id}>
                   {claim.predicate}：{claim.objectValue}
@@ -761,7 +779,7 @@ function GraphEditForm({
       {mode === "claim" ? (
         <>
           <label>
-            谓词
+            {uiText("ui.knowledge.fieldPredicate", uiLanguage)}
             <input
               onChange={(event) => setPredicate(event.target.value)}
               required
@@ -769,7 +787,7 @@ function GraphEditForm({
             />
           </label>
           <label>
-            值
+            {uiText("ui.knowledge.fieldValue", uiLanguage)}
             <input
               onChange={(event) => setObjectValue(event.target.value)}
               required
@@ -777,27 +795,27 @@ function GraphEditForm({
             />
           </label>
           <label>
-            层级
+            {uiText("ui.knowledge.fieldScope", uiLanguage)}
             <select onChange={(event) => setScope(event.target.value)} value={scope}>
-              <option value="story">story（故事）</option>
-              <option value="world">world（世界）</option>
+              <option value="story">{uiText("ui.knowledge.scopeStory", uiLanguage)}</option>
+              <option value="world">{uiText("ui.knowledge.scopeWorld", uiLanguage)}</option>
             </select>
           </label>
           <label>
-            真值状态
+            {uiText("ui.knowledge.fieldTruthStatus", uiLanguage)}
             <select
               onChange={(event) => setTruthStatus(event.target.value)}
               value={truthStatus}
             >
-              <option value="mentioned">mentioned（提及）</option>
-              <option value="record_confirmed">record_confirmed（记录确认）</option>
+              <option value="mentioned">{uiText("ui.knowledge.truthMentioned", uiLanguage)}</option>
+              <option value="record_confirmed">{uiText("ui.knowledge.truthRecordConfirmed", uiLanguage)}</option>
             </select>
           </label>
         </>
       ) : null}
       <div className="graph-edit-actions">
-        <button disabled={busy} type="submit">{busy ? "处理中" : "确认"}</button>
-        <button onClick={onCancel} type="button">取消</button>
+        <button disabled={busy} type="submit">{busy ? uiText("ui.knowledge.busy", uiLanguage) : uiText("ui.knowledge.confirm", uiLanguage)}</button>
+        <button onClick={onCancel} type="button">{uiText("ui.knowledge.cancel", uiLanguage)}</button>
       </div>
     </form>
   );
@@ -846,7 +864,7 @@ function CanonReviewList({
         {mappingPanel}
         <div className="graph-empty">
           <span aria-hidden="true">◇</span>
-          <p>当前没有待审核的正史提案。</p>
+          <p>{uiText("ui.knowledge.noProposals", uiLanguage)}</p>
         </div>
       </div>
     );
@@ -859,11 +877,11 @@ function CanonReviewList({
         <li className="canon-card" key={proposal.id}>
           <div className="inspector-heading">
             <span className="graph-kind-tag">
-              {proposal.targetLevel === "worldline" ? "世界线级" : "故事级"}
+              {proposal.targetLevel === "worldline" ? uiText("ui.knowledge.levelWorldline", uiLanguage) : uiText("ui.knowledge.levelStory", uiLanguage)}
             </span>
             <small>{proposal.proposedBy}</small>
           </div>
-          <p>{proposal.rationale || "（无理由说明）"}</p>
+          <p>{proposal.rationale || uiText("ui.knowledge.noRationale", uiLanguage)}</p>
           <button
             className="graph-article-toggle"
             onClick={() =>
@@ -871,7 +889,7 @@ function CanonReviewList({
             }
             type="button"
           >
-            {expandedId === proposal.id ? "收起详情" : "查看详情"}
+            {expandedId === proposal.id ? uiText("ui.knowledge.collapse", uiLanguage) : uiText("ui.knowledge.expand", uiLanguage)}
           </button>
           {expandedId === proposal.id ? (
             <>
@@ -885,7 +903,7 @@ function CanonReviewList({
                     </li>
                   );
                 })}
-                {proposal.articleId ? <li><small>关联文章：{proposal.articleId}</small></li> : null}
+                {proposal.articleId ? <li><small>{uiText("ui.knowledge.relatedArticleLabel", uiLanguage)}{proposal.articleId}</small></li> : null}
               </ul>
               <CanonDecisionPanel
                 busy={busy}
@@ -1194,6 +1212,7 @@ function CanonDecisionPanel({
 function GraphArticleList({
   articles,
   busy,
+  uiLanguage,
   expandedArticleId,
   isOwner,
   onQualify,
@@ -1201,6 +1220,7 @@ function GraphArticleList({
 }: {
   articles: readonly GraphArticle[];
   busy: boolean;
+  uiLanguage: UiLanguage;
   expandedArticleId: string | null;
   isOwner: boolean;
   onQualify: (
@@ -1213,7 +1233,7 @@ function GraphArticleList({
     return (
       <div className="graph-empty">
         <span aria-hidden="true">◇</span>
-        <p>这个世界还没有文章。</p>
+        <p>{uiText("ui.knowledge.noArticles", uiLanguage)}</p>
       </div>
     );
   }
@@ -1246,7 +1266,7 @@ function GraphArticleList({
               <p className="graph-article-body">{article.body}</p>
             ) : null}
             {expandedArticleId === article.id && !article.body ? (
-              <p className="graph-empty-line">正文待授权后可见。</p>
+              <p className="graph-empty-line">{uiText("ui.knowledge.bodyLocked", uiLanguage)}</p>
             ) : null}
             {isOwner ? (
               <div className="graph-edit-actions">

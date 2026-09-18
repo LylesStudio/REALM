@@ -4,7 +4,11 @@
 
 [简体中文](./README.md) · [English](./README.en.md) · [日本語](./README.ja.md)
 
-![REALM WebUI 世界の入口](./public/screenshots/webui-home.png)
+![REALM WebUI 世界の入口](./public/screenshots/webui-home.ja.png)
+
+デモ世界でキャラクターと進める様子（界面は日本語。世界内テキストの言語は世界の設定に従います）：
+
+![REALM WebUI 記録ビュー](./public/screenshots/webui-record.ja.png)
 
 > ランチャーをダブルクリックして案内に従うと、上の世界の入口がブラウザに開きます。初回起動時、ランチャーが不足している環境を確認し、インストール前に必ず確認します。
 

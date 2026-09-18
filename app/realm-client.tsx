@@ -5,7 +5,8 @@ import Link from "next/link";
 import { EventTimeline } from "./components/event-timeline";
 import { BranchTreePanel } from "./components/branch-tree-panel";
 import { LobbyPanel } from "./components/lobby-panel";
-import { ThemeToggle } from "./components/theme-toggle";
+import { LanguageMenu } from "./components/language-menu.tsx";
+import { ThemeToggle } from "./components/theme-toggle.tsx";
 import { KnowledgeGraphPanel } from "./components/knowledge-graph-panel";
 import { createMemoryRefreshScheduler } from "./memory-refresh";
 import { LibraryPanel } from "./components/library-panel";
@@ -31,6 +32,10 @@ import {
   uiText,
   type UiLanguage,
 } from "../modules/i18n/public.ts";
+import {
+  readUiLanguage,
+  subscribeUiLanguage,
+} from "./ui-language.ts";
 import {
   createOptimisticEvent,
   lastCommittedOrdinal,
@@ -713,13 +718,15 @@ export function RealmClient() {
         if (typeof name === "string" && name.trim()) setPlayerDisplayName(name.trim());
       })
       .catch(() => {});
-    setUiLanguage(
-      normalizeUiLanguage(window.localStorage.getItem("realm-ui-language")),
-    );
+    // 首访按浏览器/系统语言检测（readUiLanguage 内部惰性持久化）。
+    setUiLanguage(readUiLanguage());
     return () => {
       mounted.current = false;
     };
   }, [loadLibrary, loadRecord]);
+
+  // 语言切换同步：header 菜单 / 设置页 / 登录页写同一存储并广播事件。
+  useEffect(() => subscribeUiLanguage(() => setUiLanguage(readUiLanguage())), []);
 
   useEffect(() => {
     envelopeRef.current = envelope;
@@ -1219,6 +1226,7 @@ export function RealmClient() {
           <Link className="header-settings-link" href="/settings" aria-label={uiText("ui.header.settingsAria", uiLanguage)}>
             {uiText("ui.header.settings", uiLanguage)}
           </Link>
+          <LanguageMenu uiLanguage={uiLanguage} />
           <ThemeToggle uiLanguage={uiLanguage} />
           {envelope.viewer.membershipRole === "observer" ? (
             <span className="view-mode is-narrator">

@@ -1,18 +1,22 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { LanguageMenu } from "../components/language-menu.tsx";
+import { readUiLanguage, subscribeUiLanguage } from "../ui-language.ts";
 
 export default function LoginPage() {
   const [token, setToken] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // 登录页在会话之外：读取本机最近选择的界面语言，缺省中文。
-  const [language] = useState<UiLanguage>(() => {
-    if (typeof window === "undefined") return "zh-CN";
-    const saved = window.localStorage.getItem("realm-ui-language");
-    return saved === "en" || saved === "ja" ? saved : "zh-CN";
-  });
+  // 登录页在会话之外：SSR/首帧恒为默认中文（hydration 安全），
+  // 挂载后读取本机语言或按浏览器/系统检测，并订阅切换广播。
+  const [language, setLanguage] = useState<UiLanguage>("zh-CN");
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe 首帧后同步本机语言
+    setLanguage(readUiLanguage());
+    return subscribeUiLanguage(() => setLanguage(readUiLanguage()));
+  }, []);
   const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -44,6 +48,9 @@ export default function LoginPage() {
 
   return (
     <main className="login-screen">
+      <div className="login-language-corner">
+        <LanguageMenu uiLanguage={language} />
+      </div>
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
           <span className="brand-seal" aria-hidden="true">界</span>
