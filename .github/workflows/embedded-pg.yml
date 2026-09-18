@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "pg/*"
+      - "pg-*"
 
 concurrency:
   group: embedded-pg-${{ github.ref }}
@@ -44,25 +44,15 @@ jobs:
           path: realm-embedded-pg-linux-x64-17.10.tar.gz
           if-no-files-found: error
 
-  darwin:
-    name: darwin-${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-            brew_prefix: /opt/homebrew
-          - arch: x64
-            runner: macos-13
-            brew_prefix: /usr/local
-    runs-on: ${{ matrix.runner }}
+  darwin-arm64:
+    name: darwin-arm64
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - name: 基座解包（zonkyio 可重定位 PG 17.10）
         run: |
-          npm pack "@embedded-postgres/darwin-${{ matrix.arch }}@${{ env.NPM_BASE_VERSION }}"
-          tar -xzf "embedded-postgres-darwin-${{ matrix.arch }}-${{ env.NPM_BASE_VERSION }}.tgz"
+          npm pack "@embedded-postgres/darwin-arm64@${{ env.NPM_BASE_VERSION }}"
+          tar -xzf "embedded-postgres-darwin-arm64-${{ env.NPM_BASE_VERSION }}.tgz"
           mkdir -p "$HOME/bundle"
           cp -a package/native/. "$HOME/bundle/"
           ls "$HOME/bundle/bin"
@@ -145,12 +135,12 @@ jobs:
           "$BUNDLE/bin/pg_ctl" -D "$HOME/smoke/data" stop
       - name: 打包
         run: |
-          tar -C "$HOME/bundle" -czf "realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz" .
-          ls -lh "realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz"
+          tar -C "$HOME/bundle" -czf "realm-embedded-pg-darwin-arm64-17.10.tar.gz" .
+          ls -lh "realm-embedded-pg-darwin-arm64-17.10.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
-          name: realm-embedded-pg-darwin-${{ matrix.arch }}-17.10
-          path: realm-embedded-pg-darwin-${{ matrix.arch }}-17.10.tar.gz
+          name: realm-embedded-pg-darwin-arm64-17.10
+          path: realm-embedded-pg-darwin-arm64-17.10.tar.gz
           if-no-files-found: error
 
   windows-x64:
@@ -246,3 +236,30 @@ jobs:
           name: realm-embedded-pg-windows-x64-17.10
           path: realm-embedded-pg-windows-x64-17.10.tar.gz
           if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [linux-x64, darwin-arm64, windows-x64]
+    # 只在打 tag（pg-*）时发布；workflow_dispatch 只产构件方便调试。
+    if: startsWith(github.ref, 'refs/tags/pg-')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: 校验和清单
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz | tee sha256sums.txt
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#pg-}"
+          gh release create "embedded-pg-${VERSION}" \
+            --title "Embedded PostgreSQL ${VERSION} + pgvector" \
+            --notes "realm-embedded-pg artifacts (linux-x64 / darwin-arm64 / windows-x64). macOS 仅支持 Apple Silicon。" \
+            artifacts/*.tar.gz artifacts/sha256sums.txt

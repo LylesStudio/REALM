@@ -16,30 +16,39 @@
 
 まだフォルダを持っていませんか？　ターミナルで1コマンドだけ実行すれば、取得からセットアップまで全部済みます（何かを入れる前に必ず確認します）。
 
-**Linux / macOS：**
+**Linux / macOS（Apple Silicon）：**
 
 ```bash
-curl -fsSL <このリポジトリの scripts/install.sh の raw URL> | bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
 ```
 
-**Windows（PowerShell）：**
+Docker もシステムの PostgreSQL も入れたくない方は `--embedded-pg` を付けてください。プラットフォーム別の組み込み PostgreSQL 17+pgvector アーティファクト（linux-x64 / darwin-arm64 / windows-x64。GitHub Actions ビルド＋SHA256 チェックサム付き）を自動でダウンロードしてユーザーディレクトリに入れます。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
+```
+
+**Windows（PowerShell、x64）：**
 
 ```powershell
-irm <このリポジトリの scripts/install.ps1 の raw URL> | iex
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+```
+
+組み込み PostgreSQL 付きの1コマンド：
+
+```powershell
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
 すでにクローン済みのフォルダ内なら、これだけでもOKです。
 
 ```bash
-bash scripts/install.sh          # Linux / macOS
-.\scripts\install.ps1            # Windows PowerShell
+bash scripts/install.sh --embedded-pg   # Linux / macOS
+.\scripts\install.ps1 -EmbeddedPg       # Windows PowerShell
 ```
 
-Docker もシステムの PostgreSQL も入れたくない方は、`--pg-artifact` を付けるとインストーラーが組み込み PostgreSQL 17+pgvector をユーザーディレクトリに入れます（アーティファクトは GitHub Actions がプラットフォーム別にビルド：linux-x64 / darwin-arm64 / darwin-x64 / windows-x64）。
-
-```bash
-curl -fsSL <raw URL> | bash -s -- --pg-artifact <アーティファクトの tar.gz URL>
-```
+> macOS は Apple Silicon（Mシリーズ）のみ対応です。Intel Mac の場合は Homebrew で PostgreSQL 17 + pgvector をインストールすれば、setup-web が自動で検出します。
+> 上記 raw URL はリポジトリが Public になればすぐ使えます。Private の間は、まずクローンしてからローカルスクリプトを実行してください。
 
 REALMのフォルダをすでに持っている場合は、OSに合わせて起動してください。
 

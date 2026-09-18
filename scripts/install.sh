@@ -19,7 +19,11 @@
 #   REALM_INSTALL_SKIP_NPM=1   stop before npm ci (smoke testing)
 #   REALM_INSTALL_SKIP_SETUP=1 stop before setup-web.sh (smoke testing)
 #   --pg-artifact <url|path>   install the embedded PostgreSQL 17+pgvector
-#                              bundle (linux-x64) via scripts/embedded-pg.mjs
+#                              bundle via scripts/embedded-pg.mjs
+#   --embedded-pg                resolve the artifact automatically from the
+#                              GitHub Release for this platform
+#                              (linux-x64 / darwin-arm64 / windows-x64;
+#                              macOS requires Apple Silicon)
 set -euo pipefail
 
 MIN_NODE="22.13.0"
@@ -27,18 +31,20 @@ REALM_HOME="${REALM_HOME:-$HOME/.realm}"
 APP_DIR="$REALM_HOME/app"
 REF="${REALM_INSTALL_REF:-main}"
 AUTO_YES=0
+EMBEDDED_PG=0
 PG_ARTIFACT="${REALM_PG_ARTIFACT:-}"
 args=()
 for arg in "$@"; do
   [[ "$arg" == "--yes" ]] && AUTO_YES=1
   args+=("$arg")
 done
-# extract --pg-artifact <value>（同时从透传给 setup-web 的参数中剔除）
+# extract installer-owned flags（同时从透传给 setup-web 的参数中剔除）
 next_is_pg=0
 SETUP_ARGS=()
 for arg in "${args[@]}"; do
   if [[ "$next_is_pg" == 1 ]]; then PG_ARTIFACT="$arg"; next_is_pg=0; continue; fi
   if [[ "$arg" == "--pg-artifact" ]]; then next_is_pg=1; continue; fi
+  if [[ "$arg" == "--embedded-pg" ]]; then EMBEDDED_PG=1; continue; fi
   SETUP_ARGS+=("$arg")
 done
 
@@ -170,14 +176,44 @@ fi
 log "installing npm dependencies (ci)"
 npm --prefix "$APP_DIR" ci
 
-# --- 4. Embedded PostgreSQL (optional, explicit opt-in) -------------------------
+# --- 4. Embedded PostgreSQL（--embedded-pg 自动解析 / --pg-artifact 显式指定） ---
+PG_SHA_URL=""
+if [[ "$EMBEDDED_PG" == 1 && -z "$PG_ARTIFACT" ]]; then
+  PG_ART_VERSION="17.10"
+  case "$(uname -s)" in
+    Linux)
+      [[ "$(uname -m)" == "x86_64" ]] \
+        || die "--embedded-pg: no prebuilt artifact for Linux/$(uname -m) (available: linux-x64)"
+      PG_PLATFORM="linux-x64" ;;
+    Darwin)
+      [[ "$(uname -m)" == "arm64" ]] \
+        || die "--embedded-pg: macOS 仅支持 Apple Silicon（darwin-arm64）；Intel Mac 请用 Homebrew 安装 PostgreSQL 17 + pgvector"
+      PG_PLATFORM="darwin-arm64" ;;
+    *) die "--embedded-pg: unsupported OS: $(uname -s)" ;;
+  esac
+  PG_BASE="${REALM_PG_RELEASE_BASE:-https://github.com/Silver-Aurora/REALM/releases/download/embedded-pg-${PG_ART_VERSION}}"
+  PG_ARTIFACT="${PG_BASE}/realm-embedded-pg-${PG_PLATFORM}-${PG_ART_VERSION}.tar.gz"
+  PG_SHA_URL="${PG_BASE}/sha256sums.txt"
+  log "embedded PostgreSQL artifact: $PG_ARTIFACT"
+  confirm "Download embedded PostgreSQL ${PG_ART_VERSION} + pgvector (${PG_PLATFORM}, ~30-50MB) from GitHub Releases and install it under ~/.local/realm-pgsql?" \
+    || die "aborted"
+fi
+
 if [[ -n "$PG_ARTIFACT" ]]; then
   pg_tmp="$PG_ARTIFACT"
   if [[ "$PG_ARTIFACT" == http* ]]; then
-    pg_tmp="$(mktemp)"
+    pg_tmp="$(mktemp "${TMPDIR:-/tmp}/realm-pg-artifact.XXXXXX.tar.gz")"
     trap 'rm -f "$pg_tmp"' EXIT
-    log "downloading embedded PostgreSQL artifact"
+    log "downloading $PG_ARTIFACT"
     curl -fsSL "$PG_ARTIFACT" -o "$pg_tmp" || die "failed to download $PG_ARTIFACT"
+    if [[ -n "$PG_SHA_URL" ]]; then
+      sums_tmp="$(mktemp)"
+      curl -fsSL "$PG_SHA_URL" -o "$sums_tmp" || die "failed to download $PG_SHA_URL"
+      ( cd "$(dirname "$pg_tmp")" \
+          && grep " $(basename "$PG_ARTIFACT")\$" "$sums_tmp" | sed "s| .*$|  $(basename "$pg_tmp")|" | sha256sum -c - ) \
+        || die "artifact checksum mismatch"
+      rm -f "$sums_tmp"
+    fi
   fi
   if node "$APP_DIR/scripts/embedded-pg.mjs" info >/dev/null 2>&1; then
     log "embedded PostgreSQL already installed; skipping (--pg-artifact kept as update path)"

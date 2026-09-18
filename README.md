@@ -16,30 +16,39 @@
 
 还没有项目文件夹？一条终端命令即可拉取并完成全部设置（安装任何内容前都会先问你）：
 
-**Linux / macOS：**
+**Linux / macOS（Apple Silicon）：**
 
 ```bash
-curl -fsSL <本仓库 scripts/install.sh 的 raw 地址> | bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
 ```
 
-**Windows（PowerShell）：**
+没有 Docker 也不想装系统级 PostgreSQL？加 `--embedded-pg`，安装器会自动下载对应平台的嵌入式 PostgreSQL 17+pgvector 构件（linux-x64 / darwin-arm64 / windows-x64，由 GitHub Actions 构建并附 SHA256 校验）装进用户目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
+```
+
+**Windows（PowerShell，x64）：**
 
 ```powershell
-irm <本仓库 scripts/install.ps1 的 raw 地址> | iex
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+```
+
+带嵌入式 PostgreSQL 的一条命令：
+
+```powershell
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
 或者在你已经克隆好的文件夹里运行：
 
 ```bash
-bash scripts/install.sh        # Linux / macOS
-.\scripts\install.ps1          # Windows PowerShell
+bash scripts/install.sh --embedded-pg   # Linux / macOS
+.\scripts\install.ps1 -EmbeddedPg       # Windows PowerShell
 ```
 
-没有 Docker 也不想装系统级 PostgreSQL 的玩家，可以加 `--pg-artifact` 让安装器把免安装的嵌入式 PostgreSQL 17+pgvector 装进用户目录（构件由 GitHub Actions 按平台产出：linux-x64 / darwin-arm64 / darwin-x64 / windows-x64）：
-
-```bash
-curl -fsSL <raw 地址> | bash -s -- --pg-artifact <构件 tar.gz 的地址>
-```
+> macOS 仅支持 Apple Silicon（M 系芯片）；Intel Mac 请用 Homebrew 安装 PostgreSQL 17 + pgvector，setup-web 会自动探测到。
+> 以上 raw 地址在仓库转为 Public 后立即可用；私有阶段请先克隆再运行本地脚本。
 
 如果你已经拿到了 REALM 项目文件夹，按系统选择一个入口：
 

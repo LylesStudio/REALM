@@ -16,30 +16,39 @@ Inside a demo world with its cast (interface in English; world content language 
 
 Don't have the project folder yet? One terminal command fetches it and sets everything up (it asks before installing anything):
 
-**Linux / macOS:**
+**Linux / macOS (Apple Silicon):**
 
 ```bash
-curl -fsSL <raw URL of scripts/install.sh in this repo> | bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+No Docker and no system PostgreSQL? Add `--embedded-pg` and the installer downloads the per-platform embedded PostgreSQL 17+pgvector artifact (linux-x64 / darwin-arm64 / windows-x64, built by GitHub Actions with SHA256 checksums) into your user directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
+```
+
+**Windows (PowerShell, x64):**
 
 ```powershell
-irm <raw URL of scripts/install.ps1 in this repo> | iex
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+```
+
+One-liner with the embedded PostgreSQL:
+
+```powershell
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
 Or from a folder you already cloned:
 
 ```bash
-bash scripts/install.sh          # Linux / macOS
-.\scripts\install.ps1            # Windows PowerShell
+bash scripts/install.sh --embedded-pg   # Linux / macOS
+.\scripts\install.ps1 -EmbeddedPg       # Windows PowerShell
 ```
 
-Without Docker and without a system PostgreSQL, add `--pg-artifact` to let the installer drop a no-install embedded PostgreSQL 17+pgvector into your user directory (artifacts are built per platform by GitHub Actions: linux-x64 / darwin-arm64 / darwin-x64 / windows-x64):
-
-```bash
-curl -fsSL <raw URL> | bash -s -- --pg-artifact <tarball URL of the artifact>
-```
+> macOS requires Apple Silicon (M-series). On an Intel Mac, install PostgreSQL 17 + pgvector with Homebrew and setup-web will detect it.
+> The raw URLs above work as soon as the repository is made Public; while it is private, clone first and run the local scripts.
 
 If you already have the REALM project folder, choose the entry point for your system.
 

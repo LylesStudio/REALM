@@ -15,6 +15,7 @@
 [CmdletBinding()]
 param(
   [switch]$Yes,
+  [switch]$EmbeddedPg,
   [string]$PgArtifact
 )
 
@@ -129,13 +130,36 @@ try {
   Pop-Location
 }
 
-# --- 4. Embedded PostgreSQL（构件为 windows-x64 时本机直装） -------------------
+# --- 4. Embedded PostgreSQL（-EmbeddedPg 自动解析 / -PgArtifact 显式指定） ------
+$pgShaUrl = $null
+if ($EmbeddedPg -and -not $PgArtifact) {
+  $pgArtVersion = "17.10"
+  $arch = $env:PROCESSOR_ARCHITECTURE
+  if ($arch -ne 'AMD64') {
+    throw "-EmbeddedPg: no prebuilt artifact for Windows/$arch (available: windows-x64; ARM64 请用本地 PostgreSQL 17 + pgvector 或 Docker)"
+  }
+  $pgBase = if ($env:REALM_PG_RELEASE_BASE) { $env:REALM_PG_RELEASE_BASE } else { "https://github.com/Silver-Aurora/REALM/releases/download/embedded-pg-$pgArtVersion" }
+  $PgArtifact = "$pgBase/realm-embedded-pg-windows-x64-$pgArtVersion.tar.gz"
+  $pgShaUrl = "$pgBase/sha256sums.txt"
+  Write-RealmLog "embedded PostgreSQL artifact: $PgArtifact"
+  if (-not (Confirm-Realm "Download embedded PostgreSQL $pgArtVersion + pgvector (windows-x64, ~31MB) from GitHub Releases and install it under ~\.local\realm-pgsql?")) {
+    throw 'aborted'
+  }
+}
+
 if ($PgArtifact) {
   $pgTmp = $PgArtifact
   if ($PgArtifact -like 'http*') {
     $pgTmp = Join-Path ([IO.Path]::GetTempPath()) 'realm-embedded-pg.tar.gz'
-    Write-RealmLog 'downloading embedded PostgreSQL artifact'
+    Write-RealmLog "downloading $PgArtifact"
     Invoke-WebRequest -UseBasicParsing -Uri $PgArtifact -OutFile $pgTmp
+    if ($pgShaUrl) {
+      $sumsTmp = Join-Path ([IO.Path]::GetTempPath()) 'realm-pg-sha256sums.txt'
+      Invoke-WebRequest -UseBasicParsing -Uri $pgShaUrl -OutFile $sumsTmp
+      $expected = (Select-String -Path $sumsTmp -Pattern " $($PgArtifact.Split('/')[-1])`$").Line.Split(' ')[0]
+      $actual = (Get-FileHash -Algorithm SHA256 $pgTmp).Hash.ToLowerInvariant()
+      if ($expected -ne $actual) { throw "artifact checksum mismatch (expected $expected, got $actual)" }
+    }
   }
   & node (Join-Path $AppDir 'scripts/embedded-pg.mjs') info 2>$null
   if ($LASTEXITCODE -eq 0) {

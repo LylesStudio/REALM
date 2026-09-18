@@ -54,3 +54,19 @@ test("install.sh exposes the embedded PG path as explicit opt-in", () => {
   // 透传前剔除自定义参数，setup-web 不收到未知 flag。
   assert.match(installer, /SETUP_ARGS/);
 });
+
+test("install.sh --embedded-pg resolves the platform artifact with integrity check", () => {
+  assert.match(installer, /--embedded-pg/);
+  assert.match(installer, /realm-embedded-pg-\$\{PG_PLATFORM\}/);
+  assert.match(installer, /sha256sum -c/);
+  // mac 仅 Apple Silicon；Intel Mac 诚实拒绝（无 darwin-x64 构件）。
+  assert.match(installer, /Apple Silicon/);
+  assert.doesNotMatch(installer, /darwin-x64/);
+});
+
+test("install.ps1 -EmbeddedPg resolves windows-x64 with integrity check", () => {
+  const ps1 = readFileSync(new URL("../scripts/install.ps1", import.meta.url), "utf8");
+  assert.match(ps1, /EmbeddedPg/);
+  assert.match(ps1, /realm-embedded-pg-windows-x64/);
+  assert.match(ps1, /Get-FileHash/);
+});
