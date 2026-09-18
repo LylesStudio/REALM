@@ -34,6 +34,20 @@ test("setup-web detects the embedded install on linux", () => {
   assert.match(setupWeb, /"linux"/);
 });
 
+test("setup-web resolves Windows .exe/.cmd/.bat executables", () => {
+  // 嵌入式构件的 pg_config 是 .cmd 批处理 shim，真实安装是 .exe——都要认。
+  assert.match(setupWeb, /resolveExecutablePath/);
+  assert.match(setupWeb, /\.cmd/);
+  assert.match(setupWeb, /\.bat/);
+});
+
+test("install.ps1 installs the embedded artifact instead of refusing", () => {
+  const ps1 = readFileSync(new URL("../scripts/install.ps1", import.meta.url), "utf8");
+  assert.match(ps1, /embedded-pg\.mjs/);
+  assert.match(ps1, /install --artifact/);
+  assert.doesNotMatch(ps1, /linux-x64 only/);
+});
+
 test("install.sh exposes the embedded PG path as explicit opt-in", () => {
   assert.match(installer, /--pg-artifact/);
   assert.match(installer, /embedded-pg\.mjs/);

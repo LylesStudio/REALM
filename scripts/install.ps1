@@ -9,9 +9,9 @@
 # - all state lives under %USERPROFILE%\.realm; no elevation, no system changes;
 # - re-running updates an existing clone in place.
 #
-# The embedded PostgreSQL artifact is linux-x64 only for now; on Windows this
-# script expects a local PostgreSQL 17 + pgvector install or Docker, exactly
-# like scripts/setup-web.ps1 does.
+# With -PgArtifact <url|path>, the installer drops the embedded PostgreSQL
+# 17 + pgvector bundle (windows-x64) into the user directory, same semantics
+# as install.sh --pg-artifact on Linux.
 [CmdletBinding()]
 param(
   [switch]$Yes,

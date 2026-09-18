@@ -84,11 +84,12 @@ jobs:
       - name: 客户端闭包（brew psql/createdb/pg_isready + dylib 重定向）
         run: |
           set -e
+          BREW_BIN="$(brew --prefix postgresql@17)/bin"
           BREW_LIB="$(brew --prefix postgresql@17)/lib"
           BUNDLE="$HOME/bundle"
           mkdir -p "$BUNDLE/deps"
           for tool in psql createdb pg_isready; do
-            cp "$BREW_LIB/$tool" "$BUNDLE/bin/$tool"
+            cp "$BREW_BIN/$tool" "$BUNDLE/bin/$tool"
             install_name_tool -change "$BREW_LIB/libpq.5.dylib" @rpath/libpq.5.dylib "$BUNDLE/bin/$tool" || true
             install_name_tool -add_rpath @loader_path/../lib "$BUNDLE/bin/$tool" || true
           done
