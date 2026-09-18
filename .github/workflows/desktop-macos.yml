@@ -1,29 +1,9 @@
 name: Desktop macOS (unsigned preview)
 
 # 构建只使用公开 pinned 来源，不读取 secrets、.env 或用户数据。
+# 公开仓手动触发（push 触发在 GitHub runner 上缺少签名/环境前置）。
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "app/**"
-      - "database/postgres/**"
-      - "launcher/**"
-      - "modules/**"
-      - "public/**"
-      - "scripts/desktop/**"
-      - "scripts/dev-server.mjs"
-      - "scripts/local-postgres.mjs"
-      - "scripts/local-provision-realm-transfer.mjs"
-      - "scripts/postgres-migrate.mjs"
-      - "scripts/postgres-seed-demo.mjs"
-      - "installer/macos/**"
-      - "package.json"
-      - "package-lock.json"
-      - "next.config.ts"
-      - "vite.config.ts"
-      - "postcss.config.mjs"
-      - ".github/workflows/desktop-macos.yml"
 
 permissions:
   contents: read

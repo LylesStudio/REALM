@@ -1,18 +1,9 @@
 name: Desktop Windows x64 (unsigned preview)
 
-# 手动/标记触发；不读取任何 secrets 或 .env（构建只依赖公开官方源与 pin hash）。
+# 手动触发；不读取任何 secrets 或 .env（构建只依赖公开官方源与 pin hash）。
+# 公开仓手动触发（push 触发在 GitHub runner 上缺少环境前置）。
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "launcher/**"
-      - "scripts/desktop/**"
-      - "installer/windows/**"
-      - "scripts/local-postgres.mjs"
-      - "scripts/local-provision-realm-transfer.mjs"
-      - "modules/inference/local-settings.ts"
-      - ".github/workflows/desktop-windows.yml"
 
 permissions:
   contents: read

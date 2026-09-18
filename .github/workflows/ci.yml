@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # 公开仓：CI 依赖本地 PostgreSQL 环境，GitHub runner 上不具备；
+  # 保持手动触发，由维护者在配置好的环境跑。
+  workflow_dispatch:
 
 permissions:
   contents: read
