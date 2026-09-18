@@ -1,5 +1,5 @@
 /**
- * 批次 T9 Canon 回读——Core 纯函数契约（docs/development/T9-CANON-READBACK.md §4.1）。
+ * 批次 T9 Canon 回读——Core 纯函数契约（public documentation §4.1）。
  * 覆盖：晶化入图白名单谓词/空值与超长整条丢弃/顺序确定；世界本体实体 id 确定性。
  */
 import assert from "node:assert/strict";

@@ -41,4 +41,6 @@ function forwardSignal(signal) {
 }
 process.once("SIGINT", () => forwardSignal("SIGINT"));
 process.once("SIGTERM", () => forwardSignal("SIGTERM"));
-child.on("exit", (code) => process.exit(code ?? 0));
+child.once("exit", (code, signal) => {
+  process.exit(stopping ? 0 : code ?? (signal ? 1 : 0));
+});

@@ -1017,7 +1017,7 @@ export function createLocalRecordService(
   }
 
   /**
-   * 批次 T3 角色在场（docs/development/T3-CHARACTER-PRESENCE.md §2.1）：
+   * 批次 T3 角色在场（public documentation §2.1）：
    * public 回合提交后，确定性抽取触发素材 → 候选过滤 → 模型门禁 →
    * 若裁决发声则取发言租约执行 presence 回合。任何失败只留日志，
    * 绝不影响玩家回合（F9）。
@@ -1502,7 +1502,7 @@ export function createLocalRecordService(
   }
 
   /**
-   * 设定结晶（docs/development/SCENE-CRYSTALLIZATION.md）：
+   * 设定结晶（public documentation）：
    * 回合成功后异步提取场景增量并经逻辑一致性裁决后才写回；
    * 任一环节失败都只留日志，绝不中断或污染玩家回合。
    * 同一次结构化提取还带出 bounded 的世界知识/人物设定 growth

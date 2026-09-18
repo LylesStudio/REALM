@@ -1,5 +1,5 @@
 -- REALM LAN Game Lobby：房主在线租约（host lease / heartbeat）
--- （docs/development/LAN-GAME-LOBBY-PLAN.md §八 / 本批 P2 落地）。
+-- （public documentation §八 / 本批 P2 落地）。
 -- lease_expires_at 为服务端时钟权威（CURRENT_TIMESTAMP 计算），客户端
 -- 本地时间绝不决定权威状态；null = 0046 之前的遗留房间，永不自动过期
 -- （既有语义不动）。过期回收是 lazy reap：权威读/写路径（list/join）

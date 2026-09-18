@@ -1,6 +1,6 @@
 /**
  * 批次 T11-A2——图谱失效账本 + graph-specific SSE（规范
- * docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md §六）。
+ * public documentation §六）。
  * 真实临时 PG 库（t.after 强制拆库，迁移 0001–0024 全链）：
  * 事件 schema/cursor 单调；写事务成功产生事件、回滚不产生事件；
  * Last-Event-ID 重放/去重、跨 world/worldline/workspace 不泄露；

@@ -1,5 +1,5 @@
 /**
- * 世界文风系统（docs/development/WORLD-STYLE-SYSTEM.md）。
+ * 世界文风系统（public documentation）。
  *
  * 结构按 key 组织、语言可扩展：TEMPLATES[key][language][style]。
  * 当前仅中文（zh-CN）；批次 Q 的 i18n 只加语言维度，不改 key。

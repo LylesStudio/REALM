@@ -18,7 +18,7 @@ import type { WorldEntityKind } from "../world-knowledge/public.ts";
  * 再经独立的逻辑一致性裁决，全部 fail-closed。
  * 同一次结构化提取还带出 bounded 的世界知识/人物设定 growth 草稿
  * （record 级 record_confirmed，绝不自动升级 canon；仅公共回合落库）。
- * 规范见 docs/development/SCENE-CRYSTALLIZATION.md。
+ * 规范见 public documentation。
  */
 
 /** 场景状态增量；所有字段可选，缺省表示本回合无变化。 */

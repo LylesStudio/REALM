@@ -6,7 +6,7 @@ export type GraphInvalidationQueryable = Pick<PoolClient, "query">;
 /**
  * 批次 T11-A2：图谱/CANON 失效账本（graph_invalidation_events，迁移 0024）。
  *
- * 不变量（docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md §二）：
+ * 不变量（public documentation §二）：
  * - 失效记录与业务写同一事务插入——事务回滚则事件同样回滚；
  * - pg_notify 只是低延迟唤醒（PG 保证提交后才送达），账本才是重放依据；
  * - 事件只携带作用域与 kind/reason，不携带实体/Claim/提案内容。

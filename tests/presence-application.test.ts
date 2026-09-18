@@ -1,5 +1,5 @@
 /**
- * 批次 T3 角色在场——应用层测试（docs/development/T3-CHARACTER-PRESENCE.md §4.2）。
+ * 批次 T3 角色在场——应用层测试（public documentation §4.2）。
  * 覆盖：触发时机（未点名回合自主发声）、预算恰 1/回合、插话优先、
  * restricted/replay 跳过、fail-closed（门禁抛错/在场回合失败）、无素材确定性沉默。
  * 不新增 mock：门禁为内联确定性实现（PresenceAssessor 接口实例）。

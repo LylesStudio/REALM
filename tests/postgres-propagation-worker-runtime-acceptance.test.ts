@@ -1,6 +1,6 @@
 /**
  * 批次 T11-E——public propagation 真实运行验收 harness
- *（规范 docs/development/T11-E-PUBLIC-PROPAGATION-RUNTIME-ACCEPTANCE.md）。
+ *（规范 public documentation）。
  * 与 T11-B 的 runOnce 单测不同：本测试 spawn 当前仓库真实独立进程入口
  * `node --experimental-strip-types scripts/propagation-worker.mjs`，
  * 在隔离临时库 realm_t11e_rt_<uuid>（迁移 0001–0025 全链 + demo seed +

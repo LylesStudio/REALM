@@ -1,5 +1,5 @@
 /**
- * 批次 T7 世界自演——应用层测试（docs/development/T7-OBSERVATION-VISION.md §4.2）。
+ * 批次 T7 世界自演——应用层测试（public documentation §4.2）。
  * 覆盖：start→拍循环→completed 全链落库、stop 拍间收束 cancelled、start 幂等
  * 重入单飞、版本冲突重读重试一次、拍模型失败 fail-closed 且不影响玩家回合、
  * 未装配账本时 startSelfPlay 抛 LOCAL_RUNTIME_NOT_INITIALIZED。

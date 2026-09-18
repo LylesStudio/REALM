@@ -1,5 +1,5 @@
 /**
- * 批次 T3 角色在场（docs/development/T3-CHARACTER-PRESENCE.md）。
+ * 批次 T3 角色在场（public documentation）。
  *
  * 玩家回合提交后，未发声角色可以基于叙事上下文（环境变化、同侪言行、
  * 未响应钩子）主动发声。本模块提供确定性部件：触发素材抽取、候选过滤、

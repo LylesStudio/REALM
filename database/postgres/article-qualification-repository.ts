@@ -16,7 +16,7 @@
  *
  * content hash 永远 DB-side（pgcrypto digest/encode）读取比对，应用层
  * 不把正文读进来算 hash（无界路径禁令）；三 hash 语义见
- * docs/development/ARTICLE-QUALIFICATION-MIGRATION.md。
+ * public documentation。
  */
 import { randomUUID } from "node:crypto";
 import type {

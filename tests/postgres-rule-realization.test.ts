@@ -1,6 +1,6 @@
 /**
  * 批次 T4 规则系统真化——PostgreSQL 集成测试
- * （docs/development/T4-RULE-REALIZATION.md §7）。
+ * （public documentation §7）。
  *
  * 覆盖（临时库 + 全 19 迁移，不新增 mock）：
  * 1. 基础定义装配恰为 2 技能 + 1 资产 + 1 姿态，幂等，判定参数入 metadata；

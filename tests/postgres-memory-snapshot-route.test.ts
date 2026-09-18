@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B4——/api/memory/snapshot 与 /api/memory/delta 生产入口
- * （docs/development/T10-B4-MEMORY-D1-RETIREMENT.md §五）。
+ * （public documentation §五）。
  * 真实临时 PG 库（t.after 拆库，受限 realm_runtime 池走路由）：
  * snapshot 404/400/伪造字段不生效/合法创建全字段；delta 初次为空、新增后
  * 出现增量、update/retract 后 epoch 递进旧 delta stale、伪造 snapshot 404；

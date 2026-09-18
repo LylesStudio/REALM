@@ -7,7 +7,7 @@
  * （started_at 超 5 分钟）return to `pending` on recovery, so a restarted
  * process resumes cleanly.
  *
- * 批次 T11-B 修正（docs/development/T11-B-PROPAGATION-ENABLEMENT-IMPLEMENTATION.md §五）：
+ * 批次 T11-B 修正（public documentation §五）：
  * - claimNext 只按 workspace 入参，领取时返回 job 自带的真实
  *   world/worldline 作用域——不允许 workspace-only 领取串世界；
  * - 拓扑来自 job 的 immutable input 快照（nodes/routes/topologyVersion），

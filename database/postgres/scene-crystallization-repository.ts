@@ -22,7 +22,7 @@ import { gateRecordActive, gateWorldWrite } from "./world-write-gate.ts";
 /**
  * 设定结晶写回仓储：仅裁决通过的增量落库（append-oriented），
  * 裁决拒绝写入 semantic_conflict_evaluations 审计。规范见
- * docs/development/SCENE-CRYSTALLIZATION.md。
+ * public documentation。
  */
 
 export interface SceneCrystallizationScope {

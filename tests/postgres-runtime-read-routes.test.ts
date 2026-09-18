@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B8-A——残余 owner-pool 读路由下沉（files/[id]、settings/language、
- * auth/me）focused 测试（docs/development/T10-B8-A-RUNTIME-READ-ROUTES.md §五）。
+ * auth/me）focused 测试（public documentation §五）。
  * 真实临时 PG（库名 realm_t10b8_*，t.after 强制 DROP）：文件成员隔离与
  * immutable 响应头、语言写回、auth/me gate 两态与 best-effort 回落；
  * 全程 REALM_RUNTIME_DATABASE_URL 受限角色池，零 owner 引用。

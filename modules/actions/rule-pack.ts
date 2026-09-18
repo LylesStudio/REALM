@@ -10,7 +10,7 @@
  * - take_stance：施加姿态效果（账本状态）；
  * - 未定义的能力一律 fail-closed（SKILL/ASSET/STANCE_NOT_AVAILABLE）。
  *
- * metadata 契约与判定参数推导规则见 docs/development/T4-RULE-REALIZATION.md §2.2。
+ * metadata 契约与判定参数推导规则见 public documentation §2.2。
  */
 import { FatalTurnError } from "../runtime/public.ts";
 import type {

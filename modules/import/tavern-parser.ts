@@ -1,7 +1,7 @@
 /**
  * 酒馆格式（Tavern/SillyTavern）角色卡与世界书解析器。
  * 零依赖：PNG chunk 手工扫描；全部 fail-closed，返回类型化错误，绝不半写入。
- * 规范见 docs/development/TAVERN-IMPORT.md。
+ * 规范见 public documentation。
  */
 
 export type TavernImportErrorCode =

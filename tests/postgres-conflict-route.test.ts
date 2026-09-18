@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B2——/api/worldline/conflict causal 分支生产接线
- * （docs/development/T10-B2-CONFLICT-DETECTION.md §四）。
+ * （public documentation §四）。
  * 真实临时 PG 库（t.after 拆库，不污染开发库）：legacy 分支零回归；
  * causal 400/404 各态；成员请求从 DB 读事实（life_state 终止 hard 冲突、
  * dependency 依赖冲突、报告含 DB 独有 claim 证明非客户端注入）；全程零写库。

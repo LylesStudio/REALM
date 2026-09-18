@@ -103,6 +103,7 @@ Record single-writer ──► append-only Events / Observations / Outbox
 
 ## Documentation
 
+- [Desktop installation](./docs/DESKTOP-INSTALLATION.md)
 - [Getting started](./docs/GETTING-STARTED.md)
 - [Configuration](./docs/CONFIGURATION.md)
 - [Self-hosting boundaries](./docs/SELF-HOSTING.md)

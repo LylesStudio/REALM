@@ -6,7 +6,7 @@
  * metadata 判定参数），裁决逻辑复用 createDataDrivenRulePack 唯一实现。
  * 实例内缓存——同一规则包实例（回合级生命周期）内定义只读一次。
  *
- * 规范见 docs/development/T4-RULE-REALIZATION.md §2.3。
+ * 规范见 public documentation §2.3。
  */
 import type { ActionRulePack } from "../../modules/actions/public.ts";
 import {

@@ -3,7 +3,7 @@
  * 契约（本文件在 T10-B9-A/T10-B21-A 时是 contract-only-deferred 负断言，
  * 历史形态见 Git 记录）。
  *
- * T11-B（docs/development/T11-B-PROPAGATION-ENABLEMENT-IMPLEMENTATION.md）
+ * T11-B（public documentation）
  * 已真实接线：Canon merge 原子入队、独立 Worker、semantic review 路由。
  * 本测试锚定接线面恰好是规范白名单——多一处未知调用点即漂移；
  * 既有 deterministic preview 纯洁性不动。

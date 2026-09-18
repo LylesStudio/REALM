@@ -1,0 +1,81 @@
+name: Desktop macOS (unsigned preview)
+
+# 构建只使用公开 pinned 来源，不读取 secrets、.env 或用户数据。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "database/postgres/**"
+      - "launcher/**"
+      - "modules/**"
+      - "public/**"
+      - "scripts/desktop/**"
+      - "scripts/dev-server.mjs"
+      - "scripts/local-postgres.mjs"
+      - "scripts/local-provision-realm-transfer.mjs"
+      - "scripts/postgres-migrate.mjs"
+      - "scripts/postgres-seed-demo.mjs"
+      - "installer/macos/**"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.ts"
+      - "vite.config.ts"
+      - "postcss.config.mjs"
+      - ".github/workflows/desktop-macos.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+            arch_tag: darwin-arm64
+            artifact_name: realm-macos-arm64-unsigned-preview
+            experimental: false
+          - runner: macos-15-intel
+            arch: x64
+            arch_tag: darwin-x64
+            artifact_name: realm-macos-x64-unsigned-preview-experimental
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 90
+    env:
+      ARCH_TAG: ${{ matrix.arch_tag }}
+      OUTPUT_DIR: ${{ runner.temp }}/realm-artifacts
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+
+      - name: Run one-click macOS packaging pipeline
+        run: |
+          bash scripts/desktop/package-macos.sh \
+            --arch "$ARCH_TAG" \
+            --output "$OUTPUT_DIR"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ runner.temp }}/realm-artifacts/realm-*-unsigned-preview.dmg
+            ${{ runner.temp }}/realm-artifacts/realm-*-SHA256.txt
+            ${{ runner.temp }}/realm-artifacts/inventory.json
+            ${{ runner.temp }}/realm-artifacts/SBOM.cdx.json
+            ${{ runner.temp }}/realm-artifacts/README-macos-unsigned-preview.md
+          if-no-files-found: error
+          retention-days: 30

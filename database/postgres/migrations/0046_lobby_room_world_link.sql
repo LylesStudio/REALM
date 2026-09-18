@@ -1,5 +1,5 @@
 -- REALM LAN Game Lobby：房间↔世界最小安全连接
--- （docs/development/REALM-COMPLETION-OPTIMIZATION-PLAN.md P0-1）。
+-- （public documentation P0-1）。
 -- lobby_rooms.world_id 可空：房主只能绑定自己是 owner 的世界（服务层
 -- 校验）；加入绑定世界的房间 = 同事务写入 player_world_memberships
 -- （role='player'，幂等）——世界分享是房主的显式动作，不放宽既有

@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B1——/api/worldline/merge 路由作用域与审计主体修复
- * （docs/development/T10-B1-GOVERNANCE-REACHABILITY.md §四）。
+ * （public documentation §四）。
  * 真实临时 PG 库（t.after 拆库，不污染开发库）：缺失 worldId 400、未知世界
  * 404、成员 dryRun/merge 走解析 scope、请求体 operator 不得冒充审计主体、
  * source 世界线不存在 404、幂等重放同 mergeId。

@@ -1,5 +1,5 @@
 -- REALM Scene Display-Time Snapshot
--- 批次 T12 验收修正（docs/development/T12-WORLD-STORY-RECORD-EXPERIENCE.md）：
+-- 批次 T12 验收修正（public documentation）：
 -- scenes 增加 display_time 快照列——scene 行创建时落当时世界时间标签，
 -- 使场景世界时间成为 Record/世界线级可隔离状态（此前 displayTime 只从
 -- worlds.settings / 最新 Event 现场读取，源 Record 推进后重演起点时间

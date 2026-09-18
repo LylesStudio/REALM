@@ -1,5 +1,5 @@
 -- REALM Record First Nights
--- 批次 T1（docs/development/T1-FIRST-NIGHT.md）：记录级「世界初夜」状态行。
+-- 批次 T1（public documentation）：记录级「世界初夜」状态行。
 -- 落笔入界事务内写入 pending 与创世提案上下文；异步初夜生成完成后转
 -- ready（钩子正文与开场提案镜像入库），模型失败落确定性降级包转 degraded。
 -- 旧记录没有状态行 → 交付投影 firstNight=null，行为完全向后兼容。

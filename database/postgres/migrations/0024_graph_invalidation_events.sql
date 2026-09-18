@@ -1,5 +1,5 @@
 -- REALM Graph Invalidation Events
--- 批次 T11-A2（docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md）：
+-- 批次 T11-A2（public documentation）：
 -- 图谱/CANON 写事务的持久化失效账本。业务写与失效记录同一事务插入——
 -- 事务回滚则失效记录同样回滚，不存在「业务回滚但事件可见」。
 -- cursor 全表单调（GENERATED ALWAYS AS IDENTITY），SSE 断线重连按

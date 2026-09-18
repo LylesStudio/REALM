@@ -134,7 +134,7 @@ interface StyledCopySource extends SceneCopySource {
 /**
  * 「观察四周」文案按当前场景快照生成：场景生长后贴合其地点/天气，
  * 留白状态用中性兜底，绝不编造任何世界的具体意象。
- * 规范见 docs/development/ACTION-SUGGESTIONS.md。
+ * 规范见 public documentation。
  */
 export function composeObserveSurroundingsCopy(
   scene: StyledCopySource,

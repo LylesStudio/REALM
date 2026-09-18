@@ -1,6 +1,6 @@
 /**
  * 批次 T5 骰子真随机与多骰系——PostgreSQL 集成测试
- * （docs/development/T5-DICE-RANDOMNESS.md §6）。
+ * （public documentation §6）。
  *
  * 覆盖（临时库 + 全 19 迁移，不新增 mock）：
  * 1. 大样本真随机分布非恒定（伪随机查表特征消失；本项无需数据库）；

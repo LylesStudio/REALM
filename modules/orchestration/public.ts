@@ -110,7 +110,7 @@ export const NEXT_SUGGESTION_MAX_COUNT = 3;
 /**
  * 回合后给玩家的下一步对话提案（fail-closed 规整）：
  * 非数组/空数组/全非法条目一律归空；超 3 条截断；逐条修剪限长。
- * 规范见 docs/development/ACTION-SUGGESTIONS.md。
+ * 规范见 public documentation。
  */
 export function normalizeNextSuggestions(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return [];

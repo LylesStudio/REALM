@@ -1,4 +1,4 @@
--- REALM LAN Game Lobby（docs/development/LAN-GAME-LOBBY-PLAN.md）
+-- REALM LAN Game Lobby（public documentation）
 -- 大厅「约局」元数据：房间 + 成员。与 World/Story/Record 无 FK、无共享
 -- 语义——房间不创建也不修改任何世界内容；进入房间 ≠ 进入共享剧情。
 -- 密码只存 scrypt 哈希（随机 salt），绝不存明文；成员离开是 left_at 置位

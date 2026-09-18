@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -17,12 +17,23 @@ const logPath = process.env.REALM_POSTGRES_LOG
   ?? (dataHome
     ? resolve(dataHome, "postgres", "postgres.log")
     : resolve(projectRoot, ".local/postgres/postgres.log"));
-const socketDirectory = process.env.REALM_POSTGRES_SOCKET_DIR ?? "/tmp/realm-pg";
 const host = "127.0.0.1";
 const port = process.env.REALM_POSTGRES_PORT ?? "5432";
 const database = process.env.REALM_POSTGRES_DB ?? "realm_local";
+const requestedSocketDirectory = process.env.REALM_POSTGRES_SOCKET_DIR ?? "/tmp/realm-pg";
+// macOS limits the complete Unix socket path to 103 bytes. Keep the data and
+// logs under REALM_DATA_HOME, but fall back to a short per-port socket directory
+// for deep temporary/package paths. Application connections use TCP loopback.
+const socketFileName = `.s.PGSQL.${port}`;
+const socketDirectory = requestedSocketDirectory.length + 1 + socketFileName.length <= 103
+  ? requestedSocketDirectory
+  : resolve("/tmp", `realm-pg-${port}`);
 const action = process.argv[2] ?? "status";
 const exeSuffix = process.platform === "win32" ? ".exe" : "";
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+}
 
 function executable(name) {
   const path = resolve(postgresRoot, `${name}${exeSuffix}`);
@@ -44,7 +55,12 @@ function run(name, args, options = {}) {
     const detail = options.capture
       ? [result.stderr, result.stdout].filter(Boolean).join("\n").trim()
       : "";
-    throw new Error(`${name} failed${detail ? `: ${detail}` : "."}`);
+    const termination = result.error
+      ? result.error.message
+      : result.signal
+        ? `signal ${result.signal}`
+        : `exit ${result.status}`;
+    throw new Error(`${name} failed (${termination})${detail ? `: ${detail}` : "."}`);
   }
   return result;
 }
@@ -107,6 +123,33 @@ function ensureDatabase() {
   run("createdb", ["-h", host, "-p", port, "-U", "postgres", database]);
 }
 
+function startServer() {
+  try {
+    run("pg_ctl", [
+      "-D",
+      dataDirectory,
+      "-l",
+      logPath,
+      "-o",
+      // unix socket 目录仅 POSIX；Windows 走纯 TCP loopback。
+      process.platform === "win32"
+        ? `-h ${host} -p ${port}`
+        : `-h ${host} -p ${port} -k ${shellQuote(socketDirectory)}`,
+      "-w",
+      "start",
+    ]);
+  } catch (error) {
+    let serverLog = "";
+    try {
+      serverLog = readFileSync(logPath, "utf8").trim();
+    } catch {
+      // Preserve the original pg_ctl error when no log was created.
+    }
+    const detail = serverLog ? `\nPostgreSQL server log:\n${serverLog.slice(-4_000)}` : "";
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`);
+  }
+}
+
 switch (action) {
   case "start": {
     initialize();
@@ -117,19 +160,7 @@ switch (action) {
           `${host}:${port} is already used by a PostgreSQL server outside this project cluster.`,
         );
       }
-      run("pg_ctl", [
-        "-D",
-        dataDirectory,
-        "-l",
-        logPath,
-        "-o",
-        // unix socket 目录仅 POSIX；Windows 走纯 TCP loopback。
-        process.platform === "win32"
-          ? `-h ${host} -p ${port}`
-          : `-h ${host} -p ${port} -k ${socketDirectory}`,
-        "-w",
-        "start",
-      ]);
+      startServer();
     }
     ensureDatabase();
     if (readiness().status !== 0) {

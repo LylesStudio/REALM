@@ -1,6 +1,6 @@
 /**
  * 批次 T11-D——semantic review context route
- * （docs/development/T11-D-SEMANTIC-REVIEW-OPERATOR-SURFACE.md §3.1）。
+ * （public documentation §3.1）。
  * 真实临时 PG 库（迁移 0001–0025 全链，t.after 强制拆库，零开发库污染）：
  * 无 principal 401；无 runtime 503 LOCAL_RUNTIME_NOT_INITIALIZED；
  * 未知/非成员世界 404 WORLD_NOT_FOUND；成功只返回 ok/scope/existingFuture

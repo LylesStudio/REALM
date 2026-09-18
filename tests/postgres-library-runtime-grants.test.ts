@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B7——迁移 0023 后 library/创世/导入全量下沉受限角色
- *（docs/development/T10-B7-LIBRARY-RUNTIME-GRANTS.md §五）。
+ *（public documentation §五）。
  * 双临时库（t.after 强制 DROP）：pre-0023 库记录授权缺口实锤，
  * 0023 库上 runtime-only 逐项真实成功；RLS 跨 workspace 隔离；
  * T6/T8 门禁不回退；路由层不再需要 DATABASE_URL。

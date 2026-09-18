@@ -1,6 +1,6 @@
 /**
  * 批次 T9 Canon 回读——PostgreSQL 集成测试（产生侧）
- * （docs/development/T9-CANON-READBACK.md §4.2）。
+ * （public documentation §4.2）。
  * 覆盖：晶化 approved delta 入图谱（世界本体实体 upsert 幂等、白名单谓词
  * Claim 落库 record_confirmed、来源事件/游标正确、裁决拒绝零入图）、
  * /api/world-knowledge 与 /api/canon 显式 worldId（非 demo 世界读写正确、

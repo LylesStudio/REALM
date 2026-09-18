@@ -1,5 +1,5 @@
 -- REALM Library runtime grants
--- 批次 T10-B7（docs/development/T10-B7-LIBRARY-RUNTIME-GRANTS.md）：
+-- 批次 T10-B7（public documentation）：
 -- owner-pool 例外命令下沉受限角色的最小授权。逐条对应规范 §一矩阵。
 -- 0001–0022 不改动；RLS/触发器/业务门禁语义不变。
 

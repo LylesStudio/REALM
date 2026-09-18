@@ -1,6 +1,6 @@
 /**
  * 界面层 i18n（第一层·界面固定文本）。
- * 规范见 docs/development/I18N-CENTRALIZED.md：三层文本边界中，
+ * 规范见 public documentation：三层文本边界中，
  * 本模块只承载第一层；第二层走 modules/style/world-style.ts 的语言维度；
  * 第三层动态文本绝不进资源文件。
  */

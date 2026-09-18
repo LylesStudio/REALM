@@ -1,6 +1,6 @@
 /**
  * 批次 T11-B——Canon merge 原子传播入队（规范
- * docs/development/T11-B-PROPAGATION-ENABLEMENT-IMPLEMENTATION.md §四）。
+ * public documentation §四）。
  * 真实临时 PG 库（t.after 强制拆库，迁移 0001–0025 全链 + demo 拓扑种子）：
  * merge+propagate:"public" 同事务产生恰一个 Campaign/root Packet/pending
  * job；拓扑缺失整事务回滚零残留；reject/无 attest/空晋升不创建；重复

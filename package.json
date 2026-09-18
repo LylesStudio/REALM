@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": false,
   "license": "Apache-2.0",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "node scripts/dev-server.mjs dev",
     "build": "vinext build",
@@ -13,7 +15,7 @@
     "test:application": "node --experimental-strip-types --test tests/local-record-application.test.ts tests/memory-prefetch-application.test.ts tests/presence-application.test.ts tests/self-play-application.test.ts",
     "test:frontend-contracts": "node --experimental-strip-types --test tests/frontend-record-contract.test.ts tests/semantic-segments.test.ts tests/semantic-review-ui-contract.test.ts tests/pending-submission-dice-reveal.test.ts tests/genesis-guided-contract.test.ts && node --test tests/world-transfer-ui-contract.test.mjs",
     "test:lobby": "node --test tests/lobby-contract.test.mjs tests/lobby-invite-origin-contract.test.mjs && node --experimental-strip-types --test tests/transfer-error-boundary.test.ts tests/postgres-lobby.test.ts tests/postgres-preview-authorization.test.ts",
-    "test:contracts": "node --test tests/postgres-schema-contract.test.mjs tests/postgres-migration-runner.test.mjs tests/api-core-wiring.test.mjs tests/local-only-boundary.test.mjs tests/postgres-runtime-repository-contract.test.mjs tests/m5-runtime-status.test.mjs tests/world-write-gate-fence.test.mjs && node --experimental-strip-types --test tests/realm-pack.test.ts && npm run test:application && npm run test:frontend-contracts && npm run test:lobby && npm run test:postgres-runtime",
+    "test:contracts": "node --test tests/postgres-schema-contract.test.mjs tests/postgres-migration-runner.test.mjs tests/api-core-wiring.test.mjs tests/local-only-boundary.test.mjs tests/postgres-runtime-repository-contract.test.mjs tests/m5-runtime-status.test.mjs tests/world-write-gate-fence.test.mjs tests/desktop-windows-contract.test.mjs tests/desktop-macos-contract.test.mjs && node --experimental-strip-types --test tests/realm-pack.test.ts && npm run test:application && npm run test:frontend-contracts && npm run test:lobby && npm run test:postgres-runtime",
     "test:render": "node --test tests/rendered-html.test.mjs",
     "test": "npm run typecheck && npm run test:core && npm run test:contracts && npm run build && npm run test:render",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .tauri-resources",
@@ -23,7 +25,9 @@
     "db:postgres:migrate": "node --env-file-if-exists=.env.local scripts/postgres-migrate.mjs",
     "db:postgres:seed": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/postgres-seed-demo.mjs",
     "db:postgres:bootstrap": "npm run db:postgres:start && npm run db:postgres:migrate && npm run db:postgres:seed",
-    "test:postgres-runtime": "node scripts/test-postgres-runtime-with-scratch.mjs"
+    "test:postgres-runtime": "node scripts/test-postgres-runtime-with-scratch.mjs",
+    "desktop:windows:bundle": "node scripts/desktop/bundle-windows.mjs",
+    "desktop:macos:package": "bash scripts/desktop/package-macos.sh"
   },
   "dependencies": {
     "fflate": "0.7.5",

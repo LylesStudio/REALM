@@ -20,7 +20,7 @@ import type { TavernRealmSkillDraft } from "../import/tavern-parser.ts";
 /**
  * 酒馆导入服务：角色 + 头像文件 + 世界书条目单事务原子落库。
  * 任一失败整体回滚；允许重复导入（每次新 id）。
- * 规范见 docs/development/TAVERN-IMPORT.md。
+ * 规范见 public documentation。
  */
 
 export interface TavernImportReport {

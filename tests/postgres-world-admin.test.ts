@@ -1,6 +1,6 @@
 /**
  * 批次 T8 世界管理台——PostgreSQL 集成测试
- * （docs/development/T8-WORLD-ADMIN.md §4.1）。
+ * （public documentation §4.1）。
  * 覆盖：归档翻转幂等与 owner 门禁（WORLD_NOT_OWNED）、归档世界开新局全拒
  * （WORLD_ARCHIVED：story/character/branch/record）、归档世界回合与自演拒绝、
  * 活动自演会话防护（WORLD_SELF_PLAY_ACTIVE）、零事件世界物理删除级联清零、

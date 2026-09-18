@@ -732,7 +732,7 @@ export function createModelVisibilityAssessor(options: {
 }
 
 /**
- * 批次 T3 在场门禁（docs/development/T3-CHARACTER-PRESENCE.md §2.3）：
+ * 批次 T3 在场门禁（public documentation §2.3）：
  * 单次 json_object 调用，temperature 0。失败/越权/格式损坏一律 fail-closed
  * 为沉默——门禁永远不得让回合后流程抛错。
  */

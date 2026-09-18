@@ -1,5 +1,5 @@
 -- REALM Account UI Language
--- 批次 Q（docs/development/I18N-CENTRALIZED.md）：用户级界面语言，
+-- 批次 Q（public documentation）：用户级界面语言，
 -- 默认 zh-CN，三语枚举约束；realm_runtime 只允许更新该列。
 ALTER TABLE accounts
   ADD COLUMN IF NOT EXISTS ui_language text NOT NULL DEFAULT 'zh-CN';

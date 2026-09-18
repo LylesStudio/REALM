@@ -1,5 +1,5 @@
 -- REALM Scene Crystallization Grants
--- 设定结晶写回（docs/development/SCENE-CRYSTALLIZATION.md）：
+-- 设定结晶写回（public documentation）：
 -- realm_runtime 需要向 scenes 追加新场景行（append-oriented，不授予
 -- UPDATE/DELETE），并能把裁决通过的天气/局势/世界时间合入 worlds.settings。
 -- 事件、record_heads、worldlines 游标与 semantic_conflict_evaluations 审计

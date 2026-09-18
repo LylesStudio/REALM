@@ -1,0 +1,99 @@
+name: Desktop Windows x64 (unsigned preview)
+
+# 手动/标记触发；不读取任何 secrets 或 .env（构建只依赖公开官方源与 pin hash）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "launcher/**"
+      - "scripts/desktop/**"
+      - "installer/windows/**"
+      - "scripts/local-postgres.mjs"
+      - "scripts/local-provision-realm-transfer.mjs"
+      - "modules/inference/local-settings.ts"
+      - ".github/workflows/desktop-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Install dependencies (full tree)
+        run: npm ci --ignore-scripts
+
+      - name: Build application bundle input
+        run: npm run build
+
+      - name: Prune development dependencies for runtime bundle
+        run: npm prune --omit=dev --ignore-scripts
+
+      - name: Prepare PostgreSQL binaries for pgvector build
+        shell: pwsh
+        run: |
+          $inv = Get-Content installer/windows/inventory.json | ConvertFrom-Json
+          $work = "${{ runner.temp }}\realm-desktop"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          curl.exe -fsSL -o "$work\postgresql.zip" $inv.postgresql.url
+          $hash = (Get-FileHash "$work\postgresql.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $inv.postgresql.sha256) { throw "postgresql sha256 mismatch: $hash" }
+          tar -xf "$work\postgresql.zip" -C $work
+
+      - name: Compile pgvector with MSVC (pinned source)
+        shell: pwsh
+        run: |
+          powershell -File installer/windows/build-pgvector.ps1 `
+            -WorkDir "${{ runner.temp }}\realm-desktop" `
+            -PgRoot "${{ runner.temp }}\realm-desktop\pgsql"
+
+      - name: Assemble bundle (download/verify Node + assemble app)
+        run: node scripts/desktop/bundle-windows.mjs "${{ runner.temp }}\realm-desktop"
+
+      - name: Runtime smoke on fresh Windows machine-like state
+        shell: pwsh
+        run: |
+          $env:REALM_DATA_HOME = "${{ runner.temp }}\realm-smoke-data"
+          $bundledNode = "${{ runner.temp }}\realm-desktop\REALM\runtime\node\win-x64\node.exe"
+          & $bundledNode "${{ runner.temp }}\realm-desktop\REALM\launcher\realm-launcher.mjs" `
+            --check `
+            --home "${{ runner.temp }}\realm-desktop\REALM"
+
+      - name: Build NSIS installer (unsigned preview)
+        shell: pwsh
+        run: |
+          $bundle = "${{ github.workspace }}\bundle\REALM"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item -Recurse -Force "${{ runner.temp }}\realm-desktop\REALM\*" $bundle
+          makensis installer\windows\realm.nsi
+
+      - name: Produce SHA256 and inventory
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem realm-*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "$($exe.Name)  $hash" | Out-File realm-win-x64-SHA256.txt -Encoding ascii
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: realm-win-x64-unsigned-preview
+          path: |
+            realm-*.exe
+            realm-win-x64-SHA256.txt
+            installer/windows/inventory.json
+          retention-days: 30

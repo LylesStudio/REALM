@@ -14,7 +14,7 @@ import {
 } from "../style/world-style.ts";
 
 /**
- * 世界初夜（批次 T1，docs/development/T1-FIRST-NIGHT.md）。
+ * 世界初夜（批次 T1，public documentation）。
  *
  * 落笔入界的事务内只做确定性工作：开场旁白（草稿 opening 或风格化合成句）
  * 与 pending 状态行。事务提交后异步发起一次模型调用生成「初夜包」，

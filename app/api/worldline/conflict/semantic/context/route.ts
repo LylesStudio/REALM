@@ -13,7 +13,7 @@ export const runtime = "nodejs";
 
 /**
  * 批次 T11-D：semantic review 的只读 context 读取
- * （docs/development/T11-D-SEMANTIC-REVIEW-OPERATOR-SURFACE.md §3.1）。
+ * （public documentation §3.1）。
  * 前端不手填世界时间：复审 change 的 effectiveCursor 固定为服务端解析出的
  * 当前世界线 head 游标。本路由只做 principal + membership + runtime 检查并
  * 返回游标——不写 evidence、不改任何正史、无迁移。
