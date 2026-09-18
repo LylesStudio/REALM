@@ -35,13 +35,11 @@ bash scripts/install.sh        # Linux / macOS
 .\scripts\install.ps1          # Windows PowerShell
 ```
 
-没有 Docker 也不想装系统级 PostgreSQL 的 Linux（x86_64）玩家，可以加 `--pg-artifact` 让安装器把免安装的嵌入式 PostgreSQL 17+pgvector 装进用户目录：
+没有 Docker 也不想装系统级 PostgreSQL 的玩家，可以加 `--pg-artifact` 让安装器把免安装的嵌入式 PostgreSQL 17+pgvector 装进用户目录（构件由 GitHub Actions 按平台产出：linux-x64 / darwin-arm64 / darwin-x64 / windows-x64）：
 
 ```bash
 curl -fsSL <raw 地址> | bash -s -- --pg-artifact <构件 tar.gz 的地址>
 ```
-
-（嵌入式构件目前只提供 linux-x64；其他系统按下面的常规路径走。）
 
 如果你已经拿到了 REALM 项目文件夹，按系统选择一个入口：
 

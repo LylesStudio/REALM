@@ -35,13 +35,11 @@ bash scripts/install.sh          # Linux / macOS
 .\scripts\install.ps1            # Windows PowerShell
 ```
 
-Docker もシステムの PostgreSQL も入れたくない Linux（x86_64）の方は、`--pg-artifact` を付けるとインストーラーが組み込み PostgreSQL 17+pgvector をユーザーディレクトリに入れます。
+Docker もシステムの PostgreSQL も入れたくない方は、`--pg-artifact` を付けるとインストーラーが組み込み PostgreSQL 17+pgvector をユーザーディレクトリに入れます（アーティファクトは GitHub Actions がプラットフォーム別にビルド：linux-x64 / darwin-arm64 / darwin-x64 / windows-x64）。
 
 ```bash
 curl -fsSL <raw URL> | bash -s -- --pg-artifact <アーティファクトの tar.gz URL>
 ```
-
-（組み込みアーティファクトは現時点では linux-x64 のみです。それ以外の環境は下の通常手順で。）
 
 REALMのフォルダをすでに持っている場合は、OSに合わせて起動してください。
 

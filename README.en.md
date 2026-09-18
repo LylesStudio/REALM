@@ -35,13 +35,11 @@ bash scripts/install.sh          # Linux / macOS
 .\scripts\install.ps1            # Windows PowerShell
 ```
 
-On Linux (x86_64) without Docker and without a system PostgreSQL, add `--pg-artifact` to let the installer drop a no-install embedded PostgreSQL 17+pgvector into your user directory:
+Without Docker and without a system PostgreSQL, add `--pg-artifact` to let the installer drop a no-install embedded PostgreSQL 17+pgvector into your user directory (artifacts are built per platform by GitHub Actions: linux-x64 / darwin-arm64 / darwin-x64 / windows-x64):
 
 ```bash
 curl -fsSL <raw URL> | bash -s -- --pg-artifact <tarball URL of the artifact>
 ```
-
-(The embedded artifact is linux-x64 only for now; everywhere else, use the regular paths below.)
 
 If you already have the REALM project folder, choose the entry point for your system.
 

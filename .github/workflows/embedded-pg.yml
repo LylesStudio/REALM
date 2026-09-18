@@ -36,11 +36,12 @@ jobs:
           docker create --name realm-epg realm-embedded-pg:linux-x64 >/dev/null
           docker cp realm-epg:/out/realm-embedded-pg-linux-x64.tar.gz .
           docker rm realm-epg >/dev/null
-          ls -lh realm-embedded-pg-linux-x64.tar.gz
+          mv realm-embedded-pg-linux-x64.tar.gz realm-embedded-pg-linux-x64-17.10.tar.gz
+          ls -lh realm-embedded-pg-linux-x64-17.10.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: realm-embedded-pg-linux-x64-17.10
-          path: realm-embedded-pg-linux-x64.tar.gz
+          path: realm-embedded-pg-linux-x64-17.10.tar.gz
           if-no-files-found: error
 
   darwin:
