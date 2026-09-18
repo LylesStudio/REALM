@@ -88,3 +88,12 @@ test("local-postgres defaults data to user dir with legacy migration", () => {
   assert.match(lp, /migrated data directory/);
   assert.match(lp, /renameSync/);
 });
+
+test("install.cmd bridges cmd.exe users into PowerShell", () => {
+  const cmd = readFileSync(new URL("../install.cmd", import.meta.url), "utf8");
+  assert.match(cmd, /powershell/);
+  assert.match(cmd, /install\.ps1/);
+  assert.match(cmd, /-EmbeddedPg/);
+  // cmd 不认识 iex/irm：入口必须显式交给 PowerShell。
+  assert.match(cmd, /iex/);
+});

@@ -30,6 +30,8 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 
 **Windows（PowerShell，x64）：**
 
+> ⚠️ 以下命令必须在 **PowerShell** 里运行（右键开始菜单 →「终端」或「Windows PowerShell」），不是「命令提示符 cmd」——`iex`/`irm` 是 PowerShell 命令，cmd 会报「不是内部或外部命令」。cmd 用户先输入 `powershell` 回车切换，或直接双击 `install.cmd`。
+
 ```powershell
 irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
 ```
