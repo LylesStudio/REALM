@@ -6,7 +6,7 @@ A single-player world-building game that runs on your own computer. You talk wit
 
 ![REALM WebUI world entry](./public/screenshots/webui-home.png)
 
-> **Status:** Web self-hosted preview. The first launch needs a few local tools. The launcher checks what is missing and asks before installing anything.
+> Double-click the launcher, follow the prompts, and the world entry above opens in your browser. On the first launch, the installer checks what is missing and asks before installing anything.
 
 ## I just want to play
 
@@ -93,11 +93,9 @@ REALM binds to `127.0.0.1` by default. It does not expose itself to your LAN or 
 - `.env.local` is local configuration and must not be committed;
 - removing application files does not automatically remove your worlds. Back them up first.
 
-Do not expose the development server directly to the internet. REALM does not yet provide hosted accounts, billing, backups, multiplayer relay, or production multi-tenant security.
+## What can you play with now
 
-## What is REALM?
-
-REALM keeps conversation, character memory, world knowledge, and Record-level events in one readable world. The current Web preview includes:
+REALM keeps conversation, character memory, world knowledge, and Record-level events in one readable world. Available today:
 
 - World / Story / Record navigation;
 - recoverable conversation turns and a single writer per Record;
@@ -106,13 +104,6 @@ REALM keeps conversation, character memory, world knowledge, and Record-level ev
 - PostgreSQL + pgvector persistence;
 - multiple model-provider settings and structured-output repair;
 - a rectangular paper-and-ink interface.
-
-The preview does not promise yet:
-
-- public accounts or hosted SaaS;
-- public multiplayer, relay, TURN/WebRTC, or internet deployment;
-- automatic updates, signed installers, or a formal Release channel;
-- certified cross-device LAN, Android, or WebKit support.
 
 ## Command-line options
 
