@@ -14,17 +14,34 @@
 
 ## 我只想马上玩
 
-还没有项目文件夹？一条终端命令即可拉取并完成全部设置（Linux/macOS；安装任何内容前都会先问你）：
+还没有项目文件夹？一条终端命令即可拉取并完成全部设置（安装任何内容前都会先问你）：
+
+**Linux / macOS：**
 
 ```bash
 curl -fsSL <本仓库 scripts/install.sh 的 raw 地址> | bash
 ```
 
+**Windows（PowerShell）：**
+
+```powershell
+irm <本仓库 scripts/install.ps1 的 raw 地址> | iex
+```
+
 或者在你已经克隆好的文件夹里运行：
 
 ```bash
-bash scripts/install.sh
+bash scripts/install.sh        # Linux / macOS
+.\scripts\install.ps1          # Windows PowerShell
 ```
+
+没有 Docker 也不想装系统级 PostgreSQL 的 Linux（x86_64）玩家，可以加 `--pg-artifact` 让安装器把免安装的嵌入式 PostgreSQL 17+pgvector 装进用户目录：
+
+```bash
+curl -fsSL <raw 地址> | bash -s -- --pg-artifact <构件 tar.gz 的地址>
+```
+
+（嵌入式构件目前只提供 linux-x64；其他系统按下面的常规路径走。）
 
 如果你已经拿到了 REALM 项目文件夹，按系统选择一个入口：
 

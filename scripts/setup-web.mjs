@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,6 +70,13 @@ function candidatePostgresBins(environment, platform) {
   const candidates = [];
   if (environment.REALM_POSTGRES_BIN?.trim()) {
     candidates.push(resolve(environment.REALM_POSTGRES_BIN.trim()));
+  }
+  // 嵌入式构件（scripts/embedded-pg.mjs install）：免 Docker 的本地 PG17+pgvector。
+  if (platform === "linux") {
+    candidates.push(
+      join(homedir(), ".local", "realm-pgsql", "17.10", "bin"),
+      join(homedir(), ".local", "realm-pgsql", "17", "bin"),
+    );
   }
   if (platform === "darwin") {
     candidates.push(

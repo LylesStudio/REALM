@@ -1,0 +1,135 @@
+# REALM 嵌入式 PostgreSQL 17.10 + pgvector 0.8.6（linux-x64）构件构建。
+#
+# 产物：realm-embedded-pg-linux-x64.tar.gz（约 23MB，可重定位，免 Docker、
+# 免系统包管理器、免 LD_LIBRARY_PATH）。基座为 zonkyio 可重定位 PG 17.10
+# 构建（gcc 7.5 / Ubuntu 18.04 工具链，glibc 基线极低），pgvector 以
+# OPTFLAGS="" 编译（禁用 -march=native，任意 x86-64 CPU 可运行），
+# 客户端工具（psql/createdb/pg_isready）来自 Debian bookworm 17.11
+# （同 major ABI 兼容），soname 别名与 RPATH 在打包时修复。
+#
+# 用法（仓库根目录）：
+#   docker build -f scripts/embedded-pg/Dockerfile.linux-x64 \
+#     -t realm-embedded-pg:linux-x64 scripts/embedded-pg
+#   docker create --name realm-epg realm-embedded-pg:linux-x64
+#   docker cp realm-epg:/out/realm-embedded-pg-linux-x64.tar.gz .
+#   docker rm realm-epg
+
+# ---------------------------------------------------------------------------
+# 阶段 1：下载 zonkyio 可重定位 PG 17.10 基座（npm 分发包即完整安装树）。
+# ---------------------------------------------------------------------------
+FROM debian:bookworm AS base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /dl
+RUN curl -fsSL -o pgl.tgz https://registry.npmjs.org/@embedded-postgres/linux-x64/-/linux-x64-17.10.0-beta.17.tgz \
+ && tar -xzf pgl.tgz \
+ && cp -a package/native /bundle
+
+# ---------------------------------------------------------------------------
+# 阶段 2：编译 pgvector 0.8.6（OPTFLAGS="" 关闭 -march=native）。
+# ---------------------------------------------------------------------------
+FROM postgres:17-bookworm AS vector
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl binutils postgresql-server-dev-17 \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.6 -o /tmp/pgvector.tar.gz \
+ && tar -xzf /tmp/pgvector.tar.gz -C /tmp
+RUN cd /tmp/pgvector-0.8.6 \
+ && make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config USE_PGXS=1 OPTFLAGS="" -j4 >/tmp/build.log 2>&1 \
+ && make PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config USE_PGXS=1 install DESTDIR=/tmp/stage >>/tmp/build.log 2>&1
+# 符号基线审计：最大 GLIBC 需求（应 <= 2.14，任意现代发行版可加载）。
+RUN so=$(find /tmp/stage -name 'vector.so') \
+ && objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -2
+
+# ---------------------------------------------------------------------------
+# 阶段 3：在 postgres:17-bookworm 镜像内抽取客户端工具并做运行库闭包
+# （psql 的 libpq/libreadline 依赖 PGDG 安装树，必须在能解析的环境下 ldd）。
+# ---------------------------------------------------------------------------
+FROM vector AS clients
+RUN mkdir -p /clients/bin /clients/deps \
+ && cp /usr/lib/postgresql/17/bin/psql /usr/lib/postgresql/17/bin/createdb /usr/lib/postgresql/17/bin/pg_isready /clients/bin/ \
+ && printf '%s\n' 'ld-linux' 'libc\.so' 'libm\.so' 'libmvec' 'libdl' 'libpthread' \
+      'librt' 'libresolv' 'libutil' 'libnsl' 'libgcc_s' 'libstdc' 'libBrokenLocale' > /exclude.txt \
+ && for round in 1 2 3; do \
+      ldd /clients/bin/* 2>/dev/null \
+      | awk '/=> \//{print $3} /^\//{print $1}' | sort -u \
+      | grep -v -E -f /exclude.txt \
+      | while read -r so; do [ -f "$so" ] && cp -n "$so" /clients/deps/ 2>/dev/null || true; done; \
+    done \
+ && rm -f /clients/deps/libpq.so.5* \
+ && ls /clients/deps
+RUN echo '=== client glibc ceiling ===' \
+ && objdump -T /clients/bin/psql | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -2 \
+ && objdump -T /clients/deps/libreadline.so.8 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -2 || true
+
+# ---------------------------------------------------------------------------
+# 阶段 4：总装 + soname 别名 + 私有 RPATH + pg_config（sh）+ 打包。
+# ---------------------------------------------------------------------------
+FROM debian:bookworm AS assemble
+RUN apt-get update && apt-get install -y --no-install-recommends patchelf binutils \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=base /bundle /bundle
+COPY --from=vector /tmp/stage /stage
+RUN so=$(find /stage -name 'vector.so') \
+ && cp "$so" /bundle/lib/postgresql/vector.so \
+ && cp "$(find /stage -name 'vector.control')" /bundle/share/postgresql/extension/ \
+ && cp "$(find /stage -name 'vector--0.8.6.sql' | head -1)" /bundle/share/postgresql/extension/
+COPY --from=clients /clients/bin/* /bundle/bin/
+COPY --from=clients /clients/deps /bundle/deps
+# pg_config：zonkyio 基座不带，且 Debian 版硬编码绝对路径。提供重定位感知
+# 的 sh 实现（本仓库消费方只用 --sharedir 与存在性检查）。
+RUN printf '%s\n' \
+ '#!/bin/sh' \
+ '# Relocation-aware pg_config for the REALM embedded PostgreSQL bundle.' \
+ 'bindir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' \
+ 'prefix=$(CDPATH= cd -- "$bindir/.." && pwd)' \
+ 'case "$1" in' \
+ '  --version) echo "PostgreSQL 17.10" ;;' \
+ '  --bindir) echo "$bindir" ;;' \
+ '  --libdir) echo "$prefix/lib" ;;' \
+ '  --pkglibdir) echo "$prefix/lib/postgresql" ;;' \
+ '  --sharedir) echo "$prefix/share/postgresql" ;;' \
+ '  *) echo "usage: pg_config [--version|--bindir|--libdir|--pkglibdir|--sharedir]" >&2; exit 1 ;;' \
+ 'esac' > /bundle/bin/pg_config \
+ && chmod +x /bundle/bin/pg_config
+# soname 别名（npm 打包丢失符号链接）：libX.so.N.M -> libX.so.N
+RUN cd /bundle/lib \
+ && for f in lib*.so.*.*; do \
+      [ -f "$f" ] || continue; \
+      alias_name="${f%.*}"; \
+      [ -e "$alias_name" ] || ln -s "$f" "$alias_name"; \
+    done \
+ && cd /bundle/deps 2>/dev/null \
+ && for f in lib*.so.*.*; do \
+      [ -f "$f" ] || continue; \
+      alias_name="${f%.*}"; \
+      [ -e "$alias_name" ] || ln -s "$f" "$alias_name"; \
+    done || true
+# 私有 RPATH：bin -> ../lib；lib -> $ORIGIN（+..）；deps -> $ORIGIN。
+RUN for f in /bundle/bin/*; do \
+      [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue; \
+      patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../deps' "$f" || exit 1; \
+    done \
+ && for f in /bundle/lib/*.so* /bundle/lib/postgresql/*.so; do \
+      [ -f "$f" ] || continue; \
+      [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue; \
+      patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$f" || true; \
+    done \
+ && for f in /bundle/deps/*.so*; do \
+      [ -f "$f" ] || continue; \
+      [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue; \
+      patchelf --set-rpath '$ORIGIN' "$f" || true; \
+    done
+# 冒烟（容器内，非 root 用户——initdb 拒绝 root）：版本、initdb、启动、CREATE EXTENSION vector。
+RUN useradd -m smoke \
+ && mkdir -p /tmp/smoke && chown -R smoke:smoke /tmp/smoke \
+ && printf '%s\n' "CREATE EXTENSION vector;" "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';" > /tmp/smoke/smoke.sql \
+ && su smoke -c 'set -e; /bundle/bin/postgres --version \
+ && mkdir -p /tmp/smoke/data /tmp/smoke/run \
+ && { /bundle/bin/initdb -D /tmp/smoke/data --locale=C --encoding=UTF8 -U postgres -A trust >/tmp/smoke/initdb.log 2>&1 || { echo "=== initdb log ==="; tail -12 /tmp/smoke/initdb.log; exit 1; }; } \
+ && { /bundle/bin/pg_ctl -D /tmp/smoke/data -l /tmp/smoke/server.log -o "-h 127.0.0.1 -p 55499 -k /tmp/smoke/run" -w start || { echo "=== server log ==="; tail -12 /tmp/smoke/server.log; exit 1; }; } \
+ && { /bundle/bin/psql -h 127.0.0.1 -p 55499 -U postgres -d postgres -f /tmp/smoke/smoke.sql || { echo "=== server log (psql fail) ==="; tail -8 /tmp/smoke/server.log; exit 1; }; } \
+ && /bundle/bin/pg_ctl -D /tmp/smoke/data stop'
+RUN mkdir -p /out \
+ && tar -C /bundle -czf /out/realm-embedded-pg-linux-x64.tar.gz . \
+ && ls -lh /out/realm-embedded-pg-linux-x64.tar.gz

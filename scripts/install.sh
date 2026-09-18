@@ -18,6 +18,8 @@
 #   REALM_INSTALL_REF   branch/tag to fetch     (default main)
 #   REALM_INSTALL_SKIP_NPM=1   stop before npm ci (smoke testing)
 #   REALM_INSTALL_SKIP_SETUP=1 stop before setup-web.sh (smoke testing)
+#   --pg-artifact <url|path>   install the embedded PostgreSQL 17+pgvector
+#                              bundle (linux-x64) via scripts/embedded-pg.mjs
 set -euo pipefail
 
 MIN_NODE="22.13.0"
@@ -25,8 +27,19 @@ REALM_HOME="${REALM_HOME:-$HOME/.realm}"
 APP_DIR="$REALM_HOME/app"
 REF="${REALM_INSTALL_REF:-main}"
 AUTO_YES=0
+PG_ARTIFACT="${REALM_PG_ARTIFACT:-}"
+args=()
 for arg in "$@"; do
   [[ "$arg" == "--yes" ]] && AUTO_YES=1
+  args+=("$arg")
+done
+# extract --pg-artifact <value>（同时从透传给 setup-web 的参数中剔除）
+next_is_pg=0
+SETUP_ARGS=()
+for arg in "${args[@]}"; do
+  if [[ "$next_is_pg" == 1 ]]; then PG_ARTIFACT="$arg"; next_is_pg=0; continue; fi
+  if [[ "$arg" == "--pg-artifact" ]]; then next_is_pg=1; continue; fi
+  SETUP_ARGS+=("$arg")
 done
 
 log() { printf '\033[1;36m[realm]\033[0m %s\n' "$*"; }
@@ -157,9 +170,28 @@ fi
 log "installing npm dependencies (ci)"
 npm --prefix "$APP_DIR" ci
 
-# --- 4. Hand off to the interactive web bootstrap -------------------------------
+# --- 4. Embedded PostgreSQL (optional, explicit opt-in) -------------------------
+if [[ -n "$PG_ARTIFACT" ]]; then
+  pg_tmp="$PG_ARTIFACT"
+  if [[ "$PG_ARTIFACT" == http* ]]; then
+    pg_tmp="$(mktemp)"
+    trap 'rm -f "$pg_tmp"' EXIT
+    log "downloading embedded PostgreSQL artifact"
+    curl -fsSL "$PG_ARTIFACT" -o "$pg_tmp" || die "failed to download $PG_ARTIFACT"
+  fi
+  if node "$APP_DIR/scripts/embedded-pg.mjs" info >/dev/null 2>&1; then
+    log "embedded PostgreSQL already installed; skipping (--pg-artifact kept as update path)"
+  else
+    log "installing embedded PostgreSQL 17 + pgvector (user directory, no sudo)"
+    node "$APP_DIR/scripts/embedded-pg.mjs" install --artifact "$pg_tmp" \
+      || die "embedded PostgreSQL install failed"
+  fi
+  [[ "$PG_ARTIFACT" == http* ]] && { rm -f "$pg_tmp"; trap - EXIT; }
+fi
+
+# --- 5. Hand off to the interactive web bootstrap -------------------------------
 if [[ "${REALM_INSTALL_SKIP_SETUP:-0}" == 1 ]]; then
   log "REALM_INSTALL_SKIP_SETUP=1 → stopping before setup-web"
   exit 0
 fi
-exec bash "$APP_DIR/scripts/setup-web.sh" "$@"
+exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"

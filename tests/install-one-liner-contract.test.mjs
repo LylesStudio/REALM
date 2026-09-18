@@ -31,7 +31,8 @@ test("install.sh follows detect → explain → confirm → install", () => {
 });
 
 test("install.sh ends at setup-web.sh, never skips the bootstrap", () => {
-  assert.match(installer, /exec bash "\$APP_DIR\/scripts\/setup-web\.sh" "\$@"/);
+  // --pg-artifact 被消费后，其余参数原样移交 setup-web.sh。
+  assert.match(installer, /exec bash "\$APP_DIR\/scripts\/setup-web\.sh" "\$\{SETUP_ARGS\[@\]\}"/);
   // 冒烟开关仅用于自动化验收，不能成为默认路径。
   assert.match(installer, /REALM_INSTALL_SKIP_NPM/);
   assert.match(installer, /REALM_INSTALL_SKIP_SETUP/);

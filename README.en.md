@@ -14,17 +14,34 @@ Inside a demo world with its cast (interface in English; world content language 
 
 ## I just want to play
 
-Don't have the project folder yet? One terminal command fetches it and sets everything up (Linux/macOS; it asks before installing anything):
+Don't have the project folder yet? One terminal command fetches it and sets everything up (it asks before installing anything):
+
+**Linux / macOS:**
 
 ```bash
 curl -fsSL <raw URL of scripts/install.sh in this repo> | bash
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+irm <raw URL of scripts/install.ps1 in this repo> | iex
+```
+
 Or from a folder you already cloned:
 
 ```bash
-bash scripts/install.sh
+bash scripts/install.sh          # Linux / macOS
+.\scripts\install.ps1            # Windows PowerShell
 ```
+
+On Linux (x86_64) without Docker and without a system PostgreSQL, add `--pg-artifact` to let the installer drop a no-install embedded PostgreSQL 17+pgvector into your user directory:
+
+```bash
+curl -fsSL <raw URL> | bash -s -- --pg-artifact <tarball URL of the artifact>
+```
+
+(The embedded artifact is linux-x64 only for now; everywhere else, use the regular paths below.)
 
 If you already have the REALM project folder, choose the entry point for your system.
 

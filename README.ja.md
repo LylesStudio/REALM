@@ -14,17 +14,34 @@
 
 ## とにかく遊びたい方へ
 
-まだフォルダを持っていませんか？　ターミナルで1コマンドだけ実行すれば、取得からセットアップまで全部済みます（Linux/macOS 向け。何かを入れる前に必ず確認します）。
+まだフォルダを持っていませんか？　ターミナルで1コマンドだけ実行すれば、取得からセットアップまで全部済みます（何かを入れる前に必ず確認します）。
+
+**Linux / macOS：**
 
 ```bash
 curl -fsSL <このリポジトリの scripts/install.sh の raw URL> | bash
 ```
 
+**Windows（PowerShell）：**
+
+```powershell
+irm <このリポジトリの scripts/install.ps1 の raw URL> | iex
+```
+
 すでにクローン済みのフォルダ内なら、これだけでもOKです。
 
 ```bash
-bash scripts/install.sh
+bash scripts/install.sh          # Linux / macOS
+.\scripts\install.ps1            # Windows PowerShell
 ```
+
+Docker もシステムの PostgreSQL も入れたくない Linux（x86_64）の方は、`--pg-artifact` を付けるとインストーラーが組み込み PostgreSQL 17+pgvector をユーザーディレクトリに入れます。
+
+```bash
+curl -fsSL <raw URL> | bash -s -- --pg-artifact <アーティファクトの tar.gz URL>
+```
+
+（組み込みアーティファクトは現時点では linux-x64 のみです。それ以外の環境は下の通常手順で。）
 
 REALMのフォルダをすでに持っている場合は、OSに合わせて起動してください。
 
