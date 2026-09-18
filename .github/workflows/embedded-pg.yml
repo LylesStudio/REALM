@@ -197,16 +197,11 @@ jobs:
           setlocal
           set "bindir=%~dp0"
           set "prefix=%bindir:~0,-1%\.."
-          if "%~1"=="--version" echo PostgreSQL 17.10
-          if "%~1"=="--bindir" echo %bindir:~0,-1%
-          if "%~1"=="--libdir" echo %prefix%\lib
-          if "%~1"=="--pkglibdir" echo %prefix%\lib
-          if "%~1"=="--sharedir" echo %prefix%\share
-          if "%~1"=="--version" exit /b 0
-          if "%~1"=="--bindir" exit /b 0
-          if "%~1"=="--libdir" exit /b 0
-          if "%~1"=="--pkglibdir" exit /b 0
-          if "%~1"=="--sharedir" echo %prefix%\share
+          if "%~1"=="--version" (echo PostgreSQL 17.10 & exit /b 0)
+          if "%~1"=="--bindir" (echo %bindir:~0,-1% & exit /b 0)
+          if "%~1"=="--libdir" (echo %prefix%\lib & exit /b 0)
+          if "%~1"=="--pkglibdir" (echo %prefix%\lib & exit /b 0)
+          if "%~1"=="--sharedir" (echo %prefix%\share & exit /b 0)
           echo usage: pg_config [--version^|--bindir^|--libdir^|--pkglibdir^|--sharedir] 1>&2
           exit /b 1
           '@ | Set-Content -Encoding ascii "$bundle\bin\pg_config.cmd"
