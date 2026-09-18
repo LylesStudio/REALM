@@ -78,11 +78,16 @@ try {
       current_setting('listen_addresses') AS listen_addresses
   `);
   const connected = endpoint.rows[0];
+  const dockerLocal = process.env.REALM_POSTGRES_MODE === "docker";
   const serverAddress = connected.server_address?.replace(/\/\d+$/, "");
-  if (!["127.0.0.1", "::1"].includes(serverAddress)) {
+  if (!dockerLocal && !["127.0.0.1", "::1"].includes(serverAddress)) {
     throw new Error("Refusing to migrate a PostgreSQL server outside loopback.");
   }
-  if (connected.server_port !== port || connected.database_name !== database) {
+  if (dockerLocal && !["*", "0.0.0.0", "::"].includes(connected.listen_addresses)) {
+    throw new Error("Docker PostgreSQL listener does not match the explicit local container mode.");
+  }
+  const expectedServerPort = dockerLocal ? 5432 : port;
+  if (connected.server_port !== expectedServerPort || connected.database_name !== database) {
     throw new Error("Connected PostgreSQL endpoint does not match DATABASE_URL.");
   }
 
@@ -195,8 +200,11 @@ try {
       (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count
   `);
   const state = verification.rows[0];
-  if (!["127.0.0.1", "localhost", "::1"].includes(state.listen_addresses)) {
+  if (!dockerLocal && !["127.0.0.1", "localhost", "::1"].includes(state.listen_addresses)) {
     throw new Error("PostgreSQL is not restricted to a loopback listener.");
+  }
+  if (dockerLocal && !["*", "0.0.0.0", "::"].includes(state.listen_addresses)) {
+    throw new Error("Docker PostgreSQL listener is not the explicit local container listener.");
   }
   console.log(
     `verified ${state.database_name} on ${state.listen_addresses}:${state.port}; pgvector ${state.vector_version}; ${state.table_count} tables`,

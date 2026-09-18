@@ -45,6 +45,97 @@ function executable(name) {
   return path;
 }
 
+const dockerMode = process.env.REALM_POSTGRES_MODE === "docker";
+const dockerImage = process.env.REALM_POSTGRES_DOCKER_IMAGE ?? "pgvector/pgvector:pg17";
+const dockerName = process.env.REALM_POSTGRES_DOCKER_NAME ?? "realm-postgres";
+const dockerVolume = process.env.REALM_POSTGRES_DOCKER_VOLUME ?? "realm-postgres-data";
+
+function dockerRun(args, options = {}) {
+  const result = spawnSync("docker", args, {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: options.capture ? "pipe" : "inherit",
+  });
+  if (!options.allowFailure && result.status !== 0) {
+    const detail = options.capture
+      ? [result.stderr, result.stdout].filter(Boolean).join("\\n").trim()
+      : "";
+    throw new Error(`docker ${args.join(" ")} failed${detail ? `: ${detail}` : "."}`);
+  }
+  return result;
+}
+
+function dockerInspect() {
+  return dockerRun(
+    ["inspect", "--format", "{{.State.Status}}", dockerName],
+    { capture: true, allowFailure: true },
+  );
+}
+
+function dockerReady() {
+  const result = dockerRun(
+    ["exec", dockerName, "pg_isready", "-U", "postgres", "-d", database],
+    { capture: true, allowFailure: true },
+  );
+  return result.status === 0;
+}
+
+function waitForDockerReady() {
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    if (dockerReady()) return;
+    spawnSync(process.platform === "win32" ? "cmd.exe" : "sh", process.platform === "win32"
+      ? ["/c", "timeout", "/t", "1", "/nobreak"]
+      : ["-c", "sleep 1"], { stdio: "ignore" });
+  }
+  throw new Error(`Docker PostgreSQL did not become ready: ${dockerName}`);
+}
+
+function startDocker() {
+  const inspected = dockerInspect();
+  const state = inspected.status === 0 ? inspected.stdout.trim() : "";
+  if (state === "running") {
+    waitForDockerReady();
+    return;
+  }
+  if (state) {
+    dockerRun(["start", dockerName]);
+    waitForDockerReady();
+    return;
+  }
+  dockerRun(["volume", "create", dockerVolume], { capture: true });
+  dockerRun([
+    "run", "--detach",
+    "--name", dockerName,
+    "--restart", "unless-stopped",
+    "--env", "POSTGRES_USER=postgres",
+    "--env", "POSTGRES_DB=" + database,
+    "--env", "POSTGRES_HOST_AUTH_METHOD=trust",
+    "--publish", `${host}:${port}:5432`,
+    "--volume", `${dockerVolume}:/var/lib/postgresql/data`,
+    dockerImage,
+  ]);
+  waitForDockerReady();
+  console.log(`REALM PostgreSQL is local-only in Docker at ${host}:${port}/${database}.`);
+}
+
+function stopDocker() {
+  const inspected = dockerInspect();
+  if (inspected.status === 0 && inspected.stdout.trim() === "running") {
+    dockerRun(["stop", dockerName]);
+  }
+  console.log("REALM Docker PostgreSQL is stopped; its named volume was kept.");
+}
+
+function statusDocker() {
+  const inspected = dockerInspect();
+  if (inspected.status === 0 && inspected.stdout.trim() === "running" && dockerReady()) {
+    console.log(`REALM Docker PostgreSQL is ready at ${host}:${port}/${database}.`);
+    return;
+  }
+  console.error(`REALM Docker PostgreSQL is not ready (${dockerName}).`);
+  process.exitCode = 1;
+}
+
 function run(name, args, options = {}) {
   const result = spawnSync(executable(name), args, {
     cwd: projectRoot,
@@ -152,6 +243,10 @@ function startServer() {
 
 switch (action) {
   case "start": {
+    if (dockerMode) {
+      startDocker();
+      break;
+    }
     initialize();
     mkdirSync(socketDirectory, { recursive: true });
     if (controlStatus().status !== 0) {
@@ -170,6 +265,10 @@ switch (action) {
     break;
   }
   case "stop": {
+    if (dockerMode) {
+      stopDocker();
+      break;
+    }
     if (controlStatus().status === 0) {
       run("pg_ctl", ["-D", dataDirectory, "-m", "fast", "-w", "stop"]);
     }
@@ -177,6 +276,10 @@ switch (action) {
     break;
   }
   case "status": {
+    if (dockerMode) {
+      statusDocker();
+      break;
+    }
     const controlled = controlStatus();
     const ready = readiness();
     if (controlled.status === 0 && ready.status === 0) {

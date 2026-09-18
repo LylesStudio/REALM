@@ -44,13 +44,13 @@ Run REALM locally or on a network you control. Do not expose the default develop
 ### Install
 
 ```bash
-npm ci
-cp .env.example .env.local
-npm run db:postgres:bootstrap
-npm run dev
+node scripts/setup-web.mjs
 ```
 
-Open `http://127.0.0.1:9999` unless you changed `HOST_BIND` or `PORT`.
+The CLI checks Node.js, npm, PostgreSQL/pgvector, and Docker. After confirmation it can install the supported missing prerequisite, create or update only the local database settings in `.env.local`, run migrations and the demo seed, start REALM, and open the browser. Use `node scripts/setup-web.mjs --check` for a read-only environment report; use `--yes` only when you want to accept all proposed installation/configuration actions.
+
+For details and the Docker fallback, see [Web bootstrap](./docs/WEB-BOOTSTRAP.md).
+
 
 Configure a model provider through the local settings page. API keys belong only in the untracked `.env.local` or the local settings store; never commit them, paste them into issues, or include them in logs.
 
