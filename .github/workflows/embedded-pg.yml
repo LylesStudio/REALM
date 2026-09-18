@@ -81,6 +81,16 @@ jobs:
           cp "$so" "$HOME/bundle/lib/postgresql/$(basename "$so")"
           cp "$(find /tmp/stage -name 'vector.control' | head -1)" "$HOME/bundle/share/postgresql/extension/"
           cp "$(find /tmp/stage -name 'vector--0.8.6.sql' | head -1)" "$HOME/bundle/share/postgresql/extension/"
+      - name: soname 别名修复（npm 包丢符号链接：libX.N.M.P.dylib → libX.N.dylib）
+        run: |
+          set -e
+          cd "$HOME/bundle/lib"
+          for f in lib*.[0-9]*.[0-9]*.[0-9]*.dylib; do
+            [ -f "$f" ] || continue
+            alias_name="$(echo "$f" | sed -E 's/^((lib[^.]*\.)[0-9]+)\.[0-9]+\.[0-9]+\.dylib$/\1.dylib/')"
+            [ -e "$alias_name" ] || ln -s "$f" "$alias_name"
+          done
+          ls -la | grep -E '\->' | head -6
       - name: 客户端闭包（brew psql/createdb/pg_isready → 基座自带 dylib 重定向）
         run: |
           set -e
