@@ -65,9 +65,14 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 
 # --- 2. Source ------------------------------------------------------------------
 if (-not $SourceUrl) {
-  $gitRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-  if (Test-Path (Join-Path $gitRoot '.git')) {
-    try { $SourceUrl = (& git -C $gitRoot remote get-url origin).Trim() } catch { $SourceUrl = $null }
+  # iex 执行时 $MyInvocation.MyCommand.Path 为 $null（脚本无文件路径），
+  # 只有从文件运行时才能从本地 git 上下文推断 origin。
+  $scriptPath = $MyInvocation.MyCommand.Path
+  if ($scriptPath) {
+    $gitRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
+    if (Test-Path (Join-Path $gitRoot '.git')) {
+      try { $SourceUrl = (& git -C $gitRoot remote get-url origin).Trim() } catch { $SourceUrl = $null }
+    }
   }
 }
 if (-not $SourceUrl) { $SourceUrl = 'https://github.com/Silver-Aurora/REALM.git' }

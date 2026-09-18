@@ -118,7 +118,10 @@ command -v npm >/dev/null 2>&1 || die "npm is missing next to node; install Node
 
 # --- 2. Source -----------------------------------------------------------------
 SOURCE_URL="${REALM_SOURCE_URL:-}"
-if [[ -z "$SOURCE_URL" && -d "$(dirname "${BASH_SOURCE[0]}")/../.git" ]]; then
+# curl | bash 管道执行时 BASH_SOURCE 为空——只有脚本以文件形式运行
+# 才能从旁边的 .git 推断 origin，否则 ../.git 可能命中无关仓库。
+if [[ -z "$SOURCE_URL" && -n "${BASH_SOURCE[0]:-}" \
+    && -d "$(dirname "${BASH_SOURCE[0]}")/../.git" ]]; then
   repo_dir="$(dirname "${BASH_SOURCE[0]}")/.."
   # prefer origin, else whatever the first configured remote is
   SOURCE_URL="$(git -C "$repo_dir" remote get-url origin 2>/dev/null \
