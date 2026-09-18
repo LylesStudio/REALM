@@ -19,12 +19,6 @@
 **Linux / macOS（Apple Silicon）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
-```
-
-Docker もシステムの PostgreSQL も入れたくない方は `--embedded-pg` を付けてください。プラットフォーム別の組み込み PostgreSQL 17+pgvector アーティファクト（linux-x64 / darwin-arm64 / windows-x64。GitHub Actions ビルド＋SHA256 チェックサム付き）を自動でダウンロードしてユーザーディレクトリに入れます。
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
 ```
 
@@ -33,13 +27,19 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 > ⚠️ 以下のコマンドは **PowerShell** で実行してください（スタートメニューを右クリック →「ターミナル」または「Windows PowerShell」）。「コマンド プロンプト cmd」では**ない**—— `iex`/`irm` は PowerShell のコマンドで、cmd では「認識されません」と出ます。cmd の場合は先に `powershell` と入力して Enter を押すか、`install.cmd` をダブルクリックしてください。
 
 ```powershell
-irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
-組み込み PostgreSQL 付きの1コマンド：
+どちらのコマンドも、プラットフォーム別の組み込み PostgreSQL 17+pgvector アーティファクト（linux-x64 / darwin-arm64 / windows-x64。GitHub Actions ビルド＋SHA256 チェックサム付き）を自動でダウンロードしてユーザーディレクトリにインストールし、初期設定まで全部済ませます。
+
+**すでに PostgreSQL 17 + pgvector をお持ちの方、Docker を使う方**は `--embedded-pg` を外してください。インストーラーが既存環境を自動で検出します。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
+```
 
 ```powershell
-iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
 ```
 
 すでにクローン済みのフォルダ内なら、これだけでもOKです。

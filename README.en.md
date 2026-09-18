@@ -19,12 +19,6 @@ Don't have the project folder yet? One terminal command fetches it and sets ever
 **Linux / macOS (Apple Silicon):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
-```
-
-No Docker and no system PostgreSQL? Add `--embedded-pg` and the installer downloads the per-platform embedded PostgreSQL 17+pgvector artifact (linux-x64 / darwin-arm64 / windows-x64, built by GitHub Actions with SHA256 checksums) into your user directory:
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
 ```
 
@@ -33,13 +27,19 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 > ⚠️ Run these in **PowerShell** (right-click Start → "Terminal" / "Windows PowerShell"), **not** in "Command Prompt cmd" — `iex`/`irm` are PowerShell commands and cmd reports "not recognized". On cmd, type `powershell` and Enter first, or just double-click `install.cmd`.
 
 ```powershell
-irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
-One-liner with the embedded PostgreSQL:
+These commands download the per-platform embedded PostgreSQL 17+pgvector artifact (linux-x64 / darwin-arm64 / windows-x64, built by GitHub Actions with SHA256 checksums), install it into your user directory, and finish the whole setup.
+
+**Already have PostgreSQL 17 + pgvector, or prefer Docker?** Drop `--embedded-pg` — the installer detects your existing environment automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
+```
 
 ```powershell
-iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
 ```
 
 Or from a folder you already cloned:

@@ -19,12 +19,6 @@
 **Linux / macOS（Apple Silicon）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
-```
-
-没有 Docker 也不想装系统级 PostgreSQL？加 `--embedded-pg`，安装器会自动下载对应平台的嵌入式 PostgreSQL 17+pgvector 构件（linux-x64 / darwin-arm64 / windows-x64，由 GitHub Actions 构建并附 SHA256 校验）装进用户目录：
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
 ```
 
@@ -33,13 +27,19 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 > ⚠️ 以下命令必须在 **PowerShell** 里运行（右键开始菜单 →「终端」或「Windows PowerShell」），不是「命令提示符 cmd」——`iex`/`irm` 是 PowerShell 命令，cmd 会报「不是内部或外部命令」。cmd 用户先输入 `powershell` 回车切换，或直接双击 `install.cmd`。
 
 ```powershell
-irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
+iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
 ```
 
-带嵌入式 PostgreSQL 的一条命令：
+以上命令会自动下载对应平台的嵌入式 PostgreSQL 17+pgvector 构件（linux-x64 / darwin-arm64 / windows-x64，由 GitHub Actions 构建并附 SHA256 校验），装进用户目录、完成全部初始化。
+
+**已经有 PostgreSQL 17 + pgvector，或者用 Docker 的进阶用户**，去掉 `--embedded-pg` 即可，安装器会自动探测现有环境：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash
+```
 
 ```powershell
-iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1) } -EmbeddedPg"
+irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.ps1 | iex
 ```
 
 或者在你已经克隆好的文件夹里运行：
