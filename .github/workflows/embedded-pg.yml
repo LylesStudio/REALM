@@ -255,12 +255,19 @@ jobs:
         run: |
           cd artifacts
           sha256sum *.tar.gz | tee sha256sums.txt
-      - name: 创建 GitHub Release
+      - name: 创建/刷新 GitHub Release（幂等：tag 重放时刷新 assets 而非报错）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#pg-}"
-          gh release create "embedded-pg-${VERSION}" \
-            --title "Embedded PostgreSQL ${VERSION} + pgvector" \
-            --notes "realm-embedded-pg artifacts (linux-x64 / darwin-arm64 / windows-x64). macOS 仅支持 Apple Silicon。" \
-            artifacts/*.tar.gz artifacts/sha256sums.txt
+          RELEASE="embedded-pg-${VERSION}"
+          if gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE already exists; refreshing assets"
+            gh release upload "$RELEASE" artifacts/*.tar.gz artifacts/sha256sums.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE" \
+              --title "Embedded PostgreSQL ${VERSION} + pgvector" \
+              --notes "realm-embedded-pg artifacts (linux-x64 / darwin-arm64 / windows-x64). macOS 仅支持 Apple Silicon。" \
+              artifacts/*.tar.gz artifacts/sha256sums.txt
+          fi
