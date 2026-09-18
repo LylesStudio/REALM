@@ -94,6 +94,7 @@ function candidatePostgresBins(environment, platform) {
   }
   if (platform === "darwin") {
     candidates.push(
+      join(homedir(), ".local", "realm-pgsql", "17.10", "bin"),
       "/opt/homebrew/opt/postgresql@17/bin",
       "/usr/local/opt/postgresql@17/bin",
       "/opt/homebrew/bin",

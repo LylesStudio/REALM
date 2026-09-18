@@ -81,31 +81,25 @@ jobs:
           cp "$so" "$HOME/bundle/lib/postgresql/$(basename "$so")"
           cp "$(find /tmp/stage -name 'vector.control' | head -1)" "$HOME/bundle/share/postgresql/extension/"
           cp "$(find /tmp/stage -name 'vector--0.8.6.sql' | head -1)" "$HOME/bundle/share/postgresql/extension/"
-      - name: 客户端闭包（brew psql/createdb/pg_isready + dylib 重定向）
+      - name: 客户端闭包（brew psql/createdb/pg_isready → 基座自带 dylib 重定向）
         run: |
           set -e
           BREW_BIN="$(brew --prefix postgresql@17)/bin"
-          BREW_LIB="$(brew --prefix postgresql@17)/lib"
           BUNDLE="$HOME/bundle"
-          mkdir -p "$BUNDLE/deps"
           for tool in psql createdb pg_isready; do
             cp "$BREW_BIN/$tool" "$BUNDLE/bin/$tool"
-            install_name_tool -change "$BREW_LIB/libpq.5.dylib" @rpath/libpq.5.dylib "$BUNDLE/bin/$tool" || true
             install_name_tool -add_rpath @loader_path/../lib "$BUNDLE/bin/$tool" || true
+            # brew 引用（cellar/opt 绝对路径）凡基座 lib/ 有同名 dylib 一律改 @rpath。
+            otool -L "$BUNDLE/bin/$tool" \
+              | awk '/\/(opt\/homebrew|usr\/local)\//{print $1}' \
+              | while read -r ref; do
+                  base="$(basename "$ref")"
+                  if [ -f "$BUNDLE/lib/$base" ]; then
+                    install_name_tool -change "$ref" "@rpath/$base" "$BUNDLE/bin/$tool" || true
+                  fi
+                done
           done
-          cp "$BREW_LIB/libpq.5.dylib" "$BUNDLE/lib/libpq.5.dylib"
-          # libpq 的 ssl/crypto 引用重定向到 bundle/deps
-          SSL_PATH=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk '/libssl/{print $1; exit}')
-          CRYPTO_PATH=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk '/libcrypto/{print $1; exit}')
-          for pair in "libssl:libssl.3.dylib" "libcrypto:libcrypto.3.dylib"; do
-            src_var="${pair%%:*}"; file="${pair##*:}"
-            src_path=$(otool -L "$BREW_LIB/libpq.5.dylib" | awk -v n="$file" 'index($0,n){print $1; exit}')
-            if [ -n "$src_path" ] && [ -f "$src_path" ]; then
-              cp "$src_path" "$BUNDLE/deps/$file"
-              install_name_tool -change "$src_path" "@loader_path/../deps/$file" "$BUNDLE/lib/libpq.5.dylib" || true
-            fi
-          done
-          install_name_tool -add_rpath @loader_path/../lib "$BUNDLE/lib/libpq.5.dylib" || true
+          otool -L "$BUNDLE/bin/psql" | head -6
       - name: pg_config（重定位感知 sh 版）
         run: |
           cat > "$HOME/bundle/bin/pg_config" <<'EOF'
