@@ -206,7 +206,7 @@ jobs:
           if "%~1"=="--bindir" exit /b 0
           if "%~1"=="--libdir" exit /b 0
           if "%~1"=="--pkglibdir" exit /b 0
-          if "%~1"=="--sharedir" exit /b 0
+          if "%~1"=="--sharedir" echo %prefix%\share
           echo usage: pg_config [--version^|--bindir^|--libdir^|--pkglibdir^|--sharedir] 1>&2
           exit /b 1
           '@ | Set-Content -Encoding ascii "$bundle\bin\pg_config.cmd"

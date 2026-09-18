@@ -82,7 +82,12 @@ function verifyBundle(binDir) {
   if (missing.length > 0) {
     fail(`bundle incomplete, missing: ${missing.join(", ")}`);
   }
-  if (!existsSync(join(binDir, "..", "share", "postgresql", "extension", "vector.control"))) {
+  // zonkyio 布局平台差异：Windows 是 share/extension，Linux/macOS 是
+  // share/postgresql/extension——校验要按平台找 vector.control。
+  const shareExtensionDir = platform() === "win32"
+    ? join("share", "extension")
+    : join("share", "postgresql", "extension");
+  if (!existsSync(join(binDir, "..", shareExtensionDir, "vector.control"))) {
     fail("bundle incomplete: pgvector extension control file missing");
   }
   const probe = spawnSync(join(binDir, executableName("postgres")), ["--version"], {
