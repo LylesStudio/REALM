@@ -159,9 +159,18 @@ if ($EmbeddedPg -and -not $PgArtifact) {
 }
 
 if ($PgArtifact) {
+  # 先探测安装目录再调用 version：未安装时该命令会写 stderr，
+  # 而 $ErrorActionPreference='Stop' 会把原生命令的 stderr 提升为致命错误。
+  $pgRoot = Join-Path $env:USERPROFILE '.local\realm-pgsql'
+  $installedBin = Get-ChildItem -Path $pgRoot -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName 'bin' } |
+    Where-Object { Test-Path (Join-Path $_ 'postgres.exe') } |
+    Select-Object -First 1
   $installedVersion = $null
-  $versionOut = (& node (Join-Path $AppDir 'scripts/embedded-pg.mjs') version 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $versionOut -match '(\d+\.\d+)') { $installedVersion = $Matches[1] }
+  if ($installedBin) {
+    $versionOut = (& node (Join-Path $AppDir 'scripts/embedded-pg.mjs') version 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $versionOut -match '(\d+\.\d+)') { $installedVersion = $Matches[1] }
+  }
   if ($installedVersion -and $pgArtVersion -and $installedVersion -eq $pgArtVersion) {
     Write-RealmLog "embedded PostgreSQL $installedVersion already up to date; skipping"
   } else {
