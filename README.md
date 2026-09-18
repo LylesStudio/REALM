@@ -44,8 +44,14 @@ Run REALM locally or on a network you control. Do not expose the default develop
 ### Install
 
 ```bash
-node scripts/setup-web.mjs
+# macOS/Linux
+bash scripts/setup-web.sh
+
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File scripts/setup-web.ps1
 ```
+
+If Node.js 22.13+ is already installed, `node scripts/setup-web.mjs` is equivalent.
 
 The CLI checks Node.js, npm, PostgreSQL/pgvector, and Docker. After confirmation it can install the supported missing prerequisite, create or update only the local database settings in `.env.local`, run migrations and the demo seed, start REALM, and open the browser. Use `node scripts/setup-web.mjs --check` for a read-only environment report; use `--yes` only when you want to accept all proposed installation/configuration actions.
 

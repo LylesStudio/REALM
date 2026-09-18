@@ -87,6 +87,15 @@ test("mergeEnvText preserves comments and replaces one key without duplicates", 
   assert.match(merged, /^HOST_BIND=127\.0\.0\.1$/m);
 });
 
+test("Node-less wrappers offer explicit package-manager installation paths", () => {
+  const unix = readFileSync(new URL("../scripts/setup-web.sh", import.meta.url), "utf8");
+  const windows = readFileSync(new URL("../scripts/setup-web.ps1", import.meta.url), "utf8");
+  assert.match(unix, /brew install node@22/);
+  assert.match(unix, /setup-web\.mjs/);
+  assert.match(windows, /OpenJS\.NodeJS\.LTS/);
+  assert.match(windows, /setup-web\.mjs/);
+});
+
 test("local postgres has an explicit Docker mode with pinned pgvector image and loopback publish", () => {
   const source = readFileSync(new URL("../scripts/local-postgres.mjs", import.meta.url), "utf8");
   assert.match(source, /REALM_POSTGRES_MODE === "docker"/);
