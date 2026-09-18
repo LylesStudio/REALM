@@ -129,9 +129,23 @@ try {
   Pop-Location
 }
 
-# --- 4. Embedded PostgreSQL (linux-x64 only; honest refusal elsewhere) ----------
+# --- 4. Embedded PostgreSQL（构件为 windows-x64 时本机直装） -------------------
 if ($PgArtifact) {
-  throw 'The embedded PostgreSQL artifact is linux-x64 only for now. On Windows, install PostgreSQL 17 + pgvector locally or use Docker; setup-web will detect either.'
+  $pgTmp = $PgArtifact
+  if ($PgArtifact -like 'http*') {
+    $pgTmp = Join-Path ([IO.Path]::GetTempPath()) 'realm-embedded-pg.tar.gz'
+    Write-RealmLog 'downloading embedded PostgreSQL artifact'
+    Invoke-WebRequest -UseBasicParsing -Uri $PgArtifact -OutFile $pgTmp
+  }
+  & node (Join-Path $AppDir 'scripts/embedded-pg.mjs') info 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    Write-RealmLog 'embedded PostgreSQL already installed; skipping'
+  } else {
+    Write-RealmLog 'installing embedded PostgreSQL 17 + pgvector (user directory)'
+    & node (Join-Path $AppDir 'scripts/embedded-pg.mjs') install --artifact $pgTmp
+    if ($LASTEXITCODE -ne 0) { throw 'embedded PostgreSQL install failed' }
+  }
+  if ($PgArtifact -like 'http*') { Remove-Item -Force $pgTmp -ErrorAction SilentlyContinue }
 }
 
 # --- 5. Hand off to the interactive web bootstrap --------------------------------

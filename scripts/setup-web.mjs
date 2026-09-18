@@ -60,10 +60,24 @@ function executableName(name, platform = process.platform) {
   return platform === "win32" ? `${name}.exe` : name;
 }
 
+// Windows 可执行体解析：真实安装是 .exe，嵌入式构件的 pg_config 等是
+// .cmd 批处理 shim——两种形态都要认（.bat 兜底）。
+function resolveExecutablePath(bin, name, platform = process.platform) {
+  if (platform !== "win32") {
+    const path = join(bin, name);
+    return existsSync(path) ? path : null;
+  }
+  for (const candidate of [`${name}.exe`, `${name}.cmd`, `${name}.bat`]) {
+    const path = join(bin, candidate);
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
 function hasPostgresTools(bin, platform = process.platform) {
   if (!bin) return false;
   return ["pg_ctl", "initdb", "psql", "createdb", "pg_config"]
-    .every((name) => existsSync(join(bin, executableName(name, platform))));
+    .every((name) => resolveExecutablePath(bin, name, platform) !== null);
 }
 
 function candidatePostgresBins(environment, platform) {
@@ -89,6 +103,7 @@ function candidatePostgresBins(environment, platform) {
   if (platform === "win32") {
     const programFiles = environment.ProgramFiles ?? "C:\\Program Files";
     candidates.push(
+      join(homedir(), ".local", "realm-pgsql", "17.10", "bin"),
       join(programFiles, "PostgreSQL", "17", "bin"),
       join(programFiles, "PostgreSQL", "16", "bin"),
     );
@@ -105,7 +120,8 @@ export function findPostgresBin(environment = process.env, platform = process.pl
 
 function pgVectorAvailable(bin, platform = process.platform) {
   if (!bin) return false;
-  const pgConfig = join(bin, executableName("pg_config", platform));
+  const pgConfig = resolveExecutablePath(bin, "pg_config", platform);
+  if (!pgConfig) return false;
   const result = spawnSync(pgConfig, ["--sharedir"], { encoding: "utf8", stdio: "pipe" });
   if (result.status !== 0) return false;
   const share = result.stdout.trim();

@@ -63,9 +63,22 @@ function executableName(name) {
   return platform() === "win32" ? `${name}.exe` : name;
 }
 
+// 与 setup-web.mjs 同规则：Windows 上 .cmd/.bat shim 也算数。
+function resolveExecutablePath(binDir, name) {
+  if (platform() !== "win32") {
+    const path = join(binDir, name);
+    return existsSync(path) ? path : null;
+  }
+  for (const candidate of [`${name}.exe`, `${name}.cmd`, `${name}.bat`]) {
+    const path = join(binDir, candidate);
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
 function verifyBundle(binDir) {
   const missing = REQUIRED_BINARIES.filter(
-    (name) => !existsSync(join(binDir, executableName(name))),
+    (name) => resolveExecutablePath(binDir, name) === null,
   );
   if (missing.length > 0) {
     fail(`bundle incomplete, missing: ${missing.join(", ")}`);

@@ -61,7 +61,7 @@ jobs:
       - name: 基座解包（zonkyio 可重定位 PG 17.10）
         run: |
           npm pack "@embedded-postgres/darwin-${{ matrix.arch }}@${{ env.NPM_BASE_VERSION }}"
-          tar -xzf "embedded-postgres-darwin-${{ matrix.arch }}-"*.tgz
+          tar -xzf "embedded-postgres-darwin-${{ matrix.arch }}-${{ env.NPM_BASE_VERSION }}.tgz"
           mkdir -p "$HOME/bundle"
           cp -a package/native/. "$HOME/bundle/"
           ls "$HOME/bundle/bin"
@@ -76,8 +76,9 @@ jobs:
           cd "/tmp/pgvector-${{ env.PGVECTOR_VERSION }}"
           make "PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config" USE_PGXS=1 OPTFLAGS="" -j3
           make "PG_CONFIG=$(brew --prefix postgresql@17)/bin/pg_config" USE_PGXS=1 install DESTDIR=/tmp/stage
-          so=$(find /tmp/stage -name 'vector.so' | head -1)
-          cp "$so" "$HOME/bundle/lib/postgresql/vector.so"
+          so=$(find /tmp/stage \( -name 'vector.so' -o -name 'vector.dylib' \) | head -1)
+          [ -n "$so" ] || { echo 'pgvector build produced no vector module'; exit 1; }
+          cp "$so" "$HOME/bundle/lib/postgresql/$(basename "$so")"
           cp "$(find /tmp/stage -name 'vector.control' | head -1)" "$HOME/bundle/share/postgresql/extension/"
           cp "$(find /tmp/stage -name 'vector--0.8.6.sql' | head -1)" "$HOME/bundle/share/postgresql/extension/"
       - name: 客户端闭包（brew psql/createdb/pg_isready + dylib 重定向）
@@ -150,7 +151,7 @@ jobs:
         shell: pwsh
         run: |
           npm pack "@embedded-postgres/windows-x64@${{ env.NPM_BASE_VERSION }}"
-          tar -xzf "embedded-postgres-windows-x64-"*.tgz
+          tar -xzf "embedded-postgres-windows-x64-${{ env.NPM_BASE_VERSION }}.tgz"
           New-Item -ItemType Directory -Force "$env:USERPROFILE\bundle" | Out-Null
           Copy-Item -Recurse -Force "package\native\*" "$env:USERPROFILE\bundle\"
           # 剥掉 GUI 工具链 DLL（wx* 属于 pgAdmin，服务端/客户端均不链接）
