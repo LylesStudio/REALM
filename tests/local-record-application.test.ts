@@ -92,6 +92,9 @@ function createFixture(actionCatalog?: ActionAffordanceCatalog) {
     async loadRecentAuthorizedEvents() {
       return [];
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadForPlayer() {
       return loadProjection();
     },

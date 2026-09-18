@@ -371,7 +371,7 @@ test("connectivity probe is an English-only structured chain with shared schema"
     await store.saveProfile({
       schemaVersion: 1,
       providerId: "lmstudio",
-      baseUrl: "http://127.0.0.1:8823/v1",
+      baseUrl: "http://127.0.0.1:1234/v1",
       apiKey: "",
       selectedModel: "probe-model",
       thinking: "disabled",

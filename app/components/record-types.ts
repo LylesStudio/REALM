@@ -9,8 +9,8 @@ import {
   type SemanticSegmentKind,
 } from "../../modules/presentation/semantic-segments.ts";
 
-export type EventRole = "narrator" | "character" | "player" | "system";
-export type EventStatus = "pending" | "committed" | "failed";
+type EventRole = "narrator" | "character" | "player" | "system";
+type EventStatus = "pending" | "committed" | "failed";
 
 export interface TimelineEvent {
   id: string;
@@ -93,7 +93,7 @@ export interface ActionAffordance {
   suggestedText: string;
 }
 
-export interface CastMember {
+interface CastMember {
   id: string;
   name: string;
   role: string;
@@ -103,7 +103,7 @@ export interface CastMember {
   isActive: boolean;
 }
 
-export interface NavigationItem {
+interface NavigationItem {
   id: string;
   title: string;
   status: string;
@@ -730,6 +730,27 @@ export function normalizeRecordEnvelope(
     firstNight: normalizeFirstNight(source.firstNight),
     selfPlay: normalizeSelfPlay(source.selfPlay),
   };
+}
+
+/**
+ * Polling normalizers intentionally return fresh objects. The silent refresh
+ * path can skip a React update when the complete visible envelope is unchanged.
+ * writeToken is excluded: the server re-issues an opaque token on every load
+ * (randomToken per issue), so a byte-level compare would never dedup. An
+ * unchanged canonical version keeps the previously issued token valid, so
+ * skipping the update is both safe and the intended win.
+ */
+export function recordEnvelopesEqual(
+  left: RecordEnvelope | null | undefined,
+  right: RecordEnvelope | null | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const { writeToken: _leftToken, ...leftData } = left;
+  const { writeToken: _rightToken, ...rightData } = right;
+  void _leftToken;
+  void _rightToken;
+  return JSON.stringify(leftData) === JSON.stringify(rightData);
 }
 
 function normalizeSelfPlay(value: unknown): RecordEnvelope["selfPlay"] {

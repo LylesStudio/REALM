@@ -48,6 +48,17 @@ export function StoryView({
             ].filter((part) => part.trim().length > 0).join(" · ")}
           </p>
         </div>
+        <div className="record-heading-actions">
+          {currentRecordId.trim() ? (
+            <button
+              className="record-action-button is-primary"
+              onClick={() => onOpenRecord(currentRecordId)}
+              type="button"
+            >
+              {uiText("ui.storyView.openRecord", uiLanguage)}
+            </button>
+          ) : null}
+        </div>
       </header>
 
       <div className="view-panel-scroll">
@@ -90,6 +101,11 @@ export function StoryView({
                   {record.timelineKind === "merged" ? (
                     <span className="view-badge">
                       {uiText("ui.storyView.mergedBadge", uiLanguage)}
+                    </span>
+                  ) : null}
+                  {record.timelineKind === "branch" ? (
+                    <span className="view-badge">
+                      {uiText("ui.record.branchBadge", uiLanguage)}
                     </span>
                   ) : null}
                 </li>

@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B5：M4 tool-pause / parallel-candidates 运行态静态围栏
- * （docs/development/T10-B5-M4-RUNTIME-STATUS.md §三）。
+ * （runtime status contract）。
  * 证明：两模块存在且头部带 contract-only-deferred 标记；活动生产代码
  * （app/、modules/application/）零导入；标记内容不被悄悄改写为已接线。
  */

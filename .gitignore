@@ -44,6 +44,10 @@ yarn-error.log*
 /test-results/
 /.public-release/
 /release-staging/
+# Tauri/Rust 生成物（Android gen 与 cargo target 均按需再生）。
+/src-tauri/target/
+/src-tauri/gen/
+/.tauri-resources/
 
 # Finder/iCloud conflict copies are preserved locally but excluded from builds.
 /app/globals 2.css

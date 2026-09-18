@@ -436,6 +436,9 @@ export const REQUIRES_MIGRATIONS: readonly string[] = [
   "0041_article_qualification_and_import_entries.sql",
   "0042_realm_transfer_and_import_jobs.sql",
   "0043_propagation_node_audience_archived_guard.sql",
+  // records.timeline_kind 新增 'branch' 枚举值：含分支记录的包导入到
+  // 未应用 0044 的库会被 CHECK 拒绝，提前以清单 fail-closed。
+  "0044_record_branch_timeline_kind.sql",
 ];
 
 export interface ManifestTableEntry {

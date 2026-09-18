@@ -3,7 +3,7 @@
  *
  * @runtime-status contract-only-deferred — 批次 T10-B5：全库零生产调用方；
  * 活动 gateway 只有完整文本 chat/stream、无流式 tool-call 事件，接线前置
- * 条件见 docs/development/T10-B5-M4-RUNTIME-STATUS.md §二。函数行为不变。
+ * The feature remains contract-only until its runtime prerequisites are available.
  *
  * When a model asks for a tool mid-generation, output pauses: no new body
  * text is produced while the tool resolves locally. The continuation phase

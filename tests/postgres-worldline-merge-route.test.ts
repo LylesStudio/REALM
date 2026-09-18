@@ -41,6 +41,12 @@ const MIGRATIONS = [
   "0020_record_self_play_sessions.sql",
   "0021_world_admin.sql",
   "0022_worldline_merge_grants.sql",
+  // branch 命令现在创建可玩拓扑：scene 快照列（0029/0039/0040）与
+  // records.timeline_kind='branch' 枚举（0044）。
+  "0029_record_scene_tension.sql",
+  "0039_scene_weather_snapshot.sql",
+  "0040_scene_display_time_snapshot.sql",
+  "0044_record_branch_timeline_kind.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -155,10 +161,13 @@ test(
     const world = (await library.list(scope)).worlds.find(
       (item) => item.name === "合并试验场",
     )!;
+    const starterRecord = world.stories[0]?.records[0];
+    assert.ok(starterRecord, "world should have a starter record to branch from");
     await library.create(scope, {
       kind: "branch",
       worldId: world.id,
       label: "岔流",
+      sourceRecordId: starterRecord.id,
     });
     const worldlines = (await library.list(scope)).worlds.find(
       (item) => item.id === world.id,

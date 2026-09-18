@@ -6,7 +6,7 @@
  * 安全说明（诚实边界）：
  * - POSTGRES_HOST_AUTH_METHOD=trust 仅用于一次性测试集群（若干既有套件
  *   依赖空密码连接形态）；绑定 127.0.0.1，非本机不可达；用后即销毁。
- * - realm_transfer 只在本集群 provision（绝不写共享 realm_dev 或任何
+ * - realm_transfer 只在本集群 provision（绝不写共享 realm_test 或任何
  *   长期实例）。
  * - 清理契约：stop() 销毁容器（含全部临时库）；进程崩溃由调用方外层
  *   t.after/finally 兜底 docker rm -f。

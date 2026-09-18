@@ -8,6 +8,7 @@ import {
   normalizeCommittedEventPayload,
   normalizeRecordEnvelope,
   normalizeRecordProjection,
+  recordEnvelopesEqual,
   upsertCommittedEvent,
   type RecordProjection,
   type TimelineEvent,
@@ -106,6 +107,44 @@ test("Record envelope accepts explicit viewer authority and otherwise fails clos
   assert.equal(malformed.record.stories[0]?.status, "");
   assert.equal(malformed.record.scene.location, "");
   assert.deepEqual(malformed.record.cast, []);
+});
+
+test("silent refresh equality treats cloned envelopes as equal but preserves changes", () => {
+  const envelope = normalizeRecordEnvelope({
+    ok: true,
+    record: projection([committedEvent("event-1", 1)]),
+    writeToken: "opaque-write-token",
+    viewer: {
+      cursor: "viewer-local",
+      perspective: "character",
+      characterInstanceId: "cast-1",
+      dynamicKnowledgeVisible: true,
+      membershipRole: "player",
+    },
+  });
+  const clone = JSON.parse(JSON.stringify(envelope)) as typeof envelope;
+  assert.notStrictEqual(clone, envelope);
+  assert.equal(recordEnvelopesEqual(envelope, clone), true);
+  // writeToken 每次 load 都会重新签发（随机 opaque token）——dedup 必须
+  // 忽略 token 轮换，否则静默刷新永远触发无效 setState。
+  assert.equal(
+    recordEnvelopesEqual(envelope, { ...clone, writeToken: "next-write-token" }),
+    true,
+  );
+  // 数据变化（时间线新增事件）必须检出，不得跳过更新。
+  const changed = {
+    ...clone,
+    record: {
+      ...clone.record,
+      events: [
+        ...clone.record.events,
+        committedEvent("event-2", 2),
+      ],
+    },
+  };
+  assert.equal(recordEnvelopesEqual(envelope, changed), false);
+  assert.equal(recordEnvelopesEqual(envelope, null), false);
+  assert.equal(recordEnvelopesEqual(null, null), true);
 });
 
 test("Record envelope accepts only complete server action affordances", () => {

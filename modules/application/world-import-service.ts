@@ -390,6 +390,12 @@ const MIGRATION_PROBES: Readonly<Record<string, string>> = {
        THEN 'append_propagation_node_audience' ELSE NULL END AS probe
      FROM pg_proc
      WHERE oid = 'append_propagation_node_audience(text,text,text,text,text,text)'::regprocedure`,
+  "0044_record_branch_timeline_kind.sql":
+    `SELECT CASE WHEN pg_get_constraintdef(oid) LIKE '%''branch''%'
+       THEN 'records_timeline_kind_check' ELSE NULL END AS probe
+     FROM pg_constraint
+     WHERE conname = 'records_timeline_kind_check'
+       AND conrelid = 'records'::regclass`,
 };
 
 export function createWorldImportService(options: {
@@ -583,9 +589,6 @@ export function createWorldImportService(options: {
             Object.fromEntries(pkColumns.map((column) => [column, row[column] ?? null])))),
         ],
       );
-      if (process.env.REALM_DEBUG_SCAN) {
-        console.error("SCAN", table, pkColumns.join(","), rows.length, "rows ->", probe.rows.length, "hits");
-      }
       for (const row of probe.rows) {
         collisions.push({
           table,

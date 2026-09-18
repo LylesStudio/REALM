@@ -251,6 +251,42 @@ test("preview：已授权 viewer 用 session principal 订阅成功；query 伪�
   });
 });
 
+test("preview：stream cancel/abort/enqueue 失败汇成单次幂等清理（监听器零残留）", async () => {
+  await withGate(true, async () => {
+    const { service, spies } = createFakeService();
+    const controller = new AbortController();
+    const response = await handlePreviewGet(
+      previewRequest(`recordId=${LOCAL_RECORD_SCOPE.recordId}`, {
+        cookie: sessionCookie(SESSION_PRINCIPAL),
+        signal: controller.signal,
+      }),
+      service,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(spies.unsubscribeCalls, 0);
+    // ① cancel()（reader 侧关闭）→ 完整清理一次。
+    await response.body!.cancel();
+    assert.equal(spies.unsubscribeCalls, 1);
+    // ② cancel 后 publisher 再发事件（enqueue 必失败的路径）：
+    //    不抛错、不重复 unsubscribe——监听器零残留。
+    spies.emit(LOCAL_RECORD_SCOPE.recordId, {
+      kind: "chunk",
+      previewId: "pv_late",
+      speaker: "旁白",
+      content: "late-chunk",
+    });
+    assert.equal(spies.unsubscribeCalls, 1);
+    // ③ abort 再触发：幂等，仍是一次。
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      spies.unsubscribeCalls,
+      1,
+      "cancel/abort/enqueue 失败必须汇成单次清理，不重复 unsubscribe",
+    );
+  });
+});
+
 test("cancel：gate 开启且未登录 → 401，不触碰 service", async () => {
   await withGate(true, async () => {
     const { service, spies } = createFakeService();
@@ -398,6 +434,7 @@ function createServiceFixture(options: {
 } = {}) {
   const calls = {
     delivery: 0,
+    fullProjection: 0,
     issue: 0,
     saveLastOpened: 0,
   };
@@ -413,8 +450,14 @@ function createServiceFixture(options: {
     async loadForPlayer() {
       return null;
     },
-    async loadDeliveryForPlayer() {
+    async hasViewerProjection() {
+      // 窄授权路径计数；负例 = 无 viewer projection（非成员/未知同形）。
       calls.delivery += 1;
+      return !options.deliveryNull;
+    },
+    async loadDeliveryForPlayer() {
+      // 反证：授权路径绝不触碰全量投影。
+      calls.fullProjection += 1;
       if (options.deliveryNull) return null;
       return {
         record: { id: LOCAL_RECORD_SCOPE.recordId } as unknown as RecordProjection,
@@ -477,7 +520,8 @@ test("authorizeRecordViewer：无 viewer projection（非成员）→ 安全 404
       return true;
     },
   );
-  assert.equal(calls.delivery, 1);
+  assert.equal(calls.delivery, 1, "窄授权查询恰好一次");
+  assert.equal(calls.fullProjection, 0, "授权路径不得加载全量投影/事件");
   assert.equal(calls.issue, 0);
   assert.equal(calls.saveLastOpened, 0);
 });

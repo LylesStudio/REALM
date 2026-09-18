@@ -24,8 +24,8 @@ export const runtime = "nodejs";
 const MAX_PROMPT_LENGTH = 2_000;
 
 /**
- * 启笔铸界：
- * - POST { prompt }  → 生成纸墨手稿草稿（模型优先，失败时本地降级）；
+ * 创建世界：
+ * - POST { prompt }  → 生成世界草稿（模型优先，失败时本地降级）；
  * - POST { draft }   → 手稿确认后单事务原子落库，返回新记录入口。
  */
 export async function POST(request: Request) {
@@ -88,18 +88,15 @@ async function draftFromPrompt(
     const draft = await generateGenesisDraft(gateway, prompt);
     if (draft) return { draft, source: "model" };
   } catch (error) {
-    // 模型未配置或调用失败不阻塞创世：降级为本地提炼，由用户在手稿上微调。
-    console.warn(
-      `[realm] world genesis fell back to local drafting: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
+    // 模型未配置或调用失败不阻塞创世：降级为本地提炼，由用户在草稿上微调。
+    void error;
+    console.warn("[realm] world genesis fell back to local drafting");
   }
   return { draft: fallbackGenesisDraft(prompt), source: "fallback" };
 }
 
 /**
- * 批次 T1：落笔事务提交后 fire-and-forget 触发初夜生成。
+ * 批次 T1：创建事务提交后 fire-and-forget 触发初夜生成。
  * fail-closed——运行时未配置（缺 REALM_RUNTIME_DATABASE_URL）只留日志，
  * 记录打开时的懒重试会补跑。
  */

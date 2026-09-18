@@ -466,7 +466,7 @@ test(
     const libraryScope = { workspaceId: WS, principalId: OWNER };
     const libraryCommands = [
       { kind: "story", worldId: WORLD, title: "t", premise: "p" },
-      { kind: "branch", worldId: WORLD, label: "l" },
+      { kind: "branch", worldId: WORLD, label: "l", sourceRecordId: RECORD },
       { kind: "world-style", worldId: WORLD, style: "modern" },
       { kind: "character", worldId: WORLD, name: "n", role: "r", summary: "s" },
       { kind: "player-stance", worldId: WORLD, stance: "observer" },

@@ -72,7 +72,9 @@ const LIBRARY_BRANCHES = [
   ['command.kind === "player-stance"', "assertWorldWritable"],
   ['command.kind === "attach-character"', "assertWorldWritable"],
   ['command.kind === "character-activity"', "assertWorldWritable"],
-  ['command.kind === "branch"', "assertWorldWritable"],
+  // branch 命令委托 createRecordBranchInTransaction（门禁/锁序在 helper 内，
+  // 由下方专门断言覆盖）；分支体必须显式走该 helper。
+  ['command.kind === "branch"', "createRecordBranchInTransaction"],
   ['command.kind === "story"', "assertWorldWritable"],
   ['command.kind === "world-archive"', "FOR UPDATE"],
   ['command.kind === "delete-world"', "FOR UPDATE"],
@@ -160,6 +162,38 @@ test("D.0 library-service 分支级门禁矩阵", async () => {
       `library 分支 ${branchMarker} 必须含 ${gateMarker}`,
     );
   }
+});
+
+test("D.0 分支创建 helper：world gate 先于 records/record_heads 锁与拓扑插入", async () => {
+  const source = await readSource("modules/application/library-service.ts");
+  const body = extractMethodBody(source, "createRecordBranchInTransaction");
+  assert.ok(body, "createRecordBranchInTransaction 必须存在");
+  // 锁序（world-write-gate.ts:9-13）：worlds(KEY SHARE gate) → records
+  // FOR UPDATE → record_heads FOR UPDATE → worldlines/stories/records 插入。
+  const gateIndex = body.indexOf("assertWorldWritable");
+  const recordLockIndex = body.indexOf("FOR UPDATE OF record");
+  const headLockIndex = body.indexOf("FROM record_heads");
+  const insertIndex = body.indexOf("INSERT INTO worldlines");
+  assert.ok(
+    gateIndex !== -1
+      && recordLockIndex !== -1
+      && headLockIndex !== -1
+      && insertIndex !== -1
+      && gateIndex < recordLockIndex
+      && recordLockIndex < headLockIndex
+      && headLockIndex < insertIndex,
+    "createRecordBranchInTransaction 锁序：gate → records → record_heads → worldlines",
+  );
+  // 内容写门禁（owner/player；observer 403、非成员 404）。
+  assert.ok(
+    body.includes("assertWorldContentMember"),
+    "createRecordBranchInTransaction 必须含 assertWorldContentMember",
+  );
+  // 归档源显式拒绝（fail-closed）。
+  assert.ok(
+    body.includes("RECORD_ARCHIVED"),
+    "createRecordBranchInTransaction 必须拒绝归档源",
+  );
 });
 
 test("D.0 锁序：worlds gate 先于 record_heads/worldlines 锁", async () => {

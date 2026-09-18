@@ -26,7 +26,7 @@ import {
 const settings: ModelProviderSettings = {
   schemaVersion: 1,
   providerId: "lmstudio",
-  baseUrl: "http://127.0.0.1:8823/v1",
+  baseUrl: "http://127.0.0.1:1234/v1",
   apiKey: "",
   selectedModel: "unsloth/gemma-4-12b-it-qat",
   thinking: "disabled",
@@ -126,10 +126,11 @@ test("internal observation wording never becomes character dialogue", () => {
   );
 });
 
-test("local defaults fail closed for an unregistered host or API path", async () => {
+test("local defaults fail closed for a public host or wrong API path", async () => {
+  // 新 local 策略：loopback/私有地址任意端口合法；公网地址与错误路径拒绝。
   const cases = [
-    "http://127.0.0.1:9999/v1",
-    "http://127.0.0.1:8823/api/v1",
+    "http://8.8.8.8:1234/v1",
+    "http://127.0.0.1:1234/api",
   ];
   for (const baseUrl of cases) {
     const directory = await mkdtemp(join(tmpdir(), "realm-model-settings-"));
@@ -204,8 +205,8 @@ test("OpenAI-compatible gateway: LAN discovery, structured chat, no empty Author
   assert.deepEqual(response.toolCalls[0]?.arguments, { intent: "观察" });
   assert.equal(response.usage?.totalTokens, 14);
   // OpenAI-compatible base URL 含 /v1。
-  assert.equal(requests[0]?.url, "http://127.0.0.1:8823/v1/models");
-  assert.equal(requests[1]?.url, "http://127.0.0.1:8823/v1/chat/completions");
+  assert.equal(requests[0]?.url, "http://127.0.0.1:1234/v1/models");
+  assert.equal(requests[1]?.url, "http://127.0.0.1:1234/v1/chat/completions");
   // 空 apiKey 不发送 Authorization 头（本地服务无需凭证）。
   assert.equal(new Headers(requests[0]?.init?.headers).get("Authorization"), null);
   assert.equal(new Headers(requests[1]?.init?.headers).get("Authorization"), null);
@@ -244,7 +245,7 @@ test("LM Studio Gemma 4 uses native reasoning control and filters reasoning outp
     responseFormat: "json_object",
     maxTokens: 50,
   });
-  assert.equal(requests[0]?.url, "http://127.0.0.1:8823/api/v1/chat");
+  assert.equal(requests[0]?.url, "http://127.0.0.1:1234/api/v1/chat");
   assert.equal(requests[0]?.body.reasoning, "off");
   assert.equal(requests[0]?.body.max_output_tokens, 1024);
   assert.equal("response_format" in (requests[0]?.body ?? {}), false);
@@ -287,7 +288,7 @@ test("Gemma 4 tool requests keep the LM Studio compatibility contract", async ()
     }],
     responseFormat: "json_object",
   });
-  assert.equal(requestUrl, "http://127.0.0.1:8823/v1/chat/completions");
+  assert.equal(requestUrl, "http://127.0.0.1:1234/v1/chat/completions");
   assert.deepEqual(requestBody.response_format, {
     type: "json_schema",
     json_schema: { name: "realm_structured_output", schema: { type: "object" } },

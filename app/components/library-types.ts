@@ -17,7 +17,13 @@ export type LibraryCreateCommand =
       /** 批次 S：非空时同事务把新角色装配进该记录阵容。 */
       attachRecordId?: string;
     }
-  | { kind: "branch"; worldId: string; label: string }
+  | {
+      kind: "branch";
+      worldId: string;
+      label: string;
+      /** 分叉来源 record（必填；空 worldline 幽灵路径已废弃）。 */
+      sourceRecordId: string;
+    }
   | { kind: "world-style"; worldId: string; style: string }
   /** 批次 S：切换本人在该世界的姿态（入局 / 观察者）。 */
   | { kind: "player-stance"; worldId: string; stance: "player" | "observer" }
@@ -61,7 +67,7 @@ export interface LibraryRecord {
   id: string;
   title: string;
   status: string;
-  timelineKind: "primary" | "retrospection" | "merged";
+  timelineKind: "primary" | "retrospection" | "merged" | "branch";
   linkedRecordId: string | null;
 }
 
@@ -182,6 +188,7 @@ export function normalizeLibrarySnapshot(value: unknown): LibrarySnapshot {
                 status: asString(recordItem.status),
                 timelineKind: recordItem.timelineKind === "retrospection"
                   || recordItem.timelineKind === "merged"
+                  || recordItem.timelineKind === "branch"
                   ? recordItem.timelineKind
                   : "primary",
                 linkedRecordId: typeof recordItem.linkedRecordId === "string"

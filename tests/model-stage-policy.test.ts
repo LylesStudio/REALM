@@ -228,3 +228,79 @@ test("DM planner: chat transport with planner policy; reviewer: chat transport w
   assert.equal(reviewRequest!.maxTokens, 512);
   assert.equal(reviewRequest!.timeoutMs, 45_000);
 });
+
+test("actor propose: tools request carries actor stage policy fields (chat transport)", async () => {
+  let streamCalls = 0;
+  const captured: ModelChatRequest[] = [];
+  const gateway: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat(request) {
+      captured.push(request);
+      const system = request.messages[0]?.content ?? "";
+      if (system.includes("DM Controller")) {
+        return jsonResponse({
+          goal: "确认密函当前可见状态",
+          activatedCharacterInstanceIds: [SCOUT.characterInstanceId],
+          narratorEnabled: true,
+        });
+      }
+      if (system.includes("thinking only as the character")) {
+        return {
+          model: "fake-model",
+          content: "",
+          toolCalls: [],
+          finishReason: "stop",
+          usage: null,
+        };
+      }
+      if (system.includes("independent Narrator")) {
+        return jsonResponse({
+          environment: "冷雾沿石阶漫开。",
+          storyBeat: "evidence_deepens_suspicion",
+        });
+      }
+      if (system.includes("You speak only as the character")) {
+        return jsonResponse({
+          action: "塞娜退后半步。",
+          dialogue: "“别碰那封蜡。”",
+          recipientId: null,
+        });
+      }
+      if (system.includes("DM output reviewer")) {
+        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+      }
+      throw new Error("unexpected model call");
+    },
+    async *streamChat(request: ModelChatRequest) {
+      streamCalls += 1;
+      assert.ok(!request.tools, "tools 请求永不走 stream transport");
+      // 分块但合起来是一个合法 JSON 对象（模拟真实流式增量；按调用方
+      // 形态分发 narrator/react 输出）。
+      const system = request.messages[0]?.content ?? "";
+      const body = system.includes("You speak only as the character")
+        ? { action: "塞娜退后半步。", dialogue: "“别碰那封蜡。”", recipientId: null }
+        : { environment: "冷雾沿石阶漫开。", storyBeat: "evidence_deepens_suspicion" };
+      const text = JSON.stringify(body);
+      yield { content: text.slice(0, 12) };
+      yield { content: text.slice(12) };
+    },
+  };
+  const orchestrator = createModelPoweredM2TurnOrchestrator({
+    characters: [SCOUT],
+    getGateway: async () => gateway,
+  });
+  const input = { turnId: "turn-actor-policy", playerText: "请塞娜留意蜡封。" };
+  const plan = await orchestrator.plan(input);
+  const candidate = await orchestrator.draft({ ...input, plan });
+  assert.ok(candidate);
+  const propose = captured.find((request) =>
+    (request.messages[0]?.content ?? "").includes("thinking only as the character"));
+  assert.ok(propose, "actor propose 请求必须存在");
+  assert.ok(propose.tools && propose.tools.length > 0, "actor 是 tools 请求");
+  assert.equal(propose.thinking, "disabled", "actor 结构化链不负担推理开销");
+  assert.equal(propose.maxTokens, 768, "actor maxTokens 与规划同源");
+  assert.equal(propose.timeoutMs, 45_000, "actor timeoutMs 与结构化链同语义");
+  assert.ok(streamCalls >= 0, "previewNlg 链按设计走 stream；tools 请求分流断言在 streamChat 内");
+});

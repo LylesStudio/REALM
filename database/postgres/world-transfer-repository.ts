@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   PACK_LIMITS,
+  REQUIRES_MIGRATIONS,
   buildRealmPack,
   computeContentHash,
   ndjsonBytes,
@@ -1456,15 +1457,11 @@ export function createWorldTransferExporter(pool: Pool) {
         exporter: {
           app: "realm",
           appVersion: input.appVersion,
-          schemaLatest: "0043_propagation_node_audience_archived_guard.sql",
+          schemaLatest: REQUIRES_MIGRATIONS[REQUIRES_MIGRATIONS.length - 1]!,
         },
         source: { worldId, worldName: world.rows[0].name },
         scope,
-        requiresMigrations: [
-          "0041_article_qualification_and_import_entries.sql",
-          "0042_realm_transfer_and_import_jobs.sql",
-          "0043_propagation_node_audience_archived_guard.sql",
-        ],
+        requiresMigrations: [...REQUIRES_MIGRATIONS],
         tables: tableData.map((table) => ({
           name: table.name,
           rows: table.rows,

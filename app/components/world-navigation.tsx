@@ -61,12 +61,12 @@ export function WorldNavigation({
       <div className="nav-section record-section">
         <p className="eyebrow">{uiText("ui.nav.record", uiLanguage)}</p>
         <ul className="nav-list record-list">
-          {projection.records.map((record) => {
+          {projection.records.map((record, index) => {
             const isCurrent = record.id === projection.record.id;
             return (
               <li className={isCurrent ? "nav-item is-current" : "nav-item"} key={record.id}>
                 <span className="record-index" aria-hidden="true">
-                  {String(projection.records.indexOf(record) + 1).padStart(2, "0")}
+                  {String(index + 1).padStart(2, "0")}
                 </span>
                 <button
                   className="nav-entry"

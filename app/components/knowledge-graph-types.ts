@@ -14,7 +14,7 @@ export type GraphClaim = {
   truthStatus: string;
 };
 
-export type GraphRelation = {
+type GraphRelation = {
   id: string;
   subjectEntityId: string;
   predicate: string;

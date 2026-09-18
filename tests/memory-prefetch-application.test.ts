@@ -130,6 +130,9 @@ function createFixture(options: {
     async loadRecentAuthorizedEvents() {
       return [];
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer() {
       return {
         record: baseProjection(events),

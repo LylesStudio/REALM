@@ -584,6 +584,14 @@ function validOutput(
     && joinSegments(output.segments) === output.content;
 }
 
+/**
+ * P1-14：英文人称/角色指代（与 model-powered.ts 的 NARRATOR_HUMAN_REFERENCE_ENGLISH
+ * 同源演进）。只匹配边界明确的人称代词与显式角色指代；动作/台词动词
+ * 故意不做裸匹配（合法环境主语如 "The lighthouse light turns" 不误判）。
+ */
+const NARRATOR_HUMAN_REFERENCE_ENGLISH =
+  /\b(?:he|she|they|him|her|them|his|their|theirs)\b|\bthe\s+(?:players?|characters?|protagonist|narrator)\b/i;
+
 function narratorAuthorityIsValid(
   narration: SemanticOutputDraft,
   transactions: readonly ActionTransaction[],
@@ -596,6 +604,7 @@ function narratorAuthorityIsValid(
     if (segment.kind === "fact") return publicFacts.has(segment.content);
     if (segment.kind !== "environment" && segment.kind !== "story") return true;
     return !/她|他|斥候|学者|使节|提问者|玩家|角色|人物|人影|来者|众人|有人|手中|指尖|目光|低声|说道|回应/.test(segment.content)
+      && !NARRATOR_HUMAN_REFERENCE_ENGLISH.test(segment.content)
       && characters.every((character) =>
         !segment.content.includes(character.displayName)
       );

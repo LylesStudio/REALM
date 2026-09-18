@@ -128,6 +128,9 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   }),
   row("context_manifests", "excluded", null),
   row("context_snapshots", "excluded", null),
+  // 大厅是 workspace 级约局元数据（非世界内容），不进 .realm 包。
+  row("lobby_rooms", "excluded", null),
+  row("lobby_room_members", "excluded", null),
   row("outbox", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [

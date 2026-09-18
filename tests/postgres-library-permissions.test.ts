@@ -204,10 +204,13 @@ test(
       title: "玩家故事",
       premise: "",
     });
+    const playerStarterRecord = playerWorld.stories[0]?.records[0];
+    assert.ok(playerStarterRecord, "player world should have a starter record");
     await library.create(scoped(PLAYER), {
       kind: "branch",
       worldId: playerWorld.id,
       label: "玩家分支",
+      sourceRecordId: playerStarterRecord.id,
     });
     // observer 对 player 的世界（非成员）404。
     await assert.rejects(
@@ -283,6 +286,7 @@ test(
       kind: "branch",
       worldId: playerWorld.id,
       label: "受限角色分支",
+      sourceRecordId: playerStarterRecord.id,
     });
     // owner 例外在 runtime 池上物理不可写（证明分池不是装饰）。
     await assert.rejects(

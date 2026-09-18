@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient, QueryResultRow } from "pg";
 import {
   withWorkspaceTransaction,
@@ -28,7 +28,7 @@ export interface LibraryRecord {
   id: string;
   title: string;
   status: string;
-  timelineKind: "primary" | "retrospection" | "merged";
+  timelineKind: "primary" | "retrospection" | "merged" | "branch";
   linkedRecordId: string | null;
 }
 
@@ -84,6 +84,36 @@ export interface LibrarySnapshot {
   worlds: LibraryWorld[];
 }
 
+/** branchRecord 输入：fork 缺省 = 源 record 当前 effective head。 */
+export interface RecordBranchInput {
+  sourceRecordId: string;
+  /**
+   * 分叉点（可选）。eventId 形式：必须是源 record 自己的已提交事件，
+   * 服务端读出其 canonical (world_tick, world_ordinal)——viewer-local
+   * delivery ordinal 不得冒充游标。worldTick/worldOrdinal 形式：必须
+   * 命中源 record 一条已提交事件，或等于 record start。
+   */
+  fork?:
+    | { eventId: string }
+    | { worldTick: number; worldOrdinal: number };
+  /** 新 worldline 标签（缺省「分支：{源 record 标题}」）。 */
+  label?: string;
+  storyTitle?: string;
+  recordTitle?: string;
+  /** 幂等键：重复调用返回首次拓扑，不重复创建。 */
+  idempotencyKey?: string;
+}
+
+export interface RecordBranchResult {
+  worldId: string;
+  worldlineId: string;
+  storyId: string;
+  recordId: string;
+  fork: { tick: number; ordinal: number };
+  /** true = 幂等重放，命中既有拓扑，未写入新行。 */
+  replayed: boolean;
+}
+
 export type LibraryCreateCommand =
   | { kind: "world"; name: string; era: string; summary: string }
   | { kind: "story"; worldId: string; title: string; premise: string }
@@ -103,7 +133,17 @@ export type LibraryCreateCommand =
       /** 批次 S：非空时同事务把新角色装配进该记录的阵容（幂等）。 */
       attachRecordId?: string;
     }
-  | { kind: "branch"; worldId: string; label: string }
+  | {
+      kind: "branch";
+      worldId: string;
+      label: string;
+      /**
+       * 分叉来源 record（必填）：空 worldline 幽灵路径已废弃——分支必须
+       * 是「新 worldline + 新 story + 新 record」的可玩拓扑，fork 游标
+       * 固定取源 record 当前 head（任意游标分叉走 /api/record/branch）。
+       */
+      sourceRecordId: string;
+    }
   | { kind: "world-style"; worldId: string; style: string }
   /** 批次 S：既有世界切换本人姿态（入局 / 观察者）。 */
   | { kind: "player-stance"; worldId: string; stance: "player" | "observer" }
@@ -135,6 +175,17 @@ export interface LibraryService {
     sourceRecordId: string,
   ): Promise<{ worldId: string; storyId: string; recordId: string }>;
   /**
+   * 从源 Record 创建可玩分支（BRANCH-TREE-RESEARCH §二）：单事务原子写入
+   * 新 worldline（parent=源 worldline，fork=给定已提交游标）+ 新 story +
+   * 新 record（timeline_kind='branch'，linked_record_id=源 record）+
+   * record_heads + 场景/角色装配。events 不复制；源 record 不被改写。
+   * idempotencyKey 非空时重复调用返回首次创建的拓扑（replayed=true）。
+   */
+  branchRecord(
+    scope: LibraryScope,
+    input: RecordBranchInput,
+  ): Promise<RecordBranchResult>;
+  /**
    * 启笔铸界：单事务原子创建世界 + 原初世界线 + owner 成员关系    * 同伴阵容 + 开幕故事 + 初始记录（含默认装配与初始场景）。
    */
   createGenesis(
@@ -153,9 +204,11 @@ export class LibraryServiceError extends Error {
     | "WORLD_NOT_EMPTY"
     | "WORLD_SELF_PLAY_ACTIVE"
     | "RECORD_NOT_FOUND"
+    | "RECORD_ARCHIVED"
     | "RECORD_SELF_PLAY_ACTIVE"
     | "RECORD_TURN_ACTIVE"
-    | "WORLD_READ_ONLY";
+    | "WORLD_READ_ONLY"
+    | "INVALID_FORK";
 
   constructor(
     code:
@@ -167,9 +220,11 @@ export class LibraryServiceError extends Error {
       | "WORLD_NOT_EMPTY"
       | "WORLD_SELF_PLAY_ACTIVE"
       | "RECORD_NOT_FOUND"
+      | "RECORD_ARCHIVED"
       | "RECORD_SELF_PLAY_ACTIVE"
       | "RECORD_TURN_ACTIVE"
-      | "WORLD_READ_ONLY",
+      | "WORLD_READ_ONLY"
+      | "INVALID_FORK",
     message: string,
   ) {
     super(message);
@@ -689,40 +744,21 @@ export function createPostgresLibraryService(
           }
 
           if (command.kind === "branch") {
-            // 批次 T10-B6：内容写要求 owner/player 成员。
-            await assertWorldContentMember(client, scope, command.worldId);
-            // 批次 T8：归档世界不可开新局（含世界线分支）。
-            await assertWorldWritable(client, scope.workspaceId, command.worldId);
-            const parent = await client.query<{
-              id: string;
-              head_tick: string;
-              head_ordinal: string;
-            }>(
-              `SELECT id, head_tick::text, head_ordinal::text
-               FROM worldlines
-               WHERE workspace_id = $1 AND world_id = $2
-               ORDER BY created_at ASC, id ASC
-               LIMIT 1`,
-              [scope.workspaceId, command.worldId],
-            );
-            const parentWorldline = parent.rows[0];
-            if (!parentWorldline) throw new LibraryServiceError("WORLD_NOT_FOUND", "World not found.");
-            await client.query(
-              `INSERT INTO worldlines (
-                 workspace_id, world_id, id, label, status,
-                 parent_worldline_id, fork_tick, fork_ordinal,
-                 head_tick, head_ordinal
-               ) VALUES ($1, $2, $3, $4, 'active', $5, $6::bigint, $7::bigint, $6::bigint, $7::bigint)`,
-              [
-                scope.workspaceId,
-                command.worldId,
-                `worldline_${randomUUID().replaceAll("-", "").slice(0, 18)}`,
-                command.label.trim(),
-                parentWorldline.id,
-                parentWorldline.head_tick,
-                parentWorldline.head_ordinal,
-              ],
-            );
+            // 分支 = 可玩拓扑（新 worldline + story + record），fork 固定
+            // 取源 record 当前 head；空 worldline 幽灵路径已废弃。任意
+            // 游标分叉走 branchRecord（/api/record/branch）。
+            const sourceRecordId = command.sourceRecordId?.trim() ?? "";
+            if (!sourceRecordId) {
+              throw new LibraryServiceError(
+                "INVALID_COMMAND",
+                "branch requires sourceRecordId.",
+              );
+            }
+            await createRecordBranchInTransaction(client, scope, {
+              sourceRecordId,
+              label: command.label,
+              idempotencyKey: `library-branch:${scope.principalId}:${sourceRecordId}:${command.label.trim()}`,
+            });
             return;
           }
 
@@ -1014,6 +1050,13 @@ export function createPostgresLibraryService(
         async (client) => duplicateRecordInTransaction(client, scope, sourceRecordId),
       );
     },
+    async branchRecord(scope, input) {
+      return withWorkspaceTransaction(
+        writeDatabase,
+        scope.workspaceId,
+        async (client) => createRecordBranchInTransaction(client, scope, input),
+      );
+    },
   };
 }
 
@@ -1266,6 +1309,407 @@ async function duplicateRecordInTransaction(
     },
   );
   return { worldId: sourceRow.world_id, storyId, recordId };
+}
+
+/** 分支文本入参上限（label/story/record 标题）；超长 fail-closed。 */
+const MAX_BRANCH_TEXT_LENGTH = 80;
+const MAX_BRANCH_IDEMPOTENCY_KEY_LENGTH = 128;
+
+function normalizeBranchText(
+  value: string | undefined,
+  fallback: string,
+): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return fallback;
+  if (trimmed.length > MAX_BRANCH_TEXT_LENGTH) {
+    throw new LibraryServiceError(
+      "INVALID_COMMAND",
+      "Branch text exceeds the length limit.",
+    );
+  }
+  return trimmed;
+}
+
+function compareBranchCursor(
+  a: { tick: number; ordinal: number },
+  b: { tick: number; ordinal: number },
+): number {
+  return a.tick - b.tick || a.ordinal - b.ordinal;
+}
+
+/**
+ * 创建可玩分支（BRANCH-TREE-RESEARCH §二 canonical 语义）。
+ *
+ * 与 duplicate（重演）的差异：fork 游标可指定到源 record 的任意已提交
+ * 事件边界（duplicate 恒为源 record 起点）；新 record 的
+ * timeline_kind='branch'——不进入 retrospection 的「写入正史」流程；
+ * 场景继承取「覆盖 fork 点的场景」（最近一个 start<=fork），而非恒为
+ * 首个 scene。events 不复制、源 record 不改写。
+ *
+ * 锁序（world-write-gate.ts:9-13）：worlds(KEY SHARE) → records(FOR
+ * UPDATE) → record_heads → worldlines/stories/records 插入。源 record
+ * FOR UPDATE 同时是幂等/并发的串行点：同一源 record 的并发分叉在此
+ * 排队，check-then-insert 无竞态。
+ */
+async function createRecordBranchInTransaction(
+  client: PoolClient,
+  scope: LibraryScope,
+  input: RecordBranchInput,
+): Promise<RecordBranchResult> {
+  const sourceRecordId = input.sourceRecordId?.trim() ?? "";
+  if (!sourceRecordId) {
+    throw new LibraryServiceError("INVALID_COMMAND", "sourceRecordId is required.");
+  }
+  const idempotencyKey = input.idempotencyKey?.trim() ?? "";
+  if (idempotencyKey.length > MAX_BRANCH_IDEMPOTENCY_KEY_LENGTH) {
+    throw new LibraryServiceError("INVALID_COMMAND", "idempotencyKey is too long.");
+  }
+
+  // ① 未锁探测：定位源 record 所属世界（进入锁序前的作用域解析）。
+  const probe = await client.query<{ world_id: string }>(
+    `SELECT world_id FROM records WHERE workspace_id = $1 AND id = $2`,
+    [scope.workspaceId, sourceRecordId],
+  );
+  const worldId = probe.rows[0]?.world_id;
+  if (!worldId) {
+    throw new LibraryServiceError("RECORD_NOT_FOUND", "Record not found.");
+  }
+
+  // ② 内容写门禁 + world 写 gate（KEY SHARE，与归档互斥）。
+  await assertWorldContentMember(client, scope, worldId);
+  await assertWorldWritable(client, scope.workspaceId, worldId);
+
+  // ③ 锁内重读源 record（FOR UPDATE）：归档源拒绝；故事标题/前提随锁读取。
+  const source = await client.query<{
+    worldline_id: string;
+    story_id: string;
+    record_title: string;
+    record_status: string;
+    story_title: string;
+    story_premise: string;
+    start_tick: string;
+    start_ordinal: string;
+    observer: boolean;
+    player_role: string;
+  }>(
+    `SELECT
+       record.worldline_id,
+       record.story_id,
+       record.title AS record_title,
+       record.status AS record_status,
+       story.title AS story_title,
+       story.premise AS story_premise,
+       record.start_tick::text,
+       record.start_ordinal::text,
+       EXISTS (
+         SELECT 1 FROM participants AS narrator
+         WHERE narrator.workspace_id = record.workspace_id
+           AND narrator.record_id = record.id
+           AND narrator.participant_kind = 'narrator'
+       ) AS observer,
+       COALESCE(player_definition.profile->>'role', '') AS player_role
+     FROM records AS record
+     JOIN stories AS story
+       ON story.workspace_id = record.workspace_id
+      AND story.world_id = record.world_id
+      AND story.worldline_id = record.worldline_id
+      AND story.id = record.story_id
+     LEFT JOIN LATERAL (
+       SELECT definition.profile
+       FROM participants AS participant
+       JOIN character_instances AS instance
+         ON instance.workspace_id = participant.workspace_id
+        AND instance.id = participant.character_instance_id
+       JOIN character_continuities AS continuity
+         ON continuity.workspace_id = instance.workspace_id
+        AND continuity.id = instance.continuity_id
+       JOIN character_definitions AS definition
+         ON definition.workspace_id = instance.workspace_id
+        AND definition.id = continuity.definition_id
+       WHERE participant.workspace_id = record.workspace_id
+         AND participant.record_id = record.id
+         AND participant.participant_kind = 'character'
+         AND participant.controller_mode = 'human'
+       LIMIT 1
+     ) AS player_definition ON true
+     WHERE record.workspace_id = $1 AND record.id = $2
+     FOR UPDATE OF record`,
+    [scope.workspaceId, sourceRecordId],
+  );
+  const sourceRow = source.rows[0];
+  if (!sourceRow) {
+    throw new LibraryServiceError("RECORD_NOT_FOUND", "Record not found.");
+  }
+  if (sourceRow.record_status === "archived") {
+    throw new LibraryServiceError(
+      "RECORD_ARCHIVED",
+      "Archived records cannot be branched.",
+    );
+  }
+
+  // ④ record_heads（FOR UPDATE）→ effective head = COALESCE(last, start)。
+  const headRow = await client.query<{
+    last_world_tick: string | null;
+    last_world_ordinal: string | null;
+  }>(
+    `SELECT last_world_tick::text, last_world_ordinal::text
+     FROM record_heads
+     WHERE workspace_id = $1 AND record_id = $2
+     FOR UPDATE`,
+    [scope.workspaceId, sourceRecordId],
+  );
+  const start = {
+    tick: Math.max(0, Number(sourceRow.start_tick) || 0),
+    ordinal: Math.max(0, Number(sourceRow.start_ordinal) || 0),
+  };
+  const head = {
+    tick: Math.max(0, Number(headRow.rows[0]?.last_world_tick ?? sourceRow.start_tick) || 0),
+    ordinal: Math.max(0, Number(headRow.rows[0]?.last_world_ordinal ?? sourceRow.start_ordinal) || 0),
+  };
+
+  // ⑤ fork 解析与校验：缺省 = head；eventId/显式游标必须落在源 record
+  // 可见且已提交的因果游标上（record start，或源 record 一条已提交事件）。
+  let fork: { tick: number; ordinal: number };
+  const forkInput = input.fork;
+  if (!forkInput) {
+    fork = head;
+  } else if ("eventId" in forkInput) {
+    const eventId = forkInput.eventId?.trim() ?? "";
+    if (!eventId) {
+      throw new LibraryServiceError("INVALID_FORK", "fork eventId is empty.");
+    }
+    const event = await client.query<{
+      world_tick: string;
+      world_ordinal: string;
+    }>(
+      `SELECT world_tick::text, world_ordinal::text
+       FROM events
+       WHERE workspace_id = $1 AND record_id = $2 AND id = $3`,
+      [scope.workspaceId, sourceRecordId, eventId],
+    );
+    const row = event.rows[0];
+    if (!row) {
+      throw new LibraryServiceError(
+        "INVALID_FORK",
+        "fork event is not a committed event of the source record.",
+      );
+    }
+    fork = {
+      tick: Math.max(0, Number(row.world_tick) || 0),
+      ordinal: Math.max(0, Number(row.world_ordinal) || 0),
+    };
+  } else {
+    const tick = Number(forkInput.worldTick);
+    const ordinal = Number(forkInput.worldOrdinal);
+    if (
+      !Number.isSafeInteger(tick) || tick < 0
+      || !Number.isSafeInteger(ordinal) || ordinal < 0
+    ) {
+      throw new LibraryServiceError("INVALID_FORK", "fork cursor must be non-negative integers.");
+    }
+    fork = { tick, ordinal };
+  }
+  if (compareBranchCursor(fork, head) > 0) {
+    throw new LibraryServiceError("INVALID_FORK", "fork cursor is ahead of the record head.");
+  }
+  if (compareBranchCursor(fork, start) < 0) {
+    throw new LibraryServiceError("INVALID_FORK", "fork cursor predates the source record.");
+  }
+  if (compareBranchCursor(fork, start) !== 0) {
+    const committed = await client.query(
+      `SELECT 1 FROM events
+       WHERE workspace_id = $1 AND record_id = $2
+         AND world_tick = $3 AND world_ordinal = $4
+       LIMIT 1`,
+      [scope.workspaceId, sourceRecordId, fork.tick, fork.ordinal],
+    );
+    if (!committed.rows[0]) {
+      throw new LibraryServiceError(
+        "INVALID_FORK",
+        "fork cursor does not match a committed event of the source record.",
+      );
+    }
+  }
+
+  // ⑥ 幂等：确定性 record id（workspace+source+key 的 sha256）。
+  // 源 record FOR UPDATE 已把同源并发分叉串行化，查重无竞态。
+  let recordId: string;
+  if (idempotencyKey) {
+    const digest = createHash("sha256")
+      .update(`${scope.workspaceId}:${sourceRecordId}:${idempotencyKey}`)
+      .digest("hex")
+      .slice(0, 18);
+    recordId = `record_branch_${digest}`;
+    const existing = await client.query<{
+      id: string;
+      worldline_id: string;
+      story_id: string;
+      start_tick: string;
+      start_ordinal: string;
+    }>(
+      `SELECT id, worldline_id, story_id,
+              start_tick::text, start_ordinal::text
+       FROM records
+       WHERE workspace_id = $1 AND id = $2`,
+      [scope.workspaceId, recordId],
+    );
+    const existingRow = existing.rows[0];
+    if (existingRow) {
+      const existingFork = {
+        tick: Number(existingRow.start_tick),
+        ordinal: Number(existingRow.start_ordinal),
+      };
+      if (
+        !Number.isSafeInteger(existingFork.tick) || existingFork.tick < 0
+        || !Number.isSafeInteger(existingFork.ordinal) || existingFork.ordinal < 0
+      ) {
+        throw new LibraryServiceError("INVALID_FORK", "Stored branch cursor is invalid.");
+      }
+      return {
+        worldId,
+        worldlineId: existingRow.worldline_id,
+        storyId: existingRow.story_id,
+        recordId: existingRow.id,
+        fork: existingFork,
+        replayed: true,
+      };
+    }
+  } else {
+    recordId = `record_branch_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+  }
+
+  // ⑦ 覆盖 fork 点的场景快照（最近一个 start<=fork 的 scene）。
+  const scene = await client.query<{
+    title: string;
+    location: string;
+    objective: string;
+    tension: string;
+    weather: string;
+    display_time: string;
+  }>(
+    `SELECT title, location, objective, tension, weather, display_time
+     FROM scenes
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND record_id = $4
+       AND (start_tick < $5 OR (start_tick = $5 AND start_ordinal <= $6))
+     ORDER BY start_tick DESC, start_ordinal DESC, created_at DESC
+     LIMIT 1`,
+    [
+      scope.workspaceId,
+      worldId,
+      sourceRow.worldline_id,
+      sourceRecordId,
+      fork.tick,
+      fork.ordinal,
+    ],
+  );
+  const sceneRow = scene.rows[0];
+
+  // ⑧ AI 阵容继承（与 duplicate 同一查询语义）。
+  const sourceCharacters = await client.query<{
+    id: string;
+    name: string;
+    role: string;
+  }>(
+    `SELECT DISTINCT
+       definition.id,
+       definition.display_name AS name,
+       COALESCE(definition.profile->>'role', '') AS role
+     FROM participants AS participant
+     JOIN character_instances AS instance
+       ON instance.workspace_id = participant.workspace_id
+      AND instance.id = participant.character_instance_id
+     JOIN character_continuities AS continuity
+       ON continuity.workspace_id = instance.workspace_id
+      AND continuity.id = instance.continuity_id
+     JOIN character_definitions AS definition
+       ON definition.workspace_id = instance.workspace_id
+      AND definition.id = continuity.definition_id
+     WHERE participant.workspace_id = $1
+       AND participant.record_id = $2
+       AND participant.participant_kind = 'character'
+       AND participant.controller_mode = 'ai'
+     ORDER BY definition.id ASC`,
+    [scope.workspaceId, sourceRecordId],
+  );
+
+  // ⑨ 原子拓扑写入：worldline → story → record → record_heads → 装配。
+  const label = normalizeBranchText(input.label, `分支：${sourceRow.record_title}`);
+  const storyTitle = normalizeBranchText(input.storyTitle, `分支：${sourceRow.story_title}`);
+  const recordTitle = normalizeBranchText(input.recordTitle, `分支：${sourceRow.record_title}`);
+  const worldlineId = `worldline_branch_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+  const storyId = `story_branch_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+  await client.query(
+    `INSERT INTO worldlines (
+       workspace_id, world_id, id, label, status,
+       parent_worldline_id, fork_tick, fork_ordinal, head_tick, head_ordinal
+     ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $6, $7)`,
+    [scope.workspaceId, worldId, worldlineId, label, sourceRow.worldline_id, fork.tick, fork.ordinal],
+  );
+  await client.query(
+    `INSERT INTO stories (
+       workspace_id, world_id, worldline_id, id, title, status,
+       premise, start_tick, start_ordinal
+     ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)`,
+    [
+      scope.workspaceId,
+      worldId,
+      worldlineId,
+      storyId,
+      storyTitle,
+      sourceRow.story_premise,
+      fork.tick,
+      fork.ordinal,
+    ],
+  );
+  await client.query(
+    `INSERT INTO records (
+       workspace_id, world_id, worldline_id, story_id, id, title,
+       status, start_tick, start_ordinal, timeline_kind, linked_record_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, 'branch', $9)`,
+    [
+      scope.workspaceId,
+      worldId,
+      worldlineId,
+      storyId,
+      recordId,
+      recordTitle,
+      fork.tick,
+      fork.ordinal,
+      sourceRecordId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO record_heads (
+       workspace_id, world_id, worldline_id, record_id,
+       record_version, next_record_ordinal, last_world_tick, last_world_ordinal
+     ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6)`,
+    [scope.workspaceId, worldId, worldlineId, recordId, fork.tick, fork.ordinal],
+  );
+  await assembleDefaultRecord(
+    client,
+    scope,
+    { world_id: worldId, worldline_id: worldlineId },
+    recordId,
+    sourceCharacters.rows,
+    {
+      observer: sourceRow.observer,
+      playerRole: sourceRow.player_role,
+      startTick: fork.tick,
+      startOrdinal: fork.ordinal,
+      inheritanceCutoffTick: fork.tick,
+      inheritanceCutoffOrdinal: fork.ordinal,
+      scene: {
+        title: sceneRow?.title || "分支",
+        location: sceneRow?.location ?? "",
+        tension: sceneRow?.tension ?? "",
+        objective: sceneRow?.objective ?? "",
+        weather: sceneRow?.weather ?? "",
+        displayTime: sceneRow?.display_time ?? "",
+      },
+    },
+  );
+  return { worldId, worldlineId, storyId, recordId, fork, replayed: false };
 }
 
 export interface AssembleSceneSeed {
@@ -2397,6 +2841,7 @@ function normalizeWorld(row: WorldRow): LibraryWorld {
                 status: String(item.status ?? ""),
                 timelineKind: item.timelineKind === "retrospection"
                   || item.timelineKind === "merged"
+                  || item.timelineKind === "branch"
                   ? item.timelineKind
                   : "primary",
                 linkedRecordId: typeof item.linkedRecordId === "string"

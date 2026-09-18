@@ -390,6 +390,9 @@ function createGrowthFixture(options: {
     async loadForPlayer() {
       return baseProjection();
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer() {
       return {
         record: baseProjection(),

@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { EventTimeline } from "./components/event-timeline";
+import { BranchTreePanel } from "./components/branch-tree-panel";
+import { LobbyPanel } from "./components/lobby-panel";
+import { ThemeToggle } from "./components/theme-toggle";
 import { KnowledgeGraphPanel } from "./components/knowledge-graph-panel";
 import { createMemoryRefreshScheduler } from "./memory-refresh";
 import { LibraryPanel } from "./components/library-panel";
@@ -13,10 +16,8 @@ import {
 } from "./components/library-types";
 import { MessageComposer } from "./components/message-composer";
 import { PendingSubmission } from "./components/pending-submission";
-import {
-  normalizeGenesisDraft,
-  type WorldGenesisDraft,
-} from "../modules/application/world-genesis-contract.ts";
+import { PreviewCards } from "./components/preview-cards";
+import type { WorldGenesisDraft } from "../modules/application/world-genesis-contract.ts";
 import type {
   GenesisSuggestions,
   GuidedGenesisStep,
@@ -36,6 +37,7 @@ import {
   normalizeCommittedEventPayload,
   normalizeRecordEnvelope,
   normalizeVisibilityProposal,
+  recordEnvelopesEqual,
   upsertCommittedEvent,
   type RecordEnvelope,
   type RecordProjection,
@@ -127,15 +129,67 @@ export function RealmClient() {
   // 批次 T12 验收修正：故事视图按选中的 story 渲染；null=跟随当前 Record
   // 的故事。深链 ?view=story&storyId= 恢复。
   const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
-  const [guidedOpen, setGuidedOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
+  // 创世 overlay 共享状态模型：onboarding 与世界库（library）两种来源
+  // 共用同一套「AI 助手对话（主）/ 分步引导（次）」流程。kind=chat 是
+  // 主入口（GuidedGenesisChat），kind=guided 是分步次入口（GuidedGenesis，
+  // 同时是 AI 失败的 fallback）；source 决定退出后回到哪个上下文。
+  const [creationOverlay, setCreationOverlay] = useState<{
+    kind: "chat" | "guided";
+    source: "onboarding" | "library";
+  } | null>(null);
+  /** 游戏大厅 overlay（LAN 约局；与创世 overlay 互斥——打开大厅即收创世）。 */
+  const [lobbyOpen, setLobbyOpen] = useState(false);
+  /** 邀请深链目标房间（?lobby=<roomId>）；只作导航提示，不作授权依据。 */
+  const [lobbyInvite, setLobbyInvite] = useState<string | null>(null);
+  // 大厅房主心跳（host lease）：应用打开期间按服务端 meta 告知的频率续租
+  // 本人 open 房间；卸载清理 timer；失败静默（大厅面板有独立状态提示；
+  // 权威状态永远在服务端）。
+  const [lobbyHeartbeatMs, setLobbyHeartbeatMs] = useState(30_000);
+  useEffect(() => {
+    let cancelled = false;
+    const beat = () => {
+      void fetch("/api/lobby", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "heartbeat" }),
+      }).catch(() => undefined);
+    };
+    const timer = window.setInterval(beat, lobbyHeartbeatMs);
+    void fetch("/api/lobby", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        const ms = (payload as { meta?: { heartbeatIntervalMs?: unknown } } | null)
+          ?.meta?.heartbeatIntervalMs;
+        if (!cancelled
+          && typeof ms === "number" && Number.isSafeInteger(ms) && ms >= 500
+          && ms !== lobbyHeartbeatMs) {
+          setLobbyHeartbeatMs(ms);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [lobbyHeartbeatMs]);
   const [playerDisplayName, setPlayerDisplayName] = useState("");
   // 初始恒为默认语言：SSR 与首次客户端渲染必须一致（hydration 安全），
   // 本机语言选择在挂载后的 effect 中同步。
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>("zh-CN");
   const [graphWorld, setGraphWorld] = useState<{ id: string; name: string } | null>(null);
+  // 分支树 overlay（world 级只读谱系视图）与「创建分支」对话框状态。
+  const [branchWorld, setBranchWorld] = useState<{ id: string; name: string } | null>(null);
+  const [branchDialog, setBranchDialog] = useState<{
+    idempotencyKey: string;
+    forkEventId: string;
+    label: string;
+    recordTitle: string;
+    useEventFork: boolean;
+  } | null>(null);
+  const [branchError, setBranchError] = useState("");
+  const branchHeadRadioRef = useRef<HTMLInputElement | null>(null);
+  const branchDialogKey = branchDialog?.idempotencyKey ?? null;
   const [library, setLibrary] = useState<LibrarySnapshot>({ worlds: [] });
-  const [previews, setPreviews] = useState<Record<string, { speaker: string; text: string }>>({});
   const [cancelKey, setCancelKey] = useState<string | null>(null);
   const [memoryRepresentation, setMemoryRepresentation] = useState("");
   const [memoryRelationships, setMemoryRelationships] = useState("");
@@ -264,6 +318,9 @@ export function RealmClient() {
         throw new Error("记录读取成功，但写入授权缺失。请重新进入。");
       }
       if (!mounted.current) return false;
+      if (options.silent && recordEnvelopesEqual(nextEnvelope, envelopeRef.current)) {
+        return true;
+      }
       if (!options.silent) setStreamState("connecting");
       setEnvelope(nextEnvelope);
       setLoadState("ready");
@@ -304,11 +361,26 @@ export function RealmClient() {
 
   async function openRecord(recordId: string) {
     setLibraryOpen(false);
+    setLobbyOpen(false);
+    setLobbyInvite(null);
     // 切换 Record 后，面包屑故事入口跟随新 Record 的故事。
     setSelectedStoryId(null);
     setMainViewState("record");
     syncViewUrl("record", null);
     await loadRecord(recordId);
+  }
+
+  /** 大厅与世界库是互斥临时面板，避免键盘/辅助技术看到两个 dialog。 */
+  function openLibrary() {
+    setLobbyOpen(false);
+    setLobbyInvite(null);
+    setLibraryOpen(true);
+  }
+
+  function openLobby() {
+    setLibraryOpen(false);
+    setLobbyInvite(null);
+    setLobbyOpen(true);
   }
 
   async function duplicateCurrentRecord() {
@@ -341,6 +413,63 @@ export function RealmClient() {
     }
   }
 
+  function openBranchDialog() {
+    if (!projection || recordActionBusy) return;
+    setBranchError("");
+    setBranchDialog({
+      // 每次打开对话框生成新幂等键；失败后保留同键重试（重放安全）。
+      idempotencyKey: crypto.randomUUID(),
+      forkEventId: "",
+      label: "",
+      recordTitle: "",
+      useEventFork: false,
+    });
+  }
+
+  async function createBranch() {
+    if (!projection || !branchDialog || recordActionBusy) return;
+    setRecordActionBusy(true);
+    setBranchError("");
+    try {
+      const fork = branchDialog.useEventFork && branchDialog.forkEventId
+        ? { eventId: branchDialog.forkEventId }
+        : undefined;
+      const response = await fetch("/api/record/branch", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recordId: projection.record.id,
+          ...(fork ? { fork } : {}),
+          ...(branchDialog.label.trim() ? { label: branchDialog.label.trim() } : {}),
+          ...(branchDialog.recordTitle.trim()
+            ? { recordTitle: branchDialog.recordTitle.trim() }
+            : {}),
+          idempotencyKey: branchDialog.idempotencyKey,
+        }),
+      });
+      const payload = await readJson(response);
+      const recordId = (payload as { recordId?: unknown } | null)?.recordId;
+      if (!response.ok || typeof recordId !== "string" || !recordId) {
+        // 失败保留对话框与同幂等键，用户可原样重试。
+        setBranchError(uiText("ui.branchDialog.failed", uiLanguage));
+        return;
+      }
+      setBranchDialog(null);
+      await loadLibrary();
+      await openRecord(recordId);
+    } catch {
+      setBranchError(uiText("ui.branchDialog.failed", uiLanguage));
+    } finally {
+      setRecordActionBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!branchDialogKey) return;
+    const timer = window.setTimeout(() => branchHeadRadioRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [branchDialogKey]);
+
   async function commitRetrospection() {
     if (!projection || recordActionBusy || currentRecordMeta?.timelineKind !== "retrospection") return;
     setRecordActionBusy(true);
@@ -372,39 +501,6 @@ export function RealmClient() {
     }
   }
 
-  async function generateWorldDraft(
-    prompt: string,
-  ): Promise<{ draft: WorldGenesisDraft; source: "model" | "fallback" } | null> {
-    try {
-      const response = await fetch("/api/world/generate", {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ prompt }),
-      });
-      const payload = await readJson(response);
-      if (!response.ok) {
-        setNotice(errorMessage(payload, "手稿起草失败，请重试。"));
-        return null;
-      }
-      const body = payload as { draft?: unknown; source?: unknown } | null;
-      const draft = normalizeGenesisDraft(body?.draft, prompt);
-      if (!draft) {
-        setNotice("手稿起草失败，请重试。");
-        return null;
-      }
-      return {
-        draft,
-        source: body?.source === "fallback" ? "fallback" : "model",
-      };
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "手稿起草失败，请重试。");
-      return null;
-    }
-  }
-
   async function confirmWorldGenesis(
     draft: WorldGenesisDraft,
   ): Promise<string | null> {
@@ -419,24 +515,133 @@ export function RealmClient() {
       });
       const payload = await readJson(response);
       if (!response.ok) {
-        setNotice(errorMessage(payload, "落笔失败，请重试。"));
+        setNotice(errorMessage(payload, "创建失败，请重试。"));
         return null;
       }
       await loadLibrary();
       const recordId = (payload as { recordId?: unknown } | null)?.recordId;
       return typeof recordId === "string" && recordId ? recordId : null;
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "落笔失败，请重试。");
+      setNotice(error instanceof Error ? error.message : "创建失败，请重试。");
       return null;
     }
   }
 
-  /** 司卷问答 · AI 代笔：fail-closed，任何失败返回 null，前端静默退回手动输入。 */
+  /** 打开创世 overlay；library 来源先收起世界库（避免双 overlay）。 */
+  function openCreation(kind: "chat" | "guided", source: "onboarding" | "library") {
+    if (source === "library") setLibraryOpen(false);
+    setCreationOverlay({ kind, source });
+  }
+
+  /** 退出创世 overlay：回到来源上下文（library 来源重回世界库）。 */
+  function closeCreation() {
+    const source = creationOverlay?.source;
+    setCreationOverlay(null);
+    if (source === "library") openLibrary();
+  }
+
+  /** 创建成功统一收尾：关闭 overlay；新 record 由组件经 onOpenRecord 打开。 */
+  async function confirmCreation(draft: WorldGenesisDraft): Promise<string | null> {
+    const recordId = await confirmWorldGenesis(draft);
+    if (recordId) setCreationOverlay(null);
+    return recordId;
+  }
+
+  /** 大厅 overlay（onboarding 与主 session 共用同一渲染）。 */
+  function renderLobbyOverlay() {
+    if (!lobbyOpen) return null;
+    return (
+      <div
+        aria-label={uiText("ui.lobby.title", uiLanguage)}
+        aria-modal="true"
+        className="library-overlay"
+        role="dialog"
+      >
+        <LobbyPanel
+          uiLanguage={uiLanguage}
+          inviteRoomId={lobbyInvite}
+          ownWorlds={library.worlds
+            .filter((world) => world.membershipRole === "owner")
+            .map((world) => ({ id: world.id, name: world.name }))}
+          onEnterWorld={(worldId) => {
+            // 进入房间绑定的共享世界：打开该世界最近的记录；无记录则
+            // 打开世界库让用户选（世界库按 membership 已可见）。
+            setLobbyOpen(false);
+            setLobbyInvite(null);
+            const world = library.worlds.find((entry) => entry.id === worldId);
+            const records = world?.stories.flatMap((story) => story.records) ?? [];
+            const active = records.filter((record) => record.status === "active");
+            const target = (active.length > 0 ? active : records).at(-1);
+            if (target) {
+              void openRecord(target.id);
+            } else {
+              setLibraryOpen(true);
+            }
+          }}
+          onClose={() => {
+            setLobbyOpen(false);
+            setLobbyInvite(null);
+          }}
+        />
+      </div>
+    );
+  }
+
+  /** 两种来源共用的创世 overlay 渲染（chat 主入口 / guided 次入口）。 */
+  function renderCreationOverlay() {
+    if (!creationOverlay) return null;
+    if (creationOverlay.kind === "chat") {
+      return (
+        <div
+          aria-label={uiText("ui.genesisChat.title", uiLanguage)}
+          aria-modal="true"
+          className="guided-overlay"
+          role="dialog"
+        >
+          <GuidedGenesisChat
+            uiLanguage={uiLanguage}
+            playerName={playerDisplayName || "旅人"}
+            onConfirm={confirmCreation}
+            onOpenRecord={openRecord}
+            onFallback={() =>
+              setCreationOverlay({ kind: "guided", source: creationOverlay.source })}
+            onExit={closeCreation}
+          />
+        </div>
+      );
+    }
+    return (
+      <div
+        aria-label={uiText("ui.guided.eyebrow", uiLanguage)}
+        aria-modal="true"
+        className="guided-overlay"
+        role="dialog"
+      >
+        <GuidedGenesis
+          uiLanguage={uiLanguage}
+          onConfirm={confirmCreation}
+          onExit={closeCreation}
+          onOpenRecord={openRecord}
+          onSuggest={suggestGenesis}
+          playerName={playerDisplayName || "旅人"}
+        />
+      </div>
+    );
+  }
+
+  /**
+   * AI 引导创建 · AI 代写：区分 HTTP 错误 / ok:false / malformed payload，
+   * 向上传递安全提示（绝不含 key/URL/连接串/原文）；成功才返回候选。
+   */
   async function suggestGenesis(input: {
     step: GuidedGenesisStep;
     intent: string;
     context: Partial<WorldGenesisDraft>;
-  }): Promise<GenesisSuggestions | null> {
+  }): Promise<{
+    suggestions: GenesisSuggestions | null;
+    errorMessage: string | null;
+  }> {
+    const SAFE_MESSAGE = "AI 建议暂时不可用，请检查模型设置或稍后重试。";
     try {
       const response = await fetch("/api/world/suggest", {
         method: "POST",
@@ -447,12 +652,23 @@ export function RealmClient() {
         body: JSON.stringify(input),
       });
       const payload = await readJson(response);
-      if (!response.ok || !payload || typeof payload !== "object") return null;
-      const body = payload as { ok?: unknown; suggestions?: unknown };
-      if (body.ok !== true || body.suggestions === undefined) return null;
-      return body.suggestions as GenesisSuggestions;
+      if (!response.ok || !payload || typeof payload !== "object") {
+        return { suggestions: null, errorMessage: SAFE_MESSAGE };
+      }
+      const body = payload as {
+        ok?: unknown;
+        suggestions?: unknown;
+        error?: unknown;
+      };
+      if (body.ok !== true) {
+        return { suggestions: null, errorMessage: SAFE_MESSAGE };
+      }
+      if (body.suggestions === undefined || body.suggestions === null) {
+        return { suggestions: null, errorMessage: SAFE_MESSAGE };
+      }
+      return { suggestions: body.suggestions as GenesisSuggestions, errorMessage: null };
     } catch {
-      return null;
+      return { suggestions: null, errorMessage: SAFE_MESSAGE };
     }
   }
 
@@ -464,38 +680,43 @@ export function RealmClient() {
     const linkedRecordId = searchParams.get("recordId") ?? "";
     const linkedView = normalizeMainView(searchParams.get("view"));
     const linkedStoryId = searchParams.get("storyId") ?? "";
-    const initialLoad = window.setTimeout(() => {
-      // 批次 T12-C：深链 ?view=world|story 恢复页面级视图（与既有深链同拍）。
-      // 批次 T12 验收修正：?storyId= 恢复被选故事（仅故事视图生效）。
-      setMainViewState(linkedView);
-      if (linkedView === "story" && linkedStoryId) {
-        setSelectedStoryId(linkedStoryId);
-      }
-      void loadRecord(linkedRecordId);
-    }, 0);
-    const libraryLoad = window.setTimeout(() => void loadLibrary(), 0);
-    const identityLoad = window.setTimeout(() => {
-      // 登录昵称仅用于引导展示；门禁未启用时回落为空，由服务端在落库时解析。
-      fetch("/api/auth/me", { headers: { Accept: "application/json" }, cache: "no-store" })
-        .then((response) => (response.ok ? response.json() : null))
-        .then((payload: unknown) => {
-          if (!mounted.current || !payload || typeof payload !== "object") return;
-          const name = (payload as Record<string, unknown>).displayName;
-          if (typeof name === "string" && name.trim()) setPlayerDisplayName(name.trim());
-          const storedLanguage = normalizeUiLanguage(
-            window.localStorage.getItem("realm-ui-language"),
-          );
-          setUiLanguage(storedLanguage);
-        })
-        .catch(() => {});
-        setUiLanguage(
-          normalizeUiLanguage(window.localStorage.getItem("realm-ui-language")),
-        );
-    }, 0);
+    // 大厅邀请深链：?lobby=<不透明 roomId> → 打开大厅并定位目标房间；
+    // 参数只作导航提示，绝不携带/参与授权。读取后从 URL 剥离（重复打开
+    // 链接行为一致；刷新不残留）。
+    const inviteRoomId = searchParams.get("lobby") ?? "";
+    // effect 已经发生在 hydration 之后；独立请求直接并行启动，避免额外的
+    // setTimeout(0) 调度层让首屏多等一个 task。
+    // hydration 后把 URL 深链投影到交互状态；服务端首帧仍固定 record。
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe URL sync
+    setMainViewState(linkedView);
+    if (linkedView === "story" && linkedStoryId) {
+      setSelectedStoryId(linkedStoryId);
+    }
+    if (inviteRoomId) {
+      setLobbyInvite(inviteRoomId);
+      setLobbyOpen(true);
+      const cleaned = new URL(window.location.href);
+      cleaned.searchParams.delete("lobby");
+      window.history.replaceState(null, "", cleaned);
+    }
+    void loadRecord(linkedRecordId);
+    void loadLibrary();
+    // 登录昵称仅用于引导展示；门禁未启用时回落为空，由服务端在落库时解析。
+    void fetch("/api/auth/me", {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: unknown) => {
+        if (!mounted.current || !payload || typeof payload !== "object") return;
+        const name = (payload as Record<string, unknown>).displayName;
+        if (typeof name === "string" && name.trim()) setPlayerDisplayName(name.trim());
+      })
+      .catch(() => {});
+    setUiLanguage(
+      normalizeUiLanguage(window.localStorage.getItem("realm-ui-language")),
+    );
     return () => {
-      window.clearTimeout(initialLoad);
-      window.clearTimeout(libraryLoad);
-      window.clearTimeout(identityLoad);
       mounted.current = false;
     };
   }, [loadLibrary, loadRecord]);
@@ -535,50 +756,7 @@ export function RealmClient() {
   }, [selfPlayActive, selfPlayRecordId, loadRecord]);
 
   const streamRecordId = envelope?.record.record.id ?? "";
-  const streamPerspective = envelope?.viewer.perspective ?? "character";
-  const streamCharacterInstanceId = envelope?.viewer.characterInstanceId ?? "";
   const streamDynamicKnowledge = envelope?.viewer.dynamicKnowledgeVisible ?? false;
-
-  useEffect(() => {
-    if (!streamRecordId) return;
-    // M4：流式 Preview 频道；只影响预览卡，不触碰正式时间线。
-    const source = new EventSource(
-      `/api/record/preview?recordId=${encodeURIComponent(streamRecordId)}`,
-    );
-    source.addEventListener("preview", (rawEvent) => {
-      try {
-        const event = JSON.parse((rawEvent as MessageEvent<string>).data) as {
-          previewId: string;
-          speaker: string;
-          content: string;
-        };
-        setPreviews((current) => ({
-          ...current,
-          [event.previewId]: {
-            speaker: event.speaker,
-            text: (current[event.previewId]?.text ?? "") + event.content,
-          },
-        }));
-      } catch {
-        // 非法 Preview 载荷直接忽略。
-      }
-    });
-    source.addEventListener("preview-end", (rawEvent) => {
-      try {
-        const event = JSON.parse((rawEvent as MessageEvent<string>).data) as {
-          previewId: string;
-        };
-        setPreviews((current) => {
-          const next = { ...current };
-          delete next[event.previewId];
-          return next;
-        });
-      } catch {
-        // 同上。
-      }
-    });
-    return () => source.close();
-  }, [streamRecordId]);
 
   useEffect(() => {
     if (!streamRecordId || !streamDynamicKnowledge) {
@@ -712,23 +890,22 @@ export function RealmClient() {
     };
   }, [
     loadRecord,
-    streamCharacterInstanceId,
-    streamDynamicKnowledge,
-    streamPerspective,
     streamRecordId,
   ]);
 
+  const latestEvent = projection?.events.at(-1);
+  const latestEventId = latestEvent?.id ?? "";
+  const latestEventStatus = latestEvent?.status ?? "";
+
   useEffect(() => {
-    if (!projection || projection.events.length === 0) return;
-    const latest = projection.events.at(-1);
-    if (!latest) return;
+    if (!latestEventId) return;
     window.requestAnimationFrame(() => {
-      document.getElementById(`event-${latest.id}`)?.scrollIntoView({
+      document.getElementById(`event-${latestEventId}`)?.scrollIntoView({
         block: "nearest",
-        behavior: latest.status === "pending" ? "smooth" : "auto",
+        behavior: latestEventStatus === "pending" ? "smooth" : "auto",
       });
     });
-  }, [projection]);
+  }, [latestEventId, latestEventStatus]);
 
   async function sendMessage(
     content: string,
@@ -937,45 +1114,13 @@ export function RealmClient() {
         <WorldOnboarding
           uiLanguage={uiLanguage}
           library={library}
-          onOpenChat={() => setChatOpen(true)}
-          onOpenGuided={() => setGuidedOpen(true)}
+          onOpenChat={() => openCreation("chat", "onboarding")}
+          onOpenGuided={() => openCreation("guided", "onboarding")}
+          onOpenLobby={() => setLobbyOpen(true)}
           onOpenRecord={openRecord}
         />
-        {chatOpen ? (
-          <div className="guided-overlay">
-            <GuidedGenesisChat
-              uiLanguage={uiLanguage}
-              playerName={playerDisplayName || "旅人"}
-              onConfirm={async (draft) => {
-                const recordId = await confirmWorldGenesis(draft);
-                if (recordId) setChatOpen(false);
-                return recordId;
-              }}
-              onOpenRecord={openRecord}
-              onFallback={() => {
-                setChatOpen(false);
-                setGuidedOpen(true);
-              }}
-              onExit={() => setChatOpen(false)}
-            />
-          </div>
-        ) : null}
-        {guidedOpen ? (
-          <div className="guided-overlay">
-            <GuidedGenesis
-              uiLanguage={uiLanguage}
-              onConfirm={async (draft) => {
-                const recordId = await confirmWorldGenesis(draft);
-                if (recordId) setGuidedOpen(false);
-                return recordId;
-              }}
-              onExit={() => setGuidedOpen(false)}
-              onOpenRecord={openRecord}
-              onSuggest={suggestGenesis}
-              playerName={playerDisplayName || "旅人"}
-            />
-          </div>
-        ) : null}
+        {renderCreationOverlay()}
+        {renderLobbyOverlay()}
       </>
     );
   }
@@ -1056,8 +1201,17 @@ export function RealmClient() {
         </nav>
         <div className="header-status">
           <button
+            aria-haspopup="dialog"
             className="header-settings-link"
-            onClick={() => setLibraryOpen(true)}
+            onClick={openLobby}
+            type="button"
+          >
+            {uiText("ui.header.lobby", uiLanguage)}
+          </button>
+          <button
+            aria-haspopup="dialog"
+            className="header-settings-link"
+            onClick={openLibrary}
             type="button"
           >
             {uiText("ui.header.library", uiLanguage)}
@@ -1065,6 +1219,7 @@ export function RealmClient() {
           <Link className="header-settings-link" href="/settings" aria-label={uiText("ui.header.settingsAria", uiLanguage)}>
             {uiText("ui.header.settings", uiLanguage)}
           </Link>
+          <ThemeToggle uiLanguage={uiLanguage} />
           {envelope.viewer.membershipRole === "observer" ? (
             <span className="view-mode is-narrator">
               {uiText("ui.header.narrator", uiLanguage)}
@@ -1106,8 +1261,9 @@ export function RealmClient() {
             uiLanguage={uiLanguage}
             onOpenRecord={openRecord}
             onOpenStory={openStory}
-            onManage={() => setLibraryOpen(true)}
+            onManage={openLibrary}
             onOpenGraph={(id, name) => setGraphWorld({ id, name })}
+            onOpenBranchTree={(id, name) => setBranchWorld({ id, name })}
           />
         ) : mainView === "story" ? (
           <StoryView
@@ -1142,6 +1298,11 @@ export function RealmClient() {
                   {uiText("ui.record.retroBadge", uiLanguage)}
                 </span>
               ) : null}
+              {currentRecordMeta?.timelineKind === "branch" ? (
+                <span className="record-timeline-badge">
+                  {uiText("ui.record.branchBadge", uiLanguage)}
+                </span>
+              ) : null}
               <button
                 className="record-action-button"
                 disabled={recordActionBusy}
@@ -1151,6 +1312,14 @@ export function RealmClient() {
                 {recordActionBusy
                   ? uiText("ui.record.duplicateBusy", uiLanguage)
                   : uiText("ui.record.duplicate", uiLanguage)}
+              </button>
+              <button
+                className="record-action-button"
+                disabled={recordActionBusy}
+                onClick={() => openBranchDialog()}
+                type="button"
+              >
+                {uiText("ui.record.branch", uiLanguage)}
               </button>
               {currentRecordMeta?.timelineKind === "retrospection" ? (
                 <button
@@ -1162,7 +1331,6 @@ export function RealmClient() {
                   {uiText("ui.record.canonize", uiLanguage)}
                 </button>
               ) : null}
-              <span className="record-code">REC / {projection.record.id.slice(-6).toUpperCase()}</span>
             </div>
           </header>
 
@@ -1263,15 +1431,11 @@ export function RealmClient() {
               style={normalizeWorldStyle(projection.world.style)}
               uiLanguage={worldLanguage}
             />
-            {Object.entries(previews).map(([previewId, preview]) => (
-              <div className="preview-card" key={previewId} role="status">
-                <div className="preview-card-heading">
-                  <strong>{preview.speaker}</strong>
-                  <span>{uiText("ui.timeline.preview", uiLanguage)}</span>
-                </div>
-                <p>{preview.text || "…"}</p>
-              </div>
-            ))}
+            <PreviewCards
+              key={streamRecordId}
+              recordId={streamRecordId}
+              uiLanguage={uiLanguage}
+            />
           </div>
 
           {pendingSubmission ? (
@@ -1317,20 +1481,22 @@ export function RealmClient() {
         )}
       </div>
       {libraryOpen ? (
-        <div className="library-overlay">
+        <div
+          aria-label={uiText("ui.header.library", uiLanguage)}
+          aria-modal="true"
+          className="library-overlay"
+          role="dialog"
+        >
           <LibraryPanel
             snapshot={library}
             uiLanguage={uiLanguage}
             onRefresh={loadLibrary}
             onCreate={createLibraryItem}
-            onGenesisConfirm={confirmWorldGenesis}
-            onGenesisDraft={generateWorldDraft}
-            onOpenGuided={() => {
-              setLibraryOpen(false);
-              setGuidedOpen(true);
-            }}
+            onOpenChat={() => openCreation("chat", "library")}
+            onOpenGuided={() => openCreation("guided", "library")}
             onOpenRecord={openRecord}
             onOpenGraph={(id, name) => setGraphWorld({ id, name })}
+            onOpenBranchTree={(id, name) => setBranchWorld({ id, name })}
             currentWorldId={projection.world.id}
             currentRecordId={projection.record.id}
             castDefinitionIds={projection.cast.map((member) => member.id)}
@@ -1355,22 +1521,8 @@ export function RealmClient() {
           />
         </div>
       ) : null}
-      {guidedOpen ? (
-        <div className="guided-overlay">
-          <GuidedGenesis
-            uiLanguage={uiLanguage}
-            onConfirm={async (draft) => {
-              const recordId = await confirmWorldGenesis(draft);
-              if (recordId) setGuidedOpen(false);
-              return recordId;
-            }}
-            onExit={() => setGuidedOpen(false)}
-            onOpenRecord={openRecord}
-            onSuggest={suggestGenesis}
-            playerName={playerDisplayName || "旅人"}
-          />
-        </div>
-      ) : null}
+      {renderLobbyOverlay()}
+      {renderCreationOverlay()}
       {graphWorld ? (
         <div className="library-overlay graph-overlay">
           <KnowledgeGraphPanel
@@ -1379,6 +1531,117 @@ export function RealmClient() {
             worldName={graphWorld.name}
             onClose={() => setGraphWorld(null)}
           />
+        </div>
+      ) : null}
+      {branchWorld ? (
+        <div
+          aria-label={uiText("ui.branchTree.title", uiLanguage)}
+          aria-modal="true"
+          className="library-overlay graph-overlay branch-tree-overlay"
+          role="dialog"
+        >
+          <BranchTreePanel
+            currentRecordId={projection.record.id}
+            onClose={() => setBranchWorld(null)}
+            onOpenRecord={(recordId) => {
+              setBranchWorld(null);
+              void openRecord(recordId);
+            }}
+            uiLanguage={uiLanguage}
+            worldId={branchWorld.id}
+            worldName={branchWorld.name}
+          />
+        </div>
+      ) : null}
+      {branchDialog ? (
+        <div
+            aria-label={uiText("ui.branchDialog.title", uiLanguage)}
+            aria-modal="true"
+            aria-describedby="branch-dialog-note"
+            aria-labelledby="branch-dialog-title"
+            className="library-overlay branch-dialog-overlay"
+            role="dialog"
+          >
+            <div className="branch-dialog" data-testid="branch-dialog">
+            <h2 id="branch-dialog-title">{uiText("ui.branchDialog.title", uiLanguage)}</h2>
+            <p className="branch-dialog-note" id="branch-dialog-note">{uiText("ui.branchDialog.note", uiLanguage)}</p>
+            <fieldset className="branch-dialog-fork">
+              <legend>{uiText("ui.branchDialog.forkLegend", uiLanguage)}</legend>
+              <label>
+                <input
+                  checked={!branchDialog.useEventFork}
+                  onChange={() => setBranchDialog({ ...branchDialog, useEventFork: false })}
+                  ref={branchHeadRadioRef}
+                  type="radio"
+                />
+                {uiText("ui.branchDialog.forkHead", uiLanguage)}
+              </label>
+              <label>
+                <input
+                  checked={branchDialog.useEventFork}
+                  onChange={() => setBranchDialog({ ...branchDialog, useEventFork: true })}
+                  type="radio"
+                />
+                {uiText("ui.branchDialog.forkEvent", uiLanguage)}
+              </label>
+              {branchDialog.useEventFork ? (
+                <select
+                  aria-label={uiText("ui.branchDialog.event", uiLanguage)}
+                  onChange={(event) => setBranchDialog({
+                    ...branchDialog,
+                    forkEventId: event.target.value,
+                  })}
+                  value={branchDialog.forkEventId}
+                >
+                  <option value="">{uiText("ui.branchDialog.event", uiLanguage)}</option>
+                  {projection.events.map((event) => (
+                    <option key={event.id} value={event.id}>
+                      {`#${event.ordinal} ${event.speaker}：${event.content.slice(0, 40)}`}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+            </fieldset>
+            <label className="branch-dialog-field">
+              {uiText("ui.branchDialog.label", uiLanguage)}
+              <input
+                maxLength={80}
+                onChange={(event) => setBranchDialog({ ...branchDialog, label: event.target.value })}
+                value={branchDialog.label}
+              />
+            </label>
+            <label className="branch-dialog-field">
+              {uiText("ui.branchDialog.recordTitle", uiLanguage)}
+              <input
+                maxLength={80}
+                onChange={(event) => setBranchDialog({ ...branchDialog, recordTitle: event.target.value })}
+                value={branchDialog.recordTitle}
+              />
+            </label>
+            {branchError ? (
+              <p className="branch-dialog-error" role="alert">{branchError}</p>
+            ) : null}
+            <div className="branch-dialog-actions">
+              <button
+                disabled={recordActionBusy}
+                onClick={() => setBranchDialog(null)}
+                type="button"
+              >
+                {uiText("ui.branchDialog.cancel", uiLanguage)}
+              </button>
+              <button
+                className="is-primary"
+                disabled={recordActionBusy
+                  || (branchDialog.useEventFork && !branchDialog.forkEventId)}
+                onClick={() => void createBranch()}
+                type="button"
+              >
+                {recordActionBusy
+                  ? uiText("ui.branchDialog.confirmBusy", uiLanguage)
+                  : uiText("ui.branchDialog.confirm", uiLanguage)}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

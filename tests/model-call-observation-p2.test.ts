@@ -260,7 +260,7 @@ test("settings test() 观测：正常 success（stage=settings-probe，maxTokens
     const settings: ModelProviderSettings = {
       schemaVersion: 1,
       providerId: "lmstudio",
-      baseUrl: "http://127.0.0.1:8823/v1",
+      baseUrl: "http://127.0.0.1:1234/v1",
       apiKey: "",
       selectedModel: "model-a",
       thinking: "disabled",

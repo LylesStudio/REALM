@@ -15,7 +15,7 @@ import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 export interface GuidedGenesisChatProps {
   uiLanguage: UiLanguage;
   playerName: string;
-  /** 落笔入界：走既有 POST /api/world/generate draft 分支（单事务原子）。 */
+  /** 创建世界：走既有 POST /api/world/generate draft 分支（单事务原子）。 */
   onConfirm: (draft: WorldGenesisDraft) => Promise<string | null>;
   onOpenRecord: (recordId: string) => void;
   /** fail-closed 降级：转旧八步表单。 */
@@ -26,9 +26,9 @@ export interface GuidedGenesisChatProps {
 const EMPTY_COMPANION = { name: "", role: "", summary: "" };
 
 /**
- * 批次 S · 司卷对谈：LLM 引导创世。
- * 自由对话 → 世界提案卡（可就地编辑）→ 落笔入界。
- * fail-closed：任何模型失败提示「司卷暂时沉默」，可重试或转旧表单，
+ * 批次 S · AI 助手对话：LLM 引导创世。
+ * 自由对话 → 世界提案卡（可就地编辑）→ 创建世界。
+ * fail-closed：任何模型失败给出安全提示，可重试或改用分步引导，
  * 绝不阻塞创建。
  */
 export function GuidedGenesisChat({
@@ -117,7 +117,7 @@ export function GuidedGenesisChat({
     }
   }
 
-  // 开场：挂载即请司卷发问（首轮 message 为空）。
+  // 开场：挂载即请 AI 助手发问（首轮 message 为空）。
   useEffect(() => {
     if (opened.current) return;
     opened.current = true;
@@ -221,7 +221,7 @@ export function GuidedGenesisChat({
             <p className="eyebrow">{uiText("ui.genesisChat.proposalEyebrow", uiLanguage)}</p>
             <div className="genesis-proposal-fields">
               <label>
-                <span>世界之名</span>
+                <span>{uiText("ui.genesisChat.field.worldName", uiLanguage)}</span>
                 <input
                   maxLength={40}
                   onChange={(event) =>
@@ -233,7 +233,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <label>
-                <span>纪元基调</span>
+                <span>{uiText("ui.genesisChat.field.era", uiLanguage)}</span>
                 <input
                   maxLength={40}
                   onChange={(event) =>
@@ -245,7 +245,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <label className="is-wide">
-                <span>世界底色</span>
+                <span>{uiText("ui.genesisChat.field.summary", uiLanguage)}</span>
                 <textarea
                   maxLength={300}
                   onChange={(event) =>
@@ -258,7 +258,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <div className="is-wide">
-                <span>文风</span>
+                <span>{uiText("ui.genesisChat.field.style", uiLanguage)}</span>
                 <div className="guided-style-options" role="group">
                   {WORLD_STYLE_KEYS.map((key) => (
                     <button
@@ -274,7 +274,7 @@ export function GuidedGenesisChat({
                 </div>
               </div>
               <label>
-                <span>开篇故事</span>
+                <span>{uiText("ui.genesisChat.field.storyTitle", uiLanguage)}</span>
                 <input
                   maxLength={60}
                   onChange={(event) =>
@@ -286,7 +286,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <label>
-                <span>记录之名</span>
+                <span>{uiText("ui.genesisChat.field.recordTitle", uiLanguage)}</span>
                 <input
                   maxLength={60}
                   onChange={(event) =>
@@ -298,7 +298,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <label className="is-wide">
-                <span>故事缘起</span>
+                <span>{uiText("ui.genesisChat.field.storyPremise", uiLanguage)}</span>
                 <textarea
                   maxLength={300}
                   onChange={(event) =>
@@ -311,7 +311,7 @@ export function GuidedGenesisChat({
                 />
               </label>
               <label className="is-wide">
-                <span>你的定位</span>
+                <span>{uiText("ui.genesisChat.field.playerRole", uiLanguage)}</span>
                 <input
                   maxLength={60}
                   onChange={(event) =>
@@ -343,7 +343,7 @@ export function GuidedGenesisChat({
               </div>
 
               <div className="is-wide">
-                <span>同行之人（≤2）</span>
+                <span>{uiText("ui.genesisChat.field.companions", uiLanguage)}</span>
                 {draft.companions.map((companion, index) => (
                   <div className="companion-row" key={`companion-${index}`}>
                     <input
@@ -354,7 +354,7 @@ export function GuidedGenesisChat({
                           companions: current.companions.map((item, i) =>
                             i === index ? { ...item, name: event.target.value } : item),
                         }))}
-                      placeholder="名字"
+                      placeholder={uiText("ui.genesisChat.ph.name", uiLanguage)}
                       value={companion.name}
                     />
                     <input
@@ -365,7 +365,7 @@ export function GuidedGenesisChat({
                           companions: current.companions.map((item, i) =>
                             i === index ? { ...item, role: event.target.value } : item),
                         }))}
-                      placeholder="定位"
+                      placeholder={uiText("ui.genesisChat.ph.role", uiLanguage)}
                       value={companion.role}
                     />
                     <input
@@ -376,11 +376,11 @@ export function GuidedGenesisChat({
                           companions: current.companions.map((item, i) =>
                             i === index ? { ...item, summary: event.target.value } : item),
                         }))}
-                      placeholder="一句话侧写"
+                      placeholder={uiText("ui.genesisChat.ph.sketch", uiLanguage)}
                       value={companion.summary}
                     />
                     <button
-                      aria-label="移除同行者"
+                      aria-label={uiText("ui.genesisChat.removeCompanion", uiLanguage)}
                       onClick={() =>
                         patchDraft((current) => ({
                           ...current,
@@ -402,13 +402,13 @@ export function GuidedGenesisChat({
                       }))}
                     type="button"
                   >
-                    ＋ 添一名同行者
+                    ＋ {uiText("ui.genesisChat.addCompanion", uiLanguage)}
                   </button>
                 ) : null}
               </div>
 
               <div className="is-wide">
-                <span>初始场景</span>
+                <span>{uiText("ui.genesisChat.field.scene", uiLanguage)}</span>
                 <div className="scene-grid">
                   <input
                     maxLength={60}
@@ -417,7 +417,7 @@ export function GuidedGenesisChat({
                         ...current,
                         scene: { ...current.scene, location: event.target.value },
                       }))}
-                    placeholder="地点"
+                    placeholder={uiText("ui.genesisChat.ph.location", uiLanguage)}
                     value={draft.scene.location}
                   />
                   <input
@@ -427,7 +427,7 @@ export function GuidedGenesisChat({
                         ...current,
                         scene: { ...current.scene, weather: event.target.value },
                       }))}
-                    placeholder="天气"
+                    placeholder={uiText("ui.genesisChat.ph.weather", uiLanguage)}
                     value={draft.scene.weather}
                   />
                   <input
@@ -437,7 +437,7 @@ export function GuidedGenesisChat({
                         ...current,
                         scene: { ...current.scene, tension: event.target.value },
                       }))}
-                    placeholder="局势"
+                    placeholder={uiText("ui.genesisChat.ph.tension", uiLanguage)}
                     value={draft.scene.tension}
                   />
                   <input
@@ -447,7 +447,7 @@ export function GuidedGenesisChat({
                         ...current,
                         scene: { ...current.scene, objective: event.target.value },
                       }))}
-                    placeholder="目标"
+                    placeholder={uiText("ui.genesisChat.ph.objective", uiLanguage)}
                     value={draft.scene.objective}
                   />
                 </div>

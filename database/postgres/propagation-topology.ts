@@ -15,7 +15,6 @@ import type {
  */
 
 export const CANON_ORIGIN_NODE_KEY = "canon_origin";
-export const PROPAGATION_TOPOLOGY_ALGORITHM = "realm-propagate-v1";
 
 type Queryable = Pick<PoolClient, "query">;
 

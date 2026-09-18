@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { THEME_INIT_SCRIPT } from "./theme.ts";
 
 export const metadata: Metadata = {
   title: "界核 / REALM",
@@ -29,7 +30,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        {/* 首帧前初始化主题：避免 night 用户先闪浅色；SSR 不读 window。 */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body>{children}</body>
     </html>
   );

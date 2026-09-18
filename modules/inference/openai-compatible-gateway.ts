@@ -1,4 +1,5 @@
 import {
+  MODEL_PROVIDER_CATALOG,
   ModelConfigurationError,
   ModelProviderError,
   type DiscoveredModel,
@@ -6,6 +7,7 @@ import {
   type ModelGateway,
   type ModelChatRequest,
   type ModelPricing,
+  type ModelProviderId,
   type ModelProviderSettings,
   type ModelToolCall,
 } from "./types.ts";
@@ -13,17 +15,28 @@ import {
 type FetchLike = typeof fetch;
 
 /**
- * OpenAI-compatible 推理网关。
+ * OpenAI-compatible 推理网关（五类注册供应商）。
  *
- * 当前注册供应商：
- * - LM Studio：本地 LAN，允许空 API key，保留 json_schema 与 token 下限兼容层；
+ * - LM Studio：本机/局域网，允许空 API key，保留 json_schema 适配、token 下限
+ *   与 Gemma native `/api/v1/chat` 通道；
  * - OpenRouter：官方 HTTPS API，读取标准 Models API pricing，并使用
- *   OpenAI-compatible json_object / tools 请求格式。
+ *   OpenAI-compatible json_object / tools 请求格式；
+ * - DeepSeek：官方 OpenAI-compatible `/chat/completions`，thinking 映射为
+ *   官方兼容的 `thinking: {type: "enabled"|"disabled"}` 字段；
+ * - Kimi Coding：官方 OpenAI-compatible `/coding/v1`，tool_choice 保守降级
+ *   required → auto（不支持 required 的模型不得静默失败）；不发送臆造
+ *   thinking 字段；
+ * - custom-openai：标准 OpenAI-compatible 字段子集（json_object/tools），
+ *   不发送供应商特定扩展字段。
  *
  * Source: https://openrouter.ai/docs/api-reference/models/get-models
  * Source: https://openrouter.ai/docs/api-reference/overview
  */
 const LM_STUDIO_MIN_MAX_TOKENS = 1024;
+
+function providerEntry(providerId: ModelProviderId) {
+  return MODEL_PROVIDER_CATALOG.find((item) => item.id === providerId)!;
+}
 
 type NativeLmStudioRequest = {
   settings: ModelProviderSettings;
@@ -316,11 +329,10 @@ function chatBody(
       ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
     })),
     ...(input.tools ? { tools: input.tools } : {}),
-    ...(input.toolChoice ? { tool_choice: input.toolChoice } : {}),
+    ...(input.toolChoice ? { tool_choice: resolveToolChoice(input.toolChoice, settings) } : {}),
     ...(input.responseFormat
-      ? settings.providerId === "openrouter"
-        ? { response_format: { type: "json_object" } }
-        : {
+      ? settings.providerId === "lmstudio"
+        ? {
             // LM Studio 不接受 OpenAI 式 json_object（仅 json_schema/text）——
             // 适配层翻译为宽松 json_schema，保持既有本地模型契约。
             response_format: {
@@ -331,11 +343,45 @@ function chatBody(
               },
             },
           }
+        : { response_format: { type: "json_object" } }
       : {}),
+    ...thinkingFields(input, settings),
     max_tokens: resolveMaxTokens(input, settings),
     temperature: input.temperature ?? 0.35,
     stream,
   };
+}
+
+/**
+ * tool_choice 映射：Kimi Coding 官方对 required 的支持因模型而异——保守
+ * 降级为 auto（绝不让一回合因不支持的 required 静默失败）；其它供应商
+ * 按标准 OpenAI 字段透传。
+ */
+function resolveToolChoice(
+  toolChoice: "auto" | "required" | "none",
+  settings: ModelProviderSettings,
+): "auto" | "required" | "none" {
+  if (settings.providerId === "kimi-coding" && toolChoice === "required") {
+    return "auto";
+  }
+  return toolChoice;
+}
+
+/**
+ * thinking 字段映射（绝不发送臆造字段）：
+ * - DeepSeek：官方兼容 `thinking: {type: "enabled"|"disabled"}`；
+ * - Kimi Coding / custom-openai：官方未承诺统一字段，一律省略；
+ * - LM Studio：thinking 仅经 Gemma native 通道（createNativeLmStudioRequest），
+ *   OpenAI-compatible 通道保持不发送；
+ * - OpenRouter：保持既有行为（不发送；官方按模型自处理）。
+ */
+function thinkingFields(
+  input: ModelChatRequest,
+  settings: ModelProviderSettings,
+): Record<string, unknown> {
+  if (settings.providerId !== "deepseek") return {};
+  const thinking = input.thinking ?? settings.thinking;
+  return { thinking: { type: thinking === "enabled" ? "enabled" : "disabled" } };
 }
 
 function requestMessages(
@@ -359,13 +405,14 @@ function requestMessages(
 }
 
 function authHeaders(settings: ModelProviderSettings): Record<string, string> {
-  if (settings.providerId === "openrouter" && !settings.apiKey) {
+  if (providerEntry(settings.providerId).requiresApiKey && !settings.apiKey) {
     throw new ModelConfigurationError(
       "MODEL_API_KEY_MISSING",
-      "OpenRouter requires an API key before it can be queried.",
+      `${providerLabel(settings)} requires an API key before it can be queried.`,
     );
   }
-  // apiKey 为空时不发送 Authorization（本地 LM Studio 无需凭证）。
+  // apiKey 为空时不发送 Authorization（本机/无 key 端点无需凭证）；
+  // key 只进 Authorization header，绝不进 body/日志/observation。
   return settings.apiKey
     ? { Authorization: `Bearer ${settings.apiKey}` }
     : {};
@@ -636,7 +683,7 @@ function parseChatResponse(
 }
 
 function providerLabel(settings: ModelProviderSettings): string {
-  return settings.providerId === "openrouter" ? "OpenRouter" : "本地 LM Studio";
+  return providerEntry(settings.providerId).name;
 }
 
 function numberOrZero(value: unknown): number {

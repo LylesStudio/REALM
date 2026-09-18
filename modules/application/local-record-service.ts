@@ -1878,15 +1878,16 @@ export function createLocalRecordService(
       // 与读取路径同源的三步窄授权（只读，零副作用）：
       // ① Record scope——未知 Record / 无可用席位 → NOT_FOUND（404）；
       await resolveRuntimeScope(dependencies, recordId, principalId);
-      // ② world membership + viewer 可见性——delivery META 的 membership
-      //    JOIN 对非成员 / 无 viewer projection 返回 null → 安全 404
-      //   （与未知 Record 同形，不泄漏存在性）；
-      const delivery = await dependencies.projection.loadDeliveryForPlayer({
+      // ② world membership + viewer 可见性——与 delivery META 同一道
+      //    membership JOIN/归档过滤（META-only，不扫描 EVENTS）；
+      //    非成员 / 无 viewer projection 返回 false → 安全 404（与未知
+      //    Record 同形，不泄漏存在性）。
+      const authorized = await dependencies.projection.hasViewerProjection({
         ...LOCAL_RECORD_SCOPE,
         recordId,
         principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
       });
-      if (!delivery) {
+      if (!authorized) {
         throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
       }
       // ③ runtime 未初始化（record head 缺失）保持既有 503 形态。

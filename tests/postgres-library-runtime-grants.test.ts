@@ -70,6 +70,9 @@ const CURRENT_MIGRATIONS = [
   "0038_remove_base_skill_hidden_clue.sql",
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  // 0044：records.timeline_kind 增加 'branch'——branch 命令现在创建
+  // timeline_kind='branch' 的可玩拓扑，pre-0044 CHECK 会拒绝。
+  "0044_record_branch_timeline_kind.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -215,12 +218,13 @@ test(
     const definitionId = withCharacter.characters.find(
       (character) => character.name === "守塔人",
     )!.id;
+    const recordId = withCharacter.stories[0]!.records[0]!.id;
     await library.create(scope, {
       kind: "branch",
       worldId: world.id,
       label: "下沉分支",
+      sourceRecordId: recordId,
     });
-    const recordId = withCharacter.stories[0]!.records[0]!.id;
     await library.create(scope, {
       kind: "attach-character",
       worldId: world.id,

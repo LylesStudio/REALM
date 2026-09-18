@@ -95,6 +95,8 @@ test(
       "0038_remove_base_skill_hidden_clue.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+      // branch 命令创建 timeline_kind='branch' 的可玩拓扑（0044 枚举）。
+      "0044_record_branch_timeline_kind.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -180,10 +182,15 @@ test(
       "modern",
     );
 
+    const branchSource = (await service.list(scope)).worlds
+      .find((world) => world.id === createdWorld!.id)
+      ?.stories[0]?.records[0];
+    assert.ok(branchSource, "world should have a starter record to branch from");
     await service.create(scope, {
       kind: "branch",
       worldId: createdWorld!.id,
       label: "未开启塔门的另一日",
+      sourceRecordId: branchSource.id,
     });
     const withBranch = await service.list(scope);
     assert.equal(

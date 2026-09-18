@@ -227,7 +227,7 @@ test(
     await seedPostgresDemoPropagationTopology(ownerPool);
 
     // owner 通道写入唯一一条合法 public Job（campaign + pending job）；
-    // 临时库隔离——realm_dev 与已安装 systemd Worker（持 realm_dev 的锁）
+    // 临时库隔离——realm_test 与已安装 systemd Worker（持 realm_test 的锁）
     // 均接触不到本 Job。
     await ownerPool.query(
       `INSERT INTO information_campaigns (

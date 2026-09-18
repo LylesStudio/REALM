@@ -11,9 +11,15 @@ import { createOpenAICompatibleGateway } from "./openai-compatible-gateway.ts";
 import type { ModelGateway, ModelProviderSettings } from "./types.ts";
 
 export function createModelGateway(settings: ModelProviderSettings): ModelGateway {
+  // 五类注册供应商共用同一个 OpenAI-compatible 工厂；closed catalog
+  // 由 settings 校验保证（validateModelSettings 拒绝未注册 providerId，
+  // 不接受任意自由文本 provider）。
   switch (settings.providerId) {
     case "lmstudio":
     case "openrouter":
+    case "deepseek":
+    case "kimi-coding":
+    case "custom-openai":
       return createOpenAICompatibleGateway({ settings });
     default:
       throw new Error(`Unsupported model provider: ${settings.providerId}`);

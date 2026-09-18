@@ -48,6 +48,12 @@ export interface PostgresDeliveryProjectionRepository {
     scope: PlayerDeliveryScope,
   ): Promise<PlayerDeliverySnapshot | null>;
   /**
+   * 授权窄检查（preview 等连接前授权专用）：只跑 META_SQL——非成员/
+   * 未知 Record/归档返回 false，与 loadDeliveryForPlayer 返回 null 的
+   * 条件逐行同源，但不扫描 EVENTS/CAST/导航。授权语义不变，仅收窄读。
+   */
+  hasViewerProjection(scope: PlayerDeliveryScope): Promise<boolean>;
+  /**
    * Clean-up Phase 2：授权近事件瘦读（晶化等回合后消费者专用）——
    * 与 EVENTS_SQL 同一套授权 WHERE，DESC LIMIT 有界扫描，只取展示三列；
    * 不为拿最近几条摘要而重读完整投影（META+CAST+EVENTS+navigation）。
@@ -197,6 +203,15 @@ export function createPostgresDeliveryProjectionRepository(
 
   return {
     loadDeliveryForPlayer,
+    async hasViewerProjection(scope) {
+      validateScope(scope);
+      return withWorkspaceTransaction(
+        database,
+        scope.workspaceId,
+        async (client) => (await loadMeta(client, scope)) !== null,
+        { readOnly: true },
+      );
+    },
     async loadForPlayer(scope) {
       return (await loadDeliveryForPlayer(scope))?.record ?? null;
     },

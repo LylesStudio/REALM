@@ -1,7 +1,7 @@
 /**
  * 批次 T11-H——restricted/secret 真实 Worker 子进程 acceptance（T11-H §四）。
  * 隔离临时库（迁移 0001–0027 全链，t.after 强制拆库）+ 真实 spawn
- * scripts/propagation-worker.mjs（不触碰 realm_dev 与已装 systemd 服务）：
+ * scripts/propagation-worker.mjs（不触碰 realm_test 与已装 systemd 服务）：
  * restricted（有效 audience + restricted-clearance 拓扑）→ 真实 done 与
  * 产物计数；secret/private_letter（唯一 recipient 映射）→ done 且目标
  * 节点 Exposure 闭环；secret/market_rumor → 永久 failed、零错误渠道产物。

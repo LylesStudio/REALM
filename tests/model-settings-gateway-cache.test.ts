@@ -17,7 +17,7 @@ function settings(providerId: "lmstudio" | "openrouter", model: string): ModelPr
   return {
     schemaVersion: 1,
     providerId,
-    baseUrl: providerId === "lmstudio" ? "http://127.0.0.1:8823/v1" : "https://openrouter.ai/api/v1",
+    baseUrl: providerId === "lmstudio" ? "http://127.0.0.1:1234/v1" : "https://openrouter.ai/api/v1",
     apiKey: providerId === "openrouter" ? "test-key" : "",
     selectedModel: model,
     thinking: "disabled",

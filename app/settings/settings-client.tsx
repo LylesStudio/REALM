@@ -2,18 +2,20 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { ThemeToggle } from "../components/theme-toggle.tsx";
 import {
   UI_LANGUAGES,
   normalizeUiLanguage,
   uiText,
   type UiLanguage,
 } from "../../modules/i18n/public.ts";
-import type {
-  DiscoveredModel,
-  ModelProviderId,
-  ModelThinkingMode,
-  PublicModelProviderSettings,
-  PublicModelSettingsSnapshot,
+import {
+  MODEL_PROVIDER_CATALOG,
+  type DiscoveredModel,
+  type ModelProviderId,
+  type ModelThinkingMode,
+  type PublicModelProviderSettings,
+  type PublicModelSettingsSnapshot,
 } from "../../modules/inference/types.ts";
 
 type SettingsState = {
@@ -197,6 +199,7 @@ export function ModelSettingsClient() {
           <p className="eyebrow">系统设置 / System settings</p>
           <h1>模型供应商</h1>
         </div>
+        <ThemeToggle uiLanguage={uiLanguage} className="settings-back" />
         <Link className="settings-back" href="/">← 返回记录</Link>
       </header>
 
@@ -246,9 +249,13 @@ export function ModelSettingsClient() {
             {/* Provider secrets never leave the server-side settings boundary. */}
             <span className="provider-health is-ready">
               <i aria-hidden="true" />
-              {draft.providerId === "openrouter"
-                ? (activeProfile.apiKeyConfigured ? "OpenRouter 已配置" : "OpenRouter 待配置密钥")
-                : "本地端点已配置"}
+              {providerEntryOf(draft.providerId).requiresApiKey
+                ? (activeProfile.apiKeyConfigured
+                  ? `${providerName(draft.providerId)} 已配置`
+                  : `${providerName(draft.providerId)} 待配置密钥`)
+                : (activeProfile.apiKeyConfigured
+                  ? `${providerName(draft.providerId)} 已配置`
+                  : `${providerName(draft.providerId)} · 无 key 可用`)}
             </span>
           </div>
 
@@ -451,9 +458,7 @@ export function ModelSettingsClient() {
               </section>
             </div>
             <footer>
-              <p>{draft.providerId === "openrouter"
-                ? "当前回合会把最小必要上下文发送到 OpenRouter；模型与费率由上方 profile 决定。"
-                : "当前模型服务运行在本机 LAN（LM Studio），上述最小必要内容不会离开局域网。"}</p>
+              <p>{providerDataBoundaryNote(draft.providerId)}</p>
             </footer>
           </section>
         </section>
@@ -502,7 +507,7 @@ function isPublicProviderSettings(value: unknown): value is PublicModelProviderS
 }
 
 function isProviderId(value: unknown): value is ModelProviderId {
-  return value === "lmstudio" || value === "openrouter";
+  return MODEL_PROVIDER_CATALOG.some((provider) => provider.id === value);
 }
 
 function parseTestEnvelope(value: unknown): { model: string; latencyMs: number } | null {
@@ -518,14 +523,47 @@ function readError(value: unknown, fallback: string): string {
     : fallback;
 }
 
+function providerEntryOf(providerId: ModelProviderId) {
+  return MODEL_PROVIDER_CATALOG.find((provider) => provider.id === providerId)
+    ?? MODEL_PROVIDER_CATALOG[0];
+}
+
 function providerName(providerId: ModelProviderId): string {
-  return providerId === "openrouter" ? "OpenRouter · 云端路由" : "LM Studio · 本地 LAN";
+  const names: Record<ModelProviderId, string> = {
+    lmstudio: "LM Studio · 本地/局域网",
+    openrouter: "OpenRouter · 云端路由",
+    deepseek: "DeepSeek · 官方 API",
+    "kimi-coding": "Kimi Coding · 官方 API",
+    "custom-openai": "自定义 OpenAI 兼容端点",
+  };
+  return names[providerId] ?? providerEntryOf(providerId).name;
 }
 
 function providerDescription(providerId: ModelProviderId): string {
-  return providerId === "openrouter"
-    ? "OpenRouter 仅允许官方 HTTPS 端点；费率来自 Models API，免费状态按当前返回的 0 USD/token 标记。"
-    : "LM Studio 端点已钉定为 127.0.0.1:8823（LAN），本地服务可留空 API key。";
+  const descriptions: Record<ModelProviderId, string> = {
+    lmstudio:
+      "LM Studio 默认 loopback 1234；可改为你自己的本机/LAN 地址（仅限私有地址段），本地服务可留空 API key。",
+    openrouter:
+      "OpenRouter 仅允许官方 HTTPS 端点；费率来自 Models API，免费状态按当前返回的 0 USD/token 标记。",
+    deepseek:
+      "DeepSeek 仅允许官方 HTTPS 端点（api.deepseek.com）；需要 API key；thinking 按官方兼容字段映射。",
+    "kimi-coding":
+      "Kimi Coding 仅允许官方 HTTPS 端点（api.kimi.com/coding/v1）；需要 API key；不支持的 tool_choice=required 会自动降级为 auto。",
+    "custom-openai":
+      "自定义 OpenAI 兼容端点：http 仅限本机/私有地址，远端必须 https 且建议配置 API key；仅承诺标准 chat completions/models 契约（本机受保护模式，未做 DNS 级解析防护）。",
+  };
+  return descriptions[providerId] ?? providerEntryOf(providerId).description;
+}
+
+function providerDataBoundaryNote(providerId: ModelProviderId): string {
+  const entry = providerEntryOf(providerId);
+  if (entry.endpointPolicy === "local") {
+    return "当前模型服务运行在本机/局域网（LM Studio），上述最小必要内容不会离开你的本地网络。";
+  }
+  if (entry.endpointPolicy === "custom") {
+    return "当前端点为自定义 OpenAI 兼容服务：请确认你信任该端点——上述最小必要上下文会发送到该地址。";
+  }
+  return `当前回合会把最小必要上下文发送到 ${entry.name}；模型与费率由上方 profile 决定。`;
 }
 
 function modelName(model: DiscoveredModel): string {

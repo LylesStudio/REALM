@@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Tauri/Rust 构建产物（gen/target 均为生成物）。
+    "src-tauri/target/**",
+    "src-tauri/gen/**",
   ]),
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

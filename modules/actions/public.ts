@@ -8,61 +8,6 @@ import {
   type DiceSystem,
 } from "./rule-pack.ts";
 
-export const ACTOR_TOOL_SPECS = [
-  {
-    name: "act",
-    title: "采取行动",
-    authority: "actor",
-    mutation: "proposal",
-    enabled: true,
-  },
-  {
-    name: "use_skill",
-    title: "使用技能",
-    authority: "actor",
-    mutation: "rule_defined",
-    enabled: true,
-  },
-  {
-    name: "use_asset",
-    title: "使用资产",
-    authority: "actor",
-    mutation: "stateful",
-    enabled: true,
-  },
-  {
-    name: "take_stance",
-    title: "进入姿态",
-    authority: "actor",
-    mutation: "stateful",
-    enabled: true,
-  },
-] as const;
-
-export const ENGINE_TOOL_SPECS = [
-  {
-    name: "resolve_uncertainty",
-    title: "解决不确定性",
-    authority: "engine",
-    mutation: "pure",
-    enabled: true,
-  },
-  {
-    name: "consume_resource",
-    title: "消耗资源",
-    authority: "engine",
-    mutation: "stateful",
-    enabled: true,
-  },
-  {
-    name: "apply_effect",
-    title: "应用效果",
-    authority: "engine",
-    mutation: "stateful",
-    enabled: true,
-  },
-] as const;
-
 export type ActionActor = {
   characterInstanceId: string;
   participantId: string;

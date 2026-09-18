@@ -4,10 +4,10 @@
  *
  * 自包含隔离契约：
  * - realm_transfer / realm_runtime / realm_control 只在本集群 provision
- *   （绝不写共享 realm_dev 或任何长期实例）；
+ *   （绝不写共享 realm_test 或任何长期实例）；
  * - host-network + 动态 loopback 端口——真实 runner 的 inet_server_addr
  *   检查通过（不用 published-port）；
- * - realm_dev 在集群内新建、应用 0001–0043 全链、seed demo；
+ * - realm_test 在集群内新建、应用 0001–0044 全链、seed demo；
  * - 结束时销毁容器（含全部临时库），零残留。
  *
  * 用法：node scripts/test-postgres-runtime-with-scratch.mjs
@@ -49,6 +49,9 @@ const TEST_FILES = [
   "tests/postgres-world-admin.test.ts",
   "tests/postgres-canon-readback.test.ts",
   "tests/postgres-worldline-merge-route.test.ts",
+  "tests/postgres-branch-lineage.test.ts",
+  "tests/postgres-lobby.test.ts",
+  "tests/postgres-preview-authorization.test.ts",
   "tests/postgres-conflict-route.test.ts",
   "tests/postgres-memory-snapshot-route.test.ts",
   "tests/postgres-library-runtime-grants.test.ts",
@@ -72,10 +75,12 @@ const TEST_FILES = [
   "tests/postgres-propagation-lease.test.ts",
   "tests/postgres-world-export.test.ts",
   "tests/postgres-realm-transfer-migration.test.mjs",
+  "tests/local-bootstrap.test.mjs",
   "tests/postgres-world-import.test.ts",
   "tests/postgres-world-transfer-routes.test.ts",
   "tests/realm-transfer-cli.test.ts",
   "tests/postgres-article-qualification-migration.test.mjs",
+  "tests/article-qualification-design.test.mjs",
 ];
 
 function fail(message) {
@@ -127,14 +132,14 @@ async function runNode(scriptArgs, envExtra = {}) {
 
 let exitCode = 0;
 try {
-  // realm_dev：建库 → 全链迁移（0001–0043）→ seed demo。
+  // realm_test：建库 → 全链迁移（0001–0044）→ seed demo。
   const adminClient = new pg.Client({ connectionString: cluster.adminUrl });
   await adminClient.connect();
-  await adminClient.query("CREATE DATABASE realm_dev");
+  await adminClient.query("CREATE DATABASE realm_test");
   await adminClient.end();
 
-  const adminDbUrl = withDb(cluster.adminUrl, "realm_dev");
-  console.error("[scratch] applying migrations 0001–0043 to realm_dev …");
+  const adminDbUrl = withDb(cluster.adminUrl, "realm_test");
+  console.error("[scratch] applying migrations 0001–0044 to realm_test …");
   await runNode(["scripts/postgres-migrate.mjs"], { DATABASE_URL: adminDbUrl });
   console.error("[scratch] seeding demo world …");
   await runNode(
@@ -152,8 +157,8 @@ try {
     ],
     {
       DATABASE_URL: adminDbUrl,
-      REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, "realm_dev"),
-      REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, "realm_dev"),
+      REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, "realm_test"),
+      REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, "realm_test"),
     },
   );
 } catch (error) {

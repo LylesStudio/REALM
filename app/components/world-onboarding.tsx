@@ -5,10 +5,12 @@ export interface WorldOnboardingProps {
   uiLanguage: UiLanguage;
   /** 世界库快照：非空时列出「继续上次 / 进入已有世界」。 */
   library: LibrarySnapshot;
-  /** 主入口：司卷对谈（LLM 引导创世）。 */
+  /** 主入口：AI 助手对话（LLM 引导创世）。 */
   onOpenChat: () => void;
-  /** 次入口：司卷问答·逐步填写（旧八步，保留）。 */
+  /** 次入口：分步引导·逐项填写。 */
   onOpenGuided: () => void;
+  /** LAN 大厅入口（加入同一主机上别人开放的房间）。 */
+  onOpenLobby: () => void;
   /** 打开指定记录（已有世界入口）。 */
   onOpenRecord: (recordId: string) => void;
 }
@@ -29,11 +31,11 @@ function latestRecordOf(world: LibraryWorld): LibraryRecord | null {
 
 /**
  * 批次 S：世界入口引导屏。
- * 账号没有「最近打开」记忆时的首页：主入口司卷对谈、次入口逐步引导、
+ * 账号没有「最近打开」记忆时的首页：主入口 AI 助手对话、次入口分步引导、
  * 已有世界列表。本屏只是入口，不改动任何既有世界数据。
  */
 export function WorldOnboarding(props: WorldOnboardingProps) {
-  const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenRecord } = props;
+  const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenLobby, onOpenRecord } = props;
   const entries: WorldEntry[] = library.worlds
     .map((world) => ({ world, latestRecord: latestRecordOf(world) }))
     .filter((entry): entry is WorldEntry => entry.world.id.trim().length > 0);
@@ -72,6 +74,19 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
           <span className="guided-entry-copy">
             <strong>{uiText("ui.onboarding.guidedEntry", uiLanguage)}</strong>
             <small>{uiText("ui.onboarding.guidedHint", uiLanguage)}</small>
+          </span>
+        </button>
+        <button
+          className="guided-entry onboarding-entry"
+          onClick={onOpenLobby}
+          type="button"
+        >
+          <span className="guided-entry-seal" aria-hidden="true">
+            厅
+          </span>
+          <span className="guided-entry-copy">
+            <strong>{uiText("ui.onboarding.lobbyEntry", uiLanguage)}</strong>
+            <small>{uiText("ui.onboarding.lobbyHint", uiLanguage)}</small>
           </span>
         </button>
       </div>

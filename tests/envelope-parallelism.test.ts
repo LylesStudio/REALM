@@ -212,6 +212,9 @@ function createService(options: {
     async loadForPlayer() {
       return stubProjection();
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer() {
       const delivery = {
         record: stubProjection(),

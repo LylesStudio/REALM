@@ -15,6 +15,7 @@ import {
 export const runtime = "nodejs";
 
 const MAX_MESSAGE_LENGTH = 500;
+const SAFE_SILENT_MESSAGE = "AI 助手暂时不可用，请稍后重试或改用分步引导。";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -71,7 +72,7 @@ export async function POST(request: Request) {
       });
       if (!outcome) {
         return Response.json(
-          { ok: false as const, error: { code: "SCRIBE_SILENT", message: "" } },
+          { ok: false as const, error: { code: "SCRIBE_SILENT", message: SAFE_SILENT_MESSAGE } },
           { status: 200, headers: { "Cache-Control": "no-store" } },
         );
       }
@@ -81,19 +82,16 @@ export async function POST(request: Request) {
       );
     } catch (error) {
       // 网关加载失败（未配置/密钥缺失）同样 fail-closed。
-      console.warn(
-        `[realm] genesis chat unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      void error;
+      console.warn("[realm] genesis chat unavailable");
       return Response.json(
-        { ok: false as const, error: { code: "SCRIBE_SILENT", message: "" } },
+        { ok: false as const, error: { code: "SCRIBE_SILENT", message: SAFE_SILENT_MESSAGE } },
         { status: 200, headers: { "Cache-Control": "no-store" } },
       );
     }
   } catch {
     return Response.json(
-      { ok: false as const, error: { code: "SCRIBE_SILENT", message: "" } },
+      { ok: false as const, error: { code: "SCRIBE_SILENT", message: SAFE_SILENT_MESSAGE } },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
   }

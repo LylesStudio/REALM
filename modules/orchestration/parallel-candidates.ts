@@ -3,7 +3,7 @@
  *
  * @runtime-status contract-only-deferred — 批次 T10-B5：全库零生产调用方；
  * 当前单模型配置无真实并发候选业务场景，接线前置条件见
- * docs/development/T10-B5-M4-RUNTIME-STATUS.md §二。函数行为不变。
+ * The feature remains contract-only until its runtime prerequisites are available.
  *
  * Producers run in parallel (same configured provider, concurrent requests,
  * or fake providers in tests). The first candidate — in completion order —

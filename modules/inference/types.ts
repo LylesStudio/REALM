@@ -1,15 +1,23 @@
+/**
+ * 模型供应商目录。端点策略（endpointPolicy）：
+ * - pinned：官方端点钉定 host/path/协议/端口（OpenRouter/DeepSeek/Kimi），
+ *   用户不可改向任意代理。
+ * - local：本机/局域网语义（LM Studio）——允许 loopback 与 RFC1918/ULA/
+ *   link-local 私有地址与 localhost 主机名，路径钉定；拒绝公网地址。
+ * - custom：自定义 OpenAI-compatible 端点——http 仅允许本机/私有地址，
+ *   远端必须 https；一律拒绝内嵌凭证/query/fragment。
+ * 任何条目不得包含真实内网地址；默认端点一律 loopback 或官方 HTTPS。
+ */
 export const MODEL_PROVIDER_CATALOG = [
   {
     id: "lmstudio",
     name: "LM Studio",
-    description: "本地 LAN OpenAI-compatible 推理服务。",
+    description: "本机或局域网 OpenAI-compatible 推理服务（默认 loopback 1234，可改向自己的 LAN 地址）。",
+    baseUrl: "http://127.0.0.1:1234/v1",
+    endpointPolicy: "local",
     /** OpenAI-compatible 端点必须含 /v1。 */
-    baseUrl: "http://127.0.0.1:8823/v1",
-    officialHost: "127.0.0.1",
     path: "/v1",
-    /** LAN 本地服务：允许 http；端口钉定 8823，拒绝任意外部/未授权端点。 */
     protocols: ["http:", "https:"],
-    port: "8823",
     requiresApiKey: false,
     defaultModel: "unsloth/gemma-4-12b-it-qat",
   },
@@ -18,6 +26,7 @@ export const MODEL_PROVIDER_CATALOG = [
     name: "OpenRouter",
     description: "统一模型路由；模型目录附当前输入/输出费率。",
     baseUrl: "https://openrouter.ai/api/v1",
+    endpointPolicy: "pinned",
     officialHost: "openrouter.ai",
     path: "/api/v1",
     /** OpenRouter 只允许官方 HTTPS API，禁止把它改成任意代理地址。 */
@@ -27,9 +36,47 @@ export const MODEL_PROVIDER_CATALOG = [
     requiresApiKey: true,
     defaultModel: "openrouter/auto",
   },
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    description: "DeepSeek 官方 OpenAI-compatible API（/chat/completions）。",
+    baseUrl: "https://api.deepseek.com",
+    endpointPolicy: "pinned",
+    officialHost: "api.deepseek.com",
+    path: "/",
+    protocols: ["https:"],
+    port: "",
+    requiresApiKey: true,
+    defaultModel: "deepseek-v4-flash",
+  },
+  {
+    id: "kimi-coding",
+    name: "Kimi Coding",
+    description: "Kimi Coding 官方 OpenAI-compatible API（/coding/v1/chat/completions）。",
+    baseUrl: "https://api.kimi.com/coding/v1",
+    endpointPolicy: "pinned",
+    officialHost: "api.kimi.com",
+    path: "/coding/v1",
+    protocols: ["https:"],
+    port: "",
+    requiresApiKey: true,
+    defaultModel: "kimi-for-coding",
+  },
+  {
+    id: "custom-openai",
+    name: "Custom OpenAI-compatible",
+    description: "自定义 OpenAI-compatible 端点（本机或自托管远端；仅承诺标准 chat completions/models 契约）。",
+    baseUrl: "http://127.0.0.1:8000/v1",
+    endpointPolicy: "custom",
+    protocols: ["http:", "https:"],
+    requiresApiKey: false,
+    defaultModel: "default",
+  },
 ] as const;
 
 export type ModelProviderId = (typeof MODEL_PROVIDER_CATALOG)[number]["id"];
+export type ModelEndpointPolicy =
+  (typeof MODEL_PROVIDER_CATALOG)[number]["endpointPolicy"];
 export type ModelThinkingMode = "enabled" | "disabled";
 export type ModelCostClass = "free" | "paid" | "unknown";
 

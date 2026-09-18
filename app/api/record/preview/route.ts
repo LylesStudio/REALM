@@ -47,38 +47,49 @@ export async function handlePreviewGet(
     return previewRouteError(error);
   }
 
+  // cleanup 在 start 内赋值；cancel 经此引用调用（与 lobby/graph SSE 同构）。
+  let closeFn: () => void = () => {};
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
+      // 单一幂等清理：heartbeat 失败、subscriber 推送失败、request abort、
+      // stream cancel 都汇入同一路径（interval + unsubscribe + close 各一次，
+      // 不重复 close/unsubscribe）。此前 heartbeat 失败只 clearInterval——
+      // subscriber 残留泄漏进 previewHub。
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        clearInterval(heartbeat);
+        unsubscribe();
+        try {
+          controller.close();
+        } catch {
+          // 已关闭。
+        }
+      };
       const unsubscribe = service.subscribePreviews(recordId, (event) => {
+        if (cleaned) return;
         try {
           const name = event.kind === "chunk" ? "preview" : "preview-end";
           controller.enqueue(
             encoder.encode(`event: ${name}\ndata: ${JSON.stringify(event)}\n\n`),
           );
         } catch {
-          // 连接已关闭；清理由 cancel 路径完成。
+          cleanup();
         }
       });
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": ping\n\n"));
         } catch {
-          clearInterval(heartbeat);
+          cleanup();
         }
       }, 15_000);
-      request.signal.addEventListener(
-        "abort",
-        () => {
-          clearInterval(heartbeat);
-          unsubscribe();
-          try {
-            controller.close();
-          } catch {
-            // 已关闭。
-          }
-        },
-        { once: true },
-      );
+      closeFn = cleanup;
+      request.signal.addEventListener("abort", cleanup, { once: true });
+    },
+    cancel() {
+      closeFn();
     },
   });
 

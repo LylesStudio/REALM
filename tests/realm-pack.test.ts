@@ -373,7 +373,7 @@ function samplePack(createdAt: string) {
     exporter: {
       app: "realm",
       appVersion: "0.1.0",
-      schemaLatest: "0043_propagation_node_audience_archived_guard.sql",
+      schemaLatest: "0044_record_branch_timeline_kind.sql",
     },
     source: { worldId: "world_demo", worldName: "灯塔模板" },
     scope: {
@@ -388,6 +388,7 @@ function samplePack(createdAt: string) {
       "0041_article_qualification_and_import_entries.sql",
       "0042_realm_transfer_and_import_jobs.sql",
       "0043_propagation_node_audience_archived_guard.sql",
+      "0044_record_branch_timeline_kind.sql",
     ],
     tables: tables.map((t) => ({ name: t.name, rows: t.rows, sha256: sha256Hex(t.bytes) })),
     files: [{
@@ -560,7 +561,7 @@ test("G.3 malicious matrix: size spoof / ratio / CRC / hash / overlap / name rul
       exporter: {
         app: "realm",
         appVersion: "0.1.0",
-        schemaLatest: "0043_propagation_node_audience_archived_guard.sql",
+        schemaLatest: "0044_record_branch_timeline_kind.sql",
       },
       source: { worldId: "world_demo", worldName: "灯塔模板" },
       scope: {
@@ -571,6 +572,7 @@ test("G.3 malicious matrix: size spoof / ratio / CRC / hash / overlap / name rul
         "0041_article_qualification_and_import_entries.sql",
         "0042_realm_transfer_and_import_jobs.sql",
         "0043_propagation_node_audience_archived_guard.sql",
+        "0044_record_branch_timeline_kind.sql",
       ],
       tables: tables.map((t) => ({ name: t.name, rows: t.rows, sha256: sha256Hex(t.bytes) })),
       files: [],
@@ -852,7 +854,7 @@ test("dual codec round-trip: camel→snake keys and all value kinds", () => {
 // D.7 export-matrix 围栏
 // ---------------------------------------------------------------------------
 
-test("export-matrix fences: 61-table diff / text[] list / scope sets", async () => {
+test("export-matrix fences: 63-table diff / text[] list / scope sets", async () => {
   const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
   const tablePattern = /CREATE TABLE IF NOT EXISTS ([a-z_]+)/g;
   const actual = new Set<string>();
@@ -864,9 +866,9 @@ test("export-matrix fences: 61-table diff / text[] list / scope sets", async () 
   }
   // 0042 已入库：5 个规划表成为实有表（56+5=61，planned 集合为空）。
   const planned: string[] = [];
-  assert.equal(actual.size, 61, `实有表应为 61（56+0042 五表），实际 ${actual.size}`);
+  assert.equal(actual.size, 63, `实有表应为 63（56+0042 五表+0045 大厅两表；0046 不加表），实际 ${actual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 61, `矩阵应为 61 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 63, `矩阵应为 63 行，实际 ${matrixTables.size}`);
   for (const table of [...actual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }

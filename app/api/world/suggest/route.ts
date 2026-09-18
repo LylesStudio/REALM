@@ -10,17 +10,32 @@ import {
   resolveRequestPrincipal,
   unauthorizedResponse,
 } from "../../auth-context.ts";
+import type { ModelGateway } from "../../../../modules/inference/public.ts";
 
 export const runtime = "nodejs";
 
 const MAX_INTENT_LENGTH = 200;
 
 /**
- * 司卷问答 · AI 代笔：POST { step, intent?, context? }
- * 返回 { ok, suggestions }；任何模型/格式失败一律 ok:false（fail-closed，
- * 前端静默退回手动输入，不弹报错）。
+ * AI 建议不可用时的安全提示（绝不含 key/Authorization/完整 URL/
+ * 连接串/prompt/玩家内容/provider 原始错误）。
+ */
+const SAFE_UNAVAILABLE_MESSAGE = "AI 建议暂时不可用，请检查模型设置或稍后重试。";
+
+/**
+ * AI 引导创建 · AI 代写：POST { step, intent?, context? }
+ * 返回 { ok, suggestions }；模型未配置/缺 key/请求失败/结构化解析失败
+ * 一律 ok:false + 固定安全提示（fail-closed，手动填写不受影响）。
  */
 export async function POST(request: Request) {
+  return handleSuggestPost(request);
+}
+
+/** 可注入 gateway 的处理器（生产走 settings service；测试注入 fake）。 */
+export async function handleSuggestPost(
+  request: Request,
+  options: { gateway?: ModelGateway } = {},
+): Promise<Response> {
   try {
     const principalId = resolveRequestPrincipal(
       request,
@@ -44,7 +59,7 @@ export async function POST(request: Request) {
     const context = isObject(parsed.context) ? parsed.context : {};
 
     try {
-      const gateway = await getModelSettingsService().gateway();
+      const gateway = options.gateway ?? await getModelSettingsService().gateway();
       const suggestions = await generateGenesisSuggestions(gateway, {
         step: parsed.step,
         intent,
@@ -52,7 +67,10 @@ export async function POST(request: Request) {
       });
       if (!suggestions) {
         return Response.json(
-          { ok: false as const, error: { code: "NO_SUGGESTION", message: "" } },
+          {
+            ok: false as const,
+            error: { code: "NO_SUGGESTION", message: SAFE_UNAVAILABLE_MESSAGE },
+          },
           { status: 200, headers: { "Cache-Control": "no-store" } },
         );
       }
@@ -61,20 +79,24 @@ export async function POST(request: Request) {
         { headers: { "Cache-Control": "no-store" } },
       );
     } catch (error) {
-      // 网关加载失败（未配置/密钥缺失）同样 fail-closed。
-      console.warn(
-        `[realm] genesis suggestion unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      // 网关加载失败（未配置/密钥缺失）/ provider 错误同样 fail-closed。
+      // 只记录固定事件，避免把原始 provider 错误写入日志。
+      void error;
+      console.warn("[realm] genesis suggestion unavailable");
       return Response.json(
-        { ok: false as const, error: { code: "NO_SUGGESTION", message: "" } },
+        {
+          ok: false as const,
+          error: { code: "NO_SUGGESTION", message: SAFE_UNAVAILABLE_MESSAGE },
+        },
         { status: 200, headers: { "Cache-Control": "no-store" } },
       );
     }
   } catch {
     return Response.json(
-      { ok: false as const, error: { code: "NO_SUGGESTION", message: "" } },
+      {
+        ok: false as const,
+        error: { code: "NO_SUGGESTION", message: SAFE_UNAVAILABLE_MESSAGE },
+      },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
   }

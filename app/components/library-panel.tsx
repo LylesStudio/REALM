@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import type { WorldGenesisDraft } from "../../modules/application/world-genesis.ts";
 import {
   WORLD_STYLE_KEYS,
   normalizeWorldStyle,
@@ -22,11 +21,6 @@ import type {
   LibraryWorld,
 } from "./library-types";
 
-interface GenesisDraftResult {
-  draft: WorldGenesisDraft;
-  source: "model" | "fallback";
-}
-
 interface LibraryPanelProps {
   snapshot: LibrarySnapshot;
   /** 界面语言（缺省 zh-CN）。 */
@@ -34,14 +28,15 @@ interface LibraryPanelProps {
   /** 导入完成后刷新世界库数据。 */
   onRefresh: () => Promise<void>;
   onCreate: (command: LibraryCreateCommand) => Promise<boolean>;
-  onGenesisDraft: (prompt: string) => Promise<GenesisDraftResult | null>;
-  /** 确认手稿，返回新记录 id；失败返回 null。 */
-  onGenesisConfirm: (draft: WorldGenesisDraft) => Promise<string | null>;
-  /** 进入司卷问答全屏引导。 */
+  /** 主入口：AI 助手对话创建（与首次 onboarding 同一 GuidedGenesisChat 流程）。 */
+  onOpenChat: () => void;
+  /** 次入口：分步引导创建（GuidedGenesis；AI 失败时的 fallback）。 */
   onOpenGuided: () => void;
   onOpenRecord: (recordId: string) => void;
   /** 批次 T9：打开图谱需带世界 id（canon/图谱 API 显式 worldId）。 */
   onOpenGraph?: (worldId: string, worldName: string) => void;
+  /** 打开 world 级分支树（只读谱系视图）。 */
+  onOpenBranchTree?: (worldId: string, worldName: string) => void;
   /** 批次 S：当前打开记录所属世界 id（自动携带 attachRecordId 与姿态切换后重载依据）。 */
   currentWorldId?: string;
   /** 批次 S：当前打开记录 id（添角色入阵容目标）。 */
@@ -59,18 +54,18 @@ interface LibraryPanelProps {
   onClose: () => void;
 }
 
-type CreateMode = "world" | "story" | "record" | "character" | "branch";
+type CreateMode = "world" | "story" | "record" | "character";
 
 export function LibraryPanel({
   snapshot,
   uiLanguage = "zh-CN",
   onRefresh,
   onCreate,
-  onGenesisDraft,
-  onGenesisConfirm,
+  onOpenChat,
   onOpenGuided,
   onOpenRecord,
   onOpenGraph,
+  onOpenBranchTree,
   currentWorldId = "",
   currentRecordId = "",
   castDefinitionIds = [],
@@ -80,56 +75,27 @@ export function LibraryPanel({
   onWorldDeleted,
   onClose,
 }: LibraryPanelProps) {
-  const [genesisPrompt, setGenesisPrompt] = useState("");
-  const [manuscript, setManuscript] = useState<WorldGenesisDraft | null>(null);
-  const [manuscriptSource, setManuscriptSource] = useState<"model" | "fallback">("model");
-  const [genesisBusy, setGenesisBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
 
-  async function submitGenesis(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (genesisBusy) return;
-    setGenesisBusy(true);
-    try {
-      const result = await onGenesisDraft(genesisPrompt);
-      if (result) {
-        setManuscript(result.draft);
-        setManuscriptSource(result.source);
-      }
-    } finally {
-      setGenesisBusy(false);
-    }
-  }
-
-  async function confirmGenesis() {
-    if (!manuscript || genesisBusy) return;
-    setGenesisBusy(true);
-    try {
-      const recordId = await onGenesisConfirm(manuscript);
-      if (recordId) {
-        setManuscript(null);
-        setGenesisPrompt("");
-        onOpenRecord(recordId);
-      }
-    } finally {
-      setGenesisBusy(false);
-    }
-  }
-
-  function updateManuscript(
-    updater: (current: WorldGenesisDraft) => WorldGenesisDraft,
-  ) {
-    setManuscript((current) => (current ? updater(current) : current));
-  }
-
   return (
-    <section className="library-panel" aria-label="世界库">
+    <section className="library-panel" aria-label={uiText("ui.header.library", uiLanguage)}>
       <header className="library-panel-heading">
         <div>
           <p className="eyebrow">{uiText("ui.library.eyebrow", uiLanguage)}</p>
           <h2>{uiText("ui.library.heading", uiLanguage)}</h2>
         </div>
-        <button aria-label={uiText("ui.library.close", uiLanguage)} onClick={onClose} type="button">×</button>
+        <div className="library-heading-actions">
+          {currentRecordId.trim() ? (
+            <button
+              className="record-action-button library-return-record"
+              onClick={() => onOpenRecord(currentRecordId)}
+              type="button"
+            >
+              {uiText("ui.library.returnToRecord", uiLanguage)}
+            </button>
+          ) : null}
+          <button aria-label={uiText("ui.library.close", uiLanguage)} onClick={onClose} type="button">×</button>
+        </div>
       </header>
 
       <div className="library-layout">
@@ -156,6 +122,15 @@ export function LibraryPanel({
                     type="button"
                   >
                     {uiText("ui.library.graph", uiLanguage)}
+                  </button>
+                ) : null}
+                {onOpenBranchTree ? (
+                  <button
+                    className="library-graph-link"
+                    onClick={() => onOpenBranchTree(world.id, world.name)}
+                    type="button"
+                  >
+                    {uiText("ui.branchTree.title", uiLanguage)}
                   </button>
                 ) : null}
               </div>
@@ -330,6 +305,7 @@ export function LibraryPanel({
                           {record.status}
                           {record.timelineKind === "retrospection" ? " · Retrospection" : ""}
                           {record.timelineKind === "merged" ? " · Merged" : ""}
+                          {record.timelineKind === "branch" ? " · Branch" : ""}
                         </small>
                       </button>
                       {world.membershipRole === "owner" ? (
@@ -352,305 +328,33 @@ export function LibraryPanel({
         </aside>
 
         <div className="library-create">
+          {/* 创建世界：与首次 onboarding 同一套入口——AI 助手对话（主）+
+              分步引导（次，兼 AI 失败 fallback）。旧的单轮「灵感→草稿→
+              手稿」路径已收口移除。 */}
+          <button
+            className="guided-entry is-primary"
+            onClick={onOpenChat}
+            type="button"
+          >
+            <span className="guided-entry-seal" aria-hidden="true">谈</span>
+            <span className="guided-entry-copy">
+              <strong>{uiText("ui.library.chatEntry", uiLanguage)}</strong>
+              <small>{uiText("ui.library.chatHint", uiLanguage)}</small>
+            </span>
+            <span aria-hidden="true">▸</span>
+          </button>
           <button
             className="guided-entry"
             onClick={onOpenGuided}
             type="button"
           >
-            <span className="guided-entry-seal" aria-hidden="true">卷</span>
+            <span className="guided-entry-seal" aria-hidden="true">问</span>
             <span className="guided-entry-copy">
               <strong>{uiText("ui.library.guidedEntry", uiLanguage)}</strong>
               <small>{uiText("ui.library.guidedHint", uiLanguage)}</small>
             </span>
             <span aria-hidden="true">▸</span>
           </button>
-
-          <section className="genesis-section" aria-label="启笔铸界">
-            <div className="genesis-heading">
-              <p className="eyebrow">{uiText("ui.library.genesisEyebrow", uiLanguage)}</p>
-              <p className="genesis-hint">
-                {uiText("ui.library.genesisHint", uiLanguage)}
-              </p>
-            </div>
-            <form className="genesis-form" onSubmit={submitGenesis}>
-              <textarea
-                aria-label="创世灵感"
-                className="genesis-prompt"
-                disabled={genesisBusy}
-                onChange={(event) => setGenesisPrompt(event.target.value)}
-                placeholder={uiText("ui.library.genesisPlaceholder", uiLanguage)}
-                rows={6}
-                value={genesisPrompt}
-              />
-              <button
-                className="genesis-submit"
-                disabled={genesisBusy || genesisPrompt.trim().length < 4}
-                type="submit"
-              >
-                {genesisBusy && !manuscript
-                ? uiText("ui.library.genesisDrafting", uiLanguage)
-                : uiText("ui.library.genesisDraft", uiLanguage)}
-              </button>
-            </form>
-
-            {manuscript ? (
-              <div className="genesis-manuscript" aria-label="纸墨手稿">
-                <div className="genesis-manuscript-heading">
-                  <p className="eyebrow">{uiText("ui.library.manuscript", uiLanguage)}</p>
-                  <span className="genesis-source">
-                    {manuscriptSource === "model"
-                    ? uiText("ui.library.sourceModel", uiLanguage)
-                    : uiText("ui.library.sourceFallback", uiLanguage)}
-                  </span>
-                </div>
-
-                <div className="genesis-fields">
-                  <label>
-                    世界名
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          world: { ...current.world, name: event.target.value },
-                        }))}
-                      value={manuscript.world.name}
-                    />
-                  </label>
-                  <label>
-                    纪元
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          world: { ...current.world, era: event.target.value },
-                        }))}
-                      value={manuscript.world.era}
-                    />
-                  </label>
-                  <label>
-                    背景摘要
-                    <textarea
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          world: { ...current.world, summary: event.target.value },
-                        }))}
-                      rows={3}
-                      value={manuscript.world.summary}
-                    />
-                  </label>
-                  <label>
-                    开幕故事
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          story: { ...current.story, title: event.target.value },
-                        }))}
-                      value={manuscript.story.title}
-                    />
-                  </label>
-                  <label>
-                    故事前提
-                    <textarea
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          story: { ...current.story, premise: event.target.value },
-                        }))}
-                      rows={2}
-                      value={manuscript.story.premise}
-                    />
-                  </label>
-                  <label>
-                    开篇记录
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          record: { title: event.target.value },
-                        }))}
-                      value={manuscript.record.title}
-                    />
-                  </label>
-                  <label>
-                    我的角色定位
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          playerRole: event.target.value,
-                        }))}
-                      value={manuscript.playerRole}
-                    />
-                  </label>
-                </div>
-
-                <div className="genesis-stance" role="group" aria-label={uiText("ui.stance.label", uiLanguage)}>
-                  <span>{uiText("ui.stance.label", uiLanguage)}</span>
-                  <div className="stance-options">
-                    <button
-                      className={manuscript.playerStance !== "observer"
-                        ? "stance-option is-active"
-                        : "stance-option"}
-                      onClick={() =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          playerStance: "player",
-                        }))}
-                      type="button"
-                    >
-                      <strong>{uiText("ui.stance.player", uiLanguage)}</strong>
-                      <small>{uiText("ui.stance.playerHint", uiLanguage)}</small>
-                    </button>
-                    <button
-                      className={manuscript.playerStance === "observer"
-                        ? "stance-option is-active"
-                        : "stance-option"}
-                      onClick={() =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          playerStance: "observer",
-                        }))}
-                      type="button"
-                    >
-                      <strong>{uiText("ui.stance.observer", uiLanguage)}</strong>
-                      <small>{uiText("ui.stance.observerHint", uiLanguage)}</small>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="genesis-companions">
-                  <p className="eyebrow">同行者 / Companions</p>
-                  {manuscript.companions.map((companion, index) => (
-                    <div className="genesis-companion" key={index}>
-                      <input
-                        aria-label={`同伴 ${index + 1} 名称`}
-                        onChange={(event) =>
-                          updateManuscript((current) => ({
-                            ...current,
-                            companions: current.companions.map((item, at) =>
-                              at === index
-                                ? { ...item, name: event.target.value }
-                                : item),
-                          }))}
-                        value={companion.name}
-                      />
-                      <input
-                        aria-label={`同伴 ${index + 1} 身份`}
-                        onChange={(event) =>
-                          updateManuscript((current) => ({
-                            ...current,
-                            companions: current.companions.map((item, at) =>
-                              at === index
-                                ? { ...item, role: event.target.value }
-                                : item),
-                          }))}
-                        value={companion.role}
-                      />
-                      <button
-                        aria-label={`移除同伴 ${companion.name}`}
-                        onClick={() =>
-                          updateManuscript((current) => ({
-                            ...current,
-                            companions: current.companions.filter(
-                              (_, at) => at !== index,
-                            ),
-                          }))}
-                        type="button"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                  {manuscript.companions.length < 2 ? (
-                    <button
-                      className="genesis-companion-add"
-                      onClick={() =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          companions: [
-                            ...current.companions,
-                            { name: "", role: "", summary: "" },
-                          ],
-                        }))}
-                      type="button"
-                    >
-                      添一名同行者
-                    </button>
-                  ) : null}
-                </div>
-
-                <div className="genesis-fields genesis-scene">
-                  <label>
-                    开场地点
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          scene: { ...current.scene, location: event.target.value },
-                        }))}
-                      value={manuscript.scene.location}
-                    />
-                  </label>
-                  <label>
-                    天气
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          scene: { ...current.scene, weather: event.target.value },
-                        }))}
-                      value={manuscript.scene.weather}
-                    />
-                  </label>
-                  <label>
-                    局势
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          scene: { ...current.scene, tension: event.target.value },
-                        }))}
-                      value={manuscript.scene.tension}
-                    />
-                  </label>
-                  <label>
-                    当前目标
-                    <input
-                      onChange={(event) =>
-                        updateManuscript((current) => ({
-                          ...current,
-                          scene: { ...current.scene, objective: event.target.value },
-                        }))}
-                      value={manuscript.scene.objective}
-                    />
-                  </label>
-                </div>
-
-                <div className="genesis-actions">
-                  <button
-                    className="genesis-confirm"
-                    disabled={genesisBusy || !manuscript.world.name.trim()}
-                    onClick={() => void confirmGenesis()}
-                    type="button"
-                  >
-                    {genesisBusy
-                    ? uiText("ui.library.confirming", uiLanguage)
-                    : uiText("ui.library.confirm", uiLanguage)}
-                  </button>
-                  <button
-                    className="genesis-redraft"
-                    disabled={genesisBusy}
-                    onClick={() => setManuscript(null)}
-                    type="button"
-                  >
-                    {uiText("ui.library.redraft", uiLanguage)}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </section>
 
           <section className="library-manual">
             <button
@@ -993,7 +697,6 @@ function ManualCreateForm({
   const [era, setEra] = useState("");
   const [summary, setSummary] = useState("");
   const [role, setRole] = useState("");
-  const [label, setLabel] = useState("");
   const [retrospection, setRetrospection] = useState(false);
   const [worldId, setWorldId] = useState(snapshot.worlds[0]?.id ?? "");
   const [storyId, setStoryId] = useState(
@@ -1011,15 +714,15 @@ function ManualCreateForm({
     event.preventDefault();
     setBusy(true);
     try {
+      // 分支创建已从手动表单移除：可玩分支统一走 Record 页/分支树的
+      // /api/record/branch 入口（空 worldline 幽灵路径已废弃）。
       const command: LibraryCreateCommand = mode === "world"
         ? { kind: "world", name, era, summary }
         : mode === "story"
           ? { kind: "story", worldId, title, premise }
           : mode === "record"
               ? { kind: "record", storyId, title, retrospection }
-            : mode === "character"
-              ? { kind: "character", worldId, name, role, summary }
-              : { kind: "branch", worldId, label };
+              : { kind: "character", worldId, name, role, summary };
       const created = await onCreate(command);
       if (created) {
         setName("");
@@ -1028,7 +731,6 @@ function ManualCreateForm({
         setTitle("");
         setPremise("");
         setRole("");
-        setLabel("");
         setRetrospection(false);
       }
     } finally {
@@ -1043,12 +745,11 @@ function ManualCreateForm({
         <button className={mode === "story" ? "is-active" : ""} onClick={() => setMode("story")} type="button">故事</button>
         <button className={mode === "record" ? "is-active" : ""} onClick={() => setMode("record")} type="button">记录</button>
         <button className={mode === "character" ? "is-active" : ""} onClick={() => setMode("character")} type="button">角色</button>
-        <button className={mode === "branch" ? "is-active" : ""} onClick={() => setMode("branch")} type="button">分支</button>
       </div>
 
       {mode === "world" ? (
         <div className="library-fields">
-          <label>世界名<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <label>世界名称<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
           <label>时代<input value={era} onChange={(event) => setEra(event.target.value)} /></label>
           <label>摘要<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
         </div>
@@ -1083,13 +784,6 @@ function ManualCreateForm({
           <label>角色名<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
           <label>身份<textarea rows={2} value={role} onChange={(event) => setRole(event.target.value)} /></label>
           <label>摘要<textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
-        </div>
-      ) : null}
-
-      {mode === "branch" ? (
-        <div className="library-fields">
-          <label>所属世界<select value={worldId} onChange={(event) => setWorldId(event.target.value)} required>{snapshot.worlds.map((world) => <option key={world.id} value={world.id}>{world.name}</option>)}</select></label>
-          <label>分支名称<input value={label} onChange={(event) => setLabel(event.target.value)} required /></label>
         </div>
       ) : null}
 

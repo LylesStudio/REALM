@@ -146,9 +146,9 @@ export async function importTavernBundle(
 
     async function insertBookEntries(entries: readonly TavernWorldBookEntry[]) {
       if (entries.length === 0) return;
-      // 0041 未应用的库（如共享 realm_dev 在本阶段）：回落旧行为——
-      // 只写 world_articles；文章无资格行即 pending_review，永远不进
-      // prompt（fail-closed），导入功能本身不回退。
+      // If the optional qualification schema is unavailable, keep lore empty
+      // rather than failing the main read path. Imported articles remain
+      // pending until the qualification path is available.
       const support = await client.query<{
         qualifications: unknown;
         entries: unknown;

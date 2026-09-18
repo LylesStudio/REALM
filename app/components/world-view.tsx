@@ -18,6 +18,7 @@ export function WorldView({
   onOpenStory,
   onManage,
   onOpenGraph,
+  onOpenBranchTree,
 }: {
   world: LibraryWorld | null;
   /** 当前 envelope 携带的世界摘要（动态知识门禁后的值）。 */
@@ -30,6 +31,7 @@ export function WorldView({
   /** 打开世界库 overlay（创世/导入/归档等临时操作留在 overlay）。 */
   onManage: () => void;
   onOpenGraph: (worldId: string, worldName: string) => void;
+  onOpenBranchTree: (worldId: string, worldName: string) => void;
 }) {
   if (!world) {
     return (
@@ -57,12 +59,28 @@ export function WorldView({
           </p>
         </div>
         <div className="record-heading-actions">
+          {currentRecordId.trim() ? (
+            <button
+              className="record-action-button is-primary"
+              onClick={() => onOpenRecord(currentRecordId)}
+              type="button"
+            >
+              {uiText("ui.worldView.openRecord", uiLanguage)}
+            </button>
+          ) : null}
           <button
             className="record-action-button"
             onClick={() => onOpenGraph(world.id, world.name)}
             type="button"
           >
             {uiText("ui.library.graph", uiLanguage)}
+          </button>
+          <button
+            className="record-action-button"
+            onClick={() => onOpenBranchTree(world.id, world.name)}
+            type="button"
+          >
+            {uiText("ui.branchTree.title", uiLanguage)}
           </button>
           <button
             className="record-action-button"

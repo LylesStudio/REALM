@@ -14,15 +14,16 @@ import {
   type PublicModelSettingsSnapshot,
 } from "./types.ts";
 
+// 重定位（desktop launcher）：REALM_DATA_HOME 设置时 settings 落到数据目录；
+// 未设置时保持开发者既有 .local/settings 行为。
+const settingsRoot = process.env.REALM_DATA_HOME?.trim() || resolve(process.cwd(), ".local");
 const DEFAULT_SETTINGS_PATH = resolve(
-  process.cwd(),
-  ".local",
+  settingsRoot,
   "settings",
   "model-providers.json",
 );
 const LEGACY_SETTINGS_PATH = resolve(
-  process.cwd(),
-  ".local",
+  settingsRoot,
   "settings",
   "model-provider.json",
 );
@@ -218,23 +219,7 @@ export function validateModelSettings(raw: unknown): ModelProviderSettings {
   } catch {
     throw invalidSettings("baseUrl must be a valid URL.");
   }
-  // SSRF 防护：端点钉定供应商登记的 host/端口/协议/路径，拒绝任意外部地址、
-  // 错误 API 前缀、内嵌凭证、query 与 fragment。
-  if (
-    !provider.protocols.some((protocol) => protocol === endpoint.protocol)
-    || endpoint.hostname !== provider.officialHost
-    || !isAllowedPort(provider.port, endpoint.port)
-    || endpoint.pathname !== provider.path
-    || endpoint.username
-    || endpoint.password
-    || endpoint.search
-    || endpoint.hash
-  ) {
-    throw new ModelConfigurationError(
-      "MODEL_ENDPOINT_NOT_ALLOWED",
-      `The ${provider.name} endpoint is not an allowed registered address.`,
-    );
-  }
+  validateEndpoint(provider, endpoint);
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey.trim() : "";
   const selectedModel = requireText(raw.selectedModel, "selectedModel", 256);
   // OpenAI 风格 id 允许 publisher/model 与 :free/:thinking 变体。
@@ -362,19 +347,31 @@ function defaultProfile(
   clock: () => Date,
 ): ModelProviderSettings {
   const provider = providerById(providerId);
-  const isOpenRouter = providerId === "openrouter";
+  // 每供应商环境变量覆盖（lmstudio/openrouter 沿用既有变量名以兼容旧部署）；
+  // 值只来自环境与 catalog 默认，绝不内置真实地址/key。
+  const envBaseUrl = providerId === "openrouter"
+    ? environment.REALM_OPENROUTER_BASE_URL
+    : providerId === "lmstudio"
+      ? environment.REALM_MODEL_BASE_URL
+      : undefined;
+  const envApiKey = providerId === "openrouter"
+    ? environment.OPENROUTER_API_KEY || environment.REALM_OPENROUTER_API_KEY
+    : providerId === "deepseek"
+      ? environment.DEEPSEEK_API_KEY || environment.REALM_DEEPSEEK_API_KEY
+      : providerId === "kimi-coding"
+        ? environment.KIMI_API_KEY || environment.REALM_KIMI_API_KEY
+        : environment.REALM_MODEL_API_KEY;
+  const envModel = providerId === "openrouter"
+    ? environment.REALM_OPENROUTER_MODEL
+    : providerId === "lmstudio"
+      ? environment.REALM_MODEL_ID
+      : undefined;
   return validateModelSettings({
     schemaVersion: 1,
     providerId,
-    baseUrl: (isOpenRouter
-      ? environment.REALM_OPENROUTER_BASE_URL
-      : environment.REALM_MODEL_BASE_URL)?.trim() || provider.baseUrl,
-    apiKey: (isOpenRouter
-      ? environment.OPENROUTER_API_KEY || environment.REALM_OPENROUTER_API_KEY
-      : environment.REALM_MODEL_API_KEY)?.trim() ?? "",
-    selectedModel: (isOpenRouter
-      ? environment.REALM_OPENROUTER_MODEL
-      : environment.REALM_MODEL_ID)?.trim() || provider.defaultModel,
+    baseUrl: envBaseUrl?.trim() || provider.baseUrl,
+    apiKey: envApiKey?.trim() ?? "",
+    selectedModel: envModel?.trim() || provider.defaultModel,
     thinking: "disabled",
     timeoutMs: 60_000,
     maxTokens: 2_048,
@@ -451,6 +448,81 @@ function providerById(value: unknown) {
 
 function providerByIdOrDefault(value: string | undefined) {
   return MODEL_PROVIDER_CATALOG.find((item) => item.id === value) ?? MODEL_PROVIDER_CATALOG[0];
+}
+
+/**
+ * 端点校验（SSRF 防护；不尝试 DNS 级解析——本机受保护语义，custom 的
+ * 远端必须 https 且 UI 明确提示；见 settings 页文案与公开文档）：
+ * - 一律拒绝 URL 内嵌 username/password、query、fragment；
+ * - pinned：host/路径/协议/端口钉定官方注册值；
+ * - local（LM Studio）：仅 loopback/私有地址或 localhost 主机名，路径钉定；
+ * - custom：http 仅本机/私有地址，远端必须 https。
+ */
+function validateEndpoint(
+  provider: (typeof MODEL_PROVIDER_CATALOG)[number],
+  endpoint: URL,
+): void {
+  if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+    throw endpointNotAllowed(provider);
+  }
+  if (provider.endpointPolicy === "pinned") {
+    if (
+      !provider.protocols.some((protocol) => protocol === endpoint.protocol)
+      || endpoint.hostname !== provider.officialHost
+      || !isAllowedPort(provider.port, endpoint.port)
+      || endpoint.pathname !== provider.path
+    ) {
+      throw endpointNotAllowed(provider);
+    }
+    return;
+  }
+  if (!provider.protocols.some((protocol) => protocol === endpoint.protocol)) {
+    throw endpointNotAllowed(provider);
+  }
+  const hostname = endpoint.hostname.toLowerCase();
+  if (provider.endpointPolicy === "local") {
+    if (!isLocalHostname(hostname) || endpoint.pathname !== provider.path) {
+      throw endpointNotAllowed(provider);
+    }
+    return;
+  }
+  // custom：http 仅本机/私有；远端必须 https；路径有界。
+  if (endpoint.protocol === "http:" && !isLocalHostname(hostname)) {
+    throw new ModelConfigurationError(
+      "MODEL_ENDPOINT_NOT_ALLOWED",
+      "Custom endpoints over plain HTTP are restricted to loopback or private LAN addresses.",
+    );
+  }
+  if (endpoint.pathname.length > 128) {
+    throw endpointNotAllowed(provider);
+  }
+}
+
+function endpointNotAllowed(provider: (typeof MODEL_PROVIDER_CATALOG)[number]) {
+  return new ModelConfigurationError(
+    "MODEL_ENDPOINT_NOT_ALLOWED",
+    `The ${provider.name} endpoint is not an allowed registered address.`,
+  );
+}
+
+/** loopback / localhost 主机名 / RFC1918 / ULA / link-local。 */
+function isLocalHostname(hostname: string): boolean {
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
+    || hostname === "[::1]") {
+    return true;
+  }
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
+    const [a = 0, b = 0] = hostname.split(".").map(Number);
+    return a === 10
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 169 && b === 254)
+      || a === 127;
+  }
+  // IPv6 ULA（fc00::/7）与 link-local（fe80::/10）。
+  return hostname.startsWith("fc") || hostname.startsWith("fd")
+    || hostname.startsWith("[fc") || hostname.startsWith("[fd")
+    || hostname.startsWith("fe8") || hostname.startsWith("[fe8");
 }
 
 function isAllowedPort(configuredPort: string, actualPort: string): boolean {

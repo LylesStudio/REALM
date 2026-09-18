@@ -23,6 +23,8 @@ import type {
 import {
   CONCISE_RATIONALE_RULE,
   NATURAL_VOICE_RULES,
+  ModelConfigurationError,
+  ModelProviderError,
   composeContext,
   contextBlock,
   defaultStructuredOutputLog,
@@ -31,6 +33,7 @@ import {
   nextModelCallRequestId,
   outputLanguageRule,
   requestStructuredObject,
+  sanitizeObservationErrorCode,
   stylePromptBlock,
 } from "../inference/public.ts";
 import type { WorldSceneBrief } from "../../database/postgres/public.ts";
@@ -311,6 +314,18 @@ const MODEL_STAGE_POLICIES = {
     transport: "stream",
     timeoutMs: 90_000,
   },
+  /**
+   * actor/propose（tools 契约；此前游离于策略表之外——P1-6 纳入单一来源）。
+   * 与结构化链同语义：thinking disabled、maxTokens 与规划同源（768）、
+   * timeoutMs 与分类/规划同语义（45s）；tools 请求永远 chat transport。
+   */
+  actor: {
+    stage: "actor",
+    transport: "chat",
+    thinking: "disabled",
+    maxTokens: 768,
+    timeoutMs: 45_000,
+  },
 } as const;
 
 /**
@@ -343,6 +358,8 @@ async function callModelJson<T>(options: {
   maxTokens?: number;
   thinking?: "enabled" | "disabled";
   timeoutMs?: number;
+  /** P1-7：stage 总时限覆盖（测试注入；生产缺省 = 2 × timeoutMs）。 */
+  deadlineMs?: number;
   transport?: "chat" | "stream";
   stage?: string;
   signal?: AbortSignal;
@@ -358,6 +375,8 @@ async function callModelJson<T>(options: {
   // 绝不携带消息内容、玩家原文或模型正文。
   const transport = options.transport ?? "chat";
   const startedAt = Date.now();
+  // P1-7：一次逻辑调用（初次 + repair + transport 阶梯）共享一个总 deadline。
+  const deadline = createStageDeadline(options.timeoutMs, options.deadlineMs);
   let providerAttempts = 0;
   // 用对象属性承接闭包内赋值（避免 CFA 把局部变量收窄为 never）。
   const observed: { response: Awaited<ReturnType<ModelGateway["chat"]>> | null } = {
@@ -372,6 +391,8 @@ async function callModelJson<T>(options: {
       call: async (nextMessages) => {
         // Batch 2D：abort 后不再发起初次/修复请求（不 repair、不重试）。
         throwIfTurnCancelled(options.signal);
+        // P1-7：repair 请求同样受总 deadline 约束。
+        deadline.throwIfExceeded();
         const response = await modelCall(options.getGateway, (gateway) => {
           observedProviderId = gateway.providerId ?? observedProviderId;
           return chatWithStream(gateway, {
@@ -384,8 +405,8 @@ async function callModelJson<T>(options: {
             ...(options.signal ? { signal: options.signal } : {}),
           }, options.onChunk, transport, () => {
             providerAttempts += 1;
-          });
-        }, options.signal);
+          }, deadline);
+        }, options.signal, deadline);
         observed.response = response;
         return { content: response.content, model: response.model };
       },
@@ -447,18 +468,10 @@ async function callModelJson<T>(options: {
   }
 }
 
-/** 观测用脱敏错误分类码（只用既有 code，不带错误原文）。 */
-function observationErrorCode(error: unknown): string {
-  if (
-    error !== null
-    && typeof error === "object"
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string"
-  ) {
-    return (error as { code: string }).code;
-  }
-  return "MODEL_PROVIDER_STEP_FAILED";
-}
+/** 观测错误分类统一入口：与 structured-output 同一脱敏白名单
+ *  （sanitizeObservationErrorCode）——未知/任意 code 坍缩为通用分类，
+ *  白名单内的模型枚举与合法结构化业务码透传。绝不带错误原文。 */
+const observationErrorCode = sanitizeObservationErrorCode;
 
 /** 包装既有的 throw 型规整为 null 型（供 repair helper 判定 schema 失败）。 */
 function nullOnInvalid<T>(normalize: () => T): T | null {
@@ -472,6 +485,16 @@ function nullOnInvalid<T>(normalize: () => T): T | null {
 const DEFAULT_STYLE = normalizeWorldStyle(undefined);
 
 const NARRATOR_HUMAN_REFERENCE = /她|他|斥候|学者|使节|提问者|玩家|角色|人物|人影|来者|众人|有人|手中|指尖|目光|低声|说道|回应/;
+
+/**
+ * P1-14：英文人称/角色指代（与 modules/orchestration/public.ts 的 legacy
+ * 授权检查同源演进）。只匹配边界明确的人称代词与显式角色指代；
+ * 动作/台词动词（says/turns/looks…）故意不做裸匹配——带人称主语的
+ * 短语已被代词组覆盖，而裸动词会把合法环境主语（"The lighthouse light
+ * turns"）误判成角色动作。角色名称仍由 forbiddenNames 精确匹配负责。
+ */
+const NARRATOR_HUMAN_REFERENCE_ENGLISH =
+  /\b(?:he|she|they|him|her|them|his|their|theirs)\b|\bthe\s+(?:players?|characters?|protagonist|narrator)\b/i;
 
 /** M4：流式 Preview 事件；只进入内存广播与浏览器预览卡，永不持久化。 */
 export type ModelPreviewEvent = {
@@ -505,6 +528,8 @@ export function createModelPoweredM2TurnOrchestrator(options: {
    * 缺省时名册块结构性缺席，任何模型返回的 recipientId 规整为 null。
    */
   subjectContext?: DialogueSubjectContext;
+  /** P1-7：stage 总时限覆盖（测试注入；生产缺省 = 2 × 阶段 per-call timeout）。 */
+  stageDeadlineMs?: number;
 }): M2TurnOrchestrator {
   const structuralDM = createRuleBasedDMController();
   const dmController = createModelDMController({
@@ -513,6 +538,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
     structuralDM,
     brief: options.brief,
     style: options.style,
+    stageDeadlineMs: options.stageDeadlineMs,
   });
   return createLocalM2TurnOrchestrator({
     characters: options.characters,
@@ -523,6 +549,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
       options.brief,
       options.style,
       options.subjectContext?.recordKnowledge,
+      options.stageDeadlineMs,
     ),
     actionResolver: options.actionResolver ?? createDeterministicActionResolver({
       allowStatefulReceipts: true,
@@ -535,6 +562,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
       options.style,
       options.characterSkillProvider,
       options.subjectContext,
+      options.stageDeadlineMs,
     ),
   });
 }
@@ -797,6 +825,7 @@ function createModelDMController(options: {
   structuralDM: DMController;
   brief?: WorldSceneBrief;
   style?: WorldStyle;
+  stageDeadlineMs?: number;
 }): DMController {
   return {
     async plan({ playerText, availableCharacters, visibility, playerAction, signal }) {
@@ -840,6 +869,9 @@ function createModelDMController(options: {
         code: "DM_PLAN_INVALID",
         temperature: 0.2,
         ...MODEL_STAGE_POLICIES.planner,
+        ...(options.stageDeadlineMs !== undefined
+          ? { deadlineMs: options.stageDeadlineMs }
+          : {}),
         ...(signal ? { signal } : {}),
         normalize: (body) =>
           nullOnInvalid(() => normalizeDmPlanBody(body, availableCharacters)),
@@ -900,6 +932,7 @@ function createModelDMController(options: {
         options.brief,
         options.style,
         input.signal,
+        options.stageDeadlineMs,
       );
       return {
         ...structural,
@@ -966,6 +999,7 @@ async function reviewCandidateWithModel(
   brief?: WorldSceneBrief,
   style?: WorldStyle,
   signal?: AbortSignal,
+  stageDeadlineMs?: number,
 ): Promise<{ mode: "model" | "degraded"; vetoes: number; reason: string }> {
   // 复核在 thinking 模式下存在随机误否决；只有连续三次复核一致否决才降级，
   // 第三次复核换用更高温度并明确放行偏好，避免同一否决被温度 0 固化。
@@ -1009,6 +1043,7 @@ async function reviewCandidateWithModel(
         code: "DM_REVIEW_INVALID",
         temperature: attempt === 2 ? 0.4 : 0,
         ...MODEL_STAGE_POLICIES.classifier,
+        ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
         ...(signal ? { signal } : {}),
         normalize: (value) =>
           typeof value.accepted === "boolean"
@@ -1063,6 +1098,7 @@ function createModelCharacterRunner(
   style?: WorldStyle,
   characterSkillProvider?: CharacterSkillProvider,
   subjectContext?: DialogueSubjectContext,
+  stageDeadlineMs?: number,
 ): CharacterRunner {
   /** 批次 T4：技能持有加载 fail-closed——失败按空集（只能 act）。 */
   async function loadOwnedSkills(
@@ -1108,6 +1144,11 @@ function createModelCharacterRunner(
       const ownedSkills = await loadOwnedSkills(character.characterInstanceId);
       // Batch 2B 观测（actor 阶段；只记元数据，不含消息内容）。
       const proposeStartedAt = Date.now();
+      // P1-7：actor 阶段共享总 deadline（缺省 = 2 × actor per-call timeout）。
+      const proposeDeadline = createStageDeadline(
+        MODEL_STAGE_POLICIES.actor.timeoutMs,
+        stageDeadlineMs,
+      );
       let proposeAttempts = 0;
       // 方案 A：观测身份取自当前 gateway 实例的盖章（未盖章回退 unknown）。
       let proposeProviderId: string | undefined;
@@ -1147,10 +1188,11 @@ function createModelCharacterRunner(
         tools: [...buildActorTools(ownedSkills)],
         toolChoice: "auto",
         temperature: 0.35,
+        ...MODEL_STAGE_POLICIES.actor,
       }, undefined, "chat", () => {
         proposeAttempts += 1;
-      });
-        }, signal);
+      }, proposeDeadline);
+        }, signal, proposeDeadline);
         emitModelCallObservation({
           requestId: nextModelCallRequestId(),
           stage: "actor",
@@ -1258,6 +1300,7 @@ function createModelCharacterRunner(
           code: "PRESENCE_RESPONSE_INVALID",
           temperature: 0.45,
           ...MODEL_STAGE_POLICIES.previewNlg,
+          ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
           ...(signal ? { signal } : {}),
           onChunk: previewExtractor(character, ["action", "dialogue"]),
           normalize: (body) =>
@@ -1326,6 +1369,7 @@ function createModelCharacterRunner(
           code: "CHARACTER_RESPONSE_INVALID",
           temperature: 0.45,
           ...MODEL_STAGE_POLICIES.previewNlg,
+          ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
           ...(signal ? { signal } : {}),
           onChunk: previewExtractor(character, ["action", "dialogue"]),
           normalize: (body) =>
@@ -1391,6 +1435,7 @@ function createModelCharacterRunner(
         code: "CHARACTER_RESPONSE_INVALID",
         temperature: 0.55,
         ...MODEL_STAGE_POLICIES.previewNlg,
+        ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
         ...(signal ? { signal } : {}),
         onChunk: previewExtractor(character, ["action"]),
         normalize: (body) =>
@@ -1420,6 +1465,7 @@ function createModelNarrator(
   brief?: WorldSceneBrief,
   style?: WorldStyle,
   recordKnowledge?: readonly string[],
+  stageDeadlineMs?: number,
 ): Narrator {
   return {
     async narrate({ playerText, actionTransactions, activatedCharacters, signal }) {
@@ -1487,6 +1533,7 @@ function createModelNarrator(
           code: "NARRATOR_RESPONSE_INVALID",
           temperature: attempt === 0 ? 0.5 : 0.2,
           ...MODEL_STAGE_POLICIES.previewNlg,
+          ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
           ...(signal ? { signal } : {}),
           onChunk,
           normalize: (body) =>
@@ -1503,6 +1550,9 @@ function createModelNarrator(
           const { environment, storyBeat } = result.value;
           if (
             NARRATOR_HUMAN_REFERENCE.test(environment)
+            // P1-14：英文人称/角色指代对 environment 与 storyBeat 都 fail-closed。
+            || NARRATOR_HUMAN_REFERENCE_ENGLISH.test(environment)
+            || NARRATOR_HUMAN_REFERENCE_ENGLISH.test(storyBeat)
             || (committedFact !== null && environment.includes(committedFact))
             || forbiddenNames.some((name) => environment.includes(name))
             || forbiddenNames.some((name) => storyBeat.includes(name))
@@ -1669,6 +1719,7 @@ async function modelCall<T>(
   getGateway: () => Promise<ModelGateway>,
   operation: (gateway: ModelGateway) => Promise<T>,
   signal?: AbortSignal,
+  deadline?: StageDeadline,
 ): Promise<T> {
   // Prompt System v2 分层：JSON 链的格式失败由 callModelJson 的容错解析 +
   // 一次 repair 负责，modelCall 不再盲重试它们；此处只保留 tools 契约失败
@@ -1676,24 +1727,45 @@ async function modelCall<T>(
   // 确定性校验与明确的模型否决仍然立即终止。
   // Batch 2D：signal 已 aborted 时不再重试、不再发起 provider 请求，
   // 并把 abort 期间的 provider 错误归类为统一的 TURN_CANCELLED。
+  // P1-7：stage 总 deadline 耗尽时进入 Fatal 终态，不再重试/回退。
   for (let attempt = 0; attempt < 2; attempt += 1) {
     throwIfTurnCancelled(signal);
+    deadline?.throwIfExceeded();
     try {
       return await operation(await getGateway());
     } catch (error) {
       throwIfTurnCancelled(signal);
+      deadline?.throwIfExceeded();
       if (error instanceof RetryableTurnError) throw error;
       if (error instanceof FatalTurnError) {
         if (attempt === 0 && error.code === "CHARACTER_ACTION_INVALID") continue;
         throw error;
       }
-      throw new RetryableTurnError(
-        "MODEL_PROVIDER_STEP_FAILED",
-        "真实模型暂时没有完成本轮步骤，可以安全重试。",
-      );
+      throw classifyModelStepError(error);
     }
   }
   throw new RetryableTurnError(
+    "MODEL_PROVIDER_STEP_FAILED",
+    "真实模型暂时没有完成本轮步骤，可以安全重试。",
+  );
+}
+
+/**
+ * 模型步骤错误分类（P0-3）：认证/配置失败明确不可恢复——进 Fatal 路径
+ * 并保留可操作的诊断 code（不缺 key / 配置错误 / 401/403），玩家被告知
+ * 检查模型设置，而不是无意义地「稍后重试」；不得触发注定失败的
+ * retryTurn。Retryable 仅保留可恢复的 429/5xx/timeout/network 与临时
+ * provider failure。safeMessage 一律静态文案——不回显上游 error.message
+ * （可能含 URL/连接细节/凭据回声）。
+ */
+function classifyModelStepError(error: unknown): FatalTurnError | RetryableTurnError {
+  if (error instanceof ModelConfigurationError) {
+    return new FatalTurnError(error.code, "模型设置不完整，请检查设置中的供应商与 API key。");
+  }
+  if (error instanceof ModelProviderError && error.code === "MODEL_AUTH_FAILED") {
+    return new FatalTurnError("MODEL_AUTH_FAILED", "模型认证失败，请检查设置中的 API key。");
+  }
+  return new RetryableTurnError(
     "MODEL_PROVIDER_STEP_FAILED",
     "真实模型暂时没有完成本轮步骤，可以安全重试。",
   );
@@ -1709,15 +1781,68 @@ function throwIfTurnCancelled(signal?: AbortSignal): void {
   }
 }
 
+/**
+ * P1-7：stage（一次逻辑模型调用）级总时限。
+ * 空流就地重试（≤3）→ chat 回退 → 结构化 repair → CHARACTER_ACTION_INVALID
+ * 就地重试的组合此前只受 per-call timeout 约束，单条逻辑调用最坏可达
+ * 8 × timeoutMs，叠加上层阶段循环理论约 24 分钟。总 deadline 只收紧不放宽：
+ * 默认 = 2 × 本阶段 per-call timeoutMs（一次主尝试 + 一次恢复的预算）；
+ * timeoutMs 缺省时按最严的 classifier 预算（45s）推导。到达 deadline 后抛
+ * Fatal（MODEL_STAGE_DEADLINE_EXCEEDED）——不再发起 provider 请求、不再
+ * stream fallback；Fatal 非 Retryable，外层 presence gate / retryTurn 不会
+ * 捞起。剩余预算通过 AbortSignal 并入 provider 请求，在途请求同样被切断；
+ * 用户主动取消的 TURN_CANCELLED 判定始终先于 deadline，语义不变。
+ */
+const STAGE_DEADLINE_PER_CALL_FACTOR = 2;
+
+type StageDeadline = {
+  /** 预算耗尽即抛 Fatal（安全终态）。 */
+  throwIfExceeded: () => void;
+  /** 把剩余预算并入请求 signal：deadline 到达时在途请求也被中断。 */
+  scopeSignal: (signal: AbortSignal | undefined) => AbortSignal;
+};
+
+function createStageDeadline(
+  perCallTimeoutMs: number | undefined,
+  overrideMs?: number,
+): StageDeadline {
+  const totalMs = overrideMs
+    ?? (perCallTimeoutMs ?? MODEL_STAGE_POLICIES.classifier.timeoutMs)
+      * STAGE_DEADLINE_PER_CALL_FACTOR;
+  const deadlineAt = Date.now() + Math.max(1, totalMs);
+  const throwIfExceeded = (): void => {
+    if (Date.now() >= deadlineAt) {
+      throw new FatalTurnError(
+        "MODEL_STAGE_DEADLINE_EXCEEDED",
+        "模型生成超出本阶段总时限，已安全终止，内容没有写入记录。",
+      );
+    }
+  };
+  return {
+    throwIfExceeded,
+    scopeSignal(signal) {
+      throwIfExceeded();
+      const timeoutSignal = AbortSignal.timeout(deadlineAt - Date.now());
+      return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    },
+  };
+}
+
 async function chatWithStream(
   gateway: ModelGateway,
   request: Parameters<ModelGateway["chat"]>[0],
   onChunk?: (content: string) => void,
   transport: "chat" | "stream" = "chat",
   onProviderRequest?: () => void,
+  deadline?: StageDeadline,
 ): Promise<Awaited<ReturnType<ModelGateway["chat"]>>> {
   // transport 显式分流：默认 chat；只有 transport="stream" 且无 tools 时才
   // 进入流式（onChunk 也只有在这条路径上才可能产生 Preview）。
+  // P1-7：每次发起 provider 请求前检查 stage 总 deadline，并把剩余预算
+  // 并入请求 signal——在途请求到达 deadline 同样被切断。
+  const scopedRequest = () => deadline
+    ? { ...request, signal: deadline.scopeSignal(request.signal) }
+    : request;
   if (transport === "stream" && gateway.streamChat && !request.tools) {
     // thinking 模式下推理模型偶发只输出推理、finish=stop 但正文为空；
     // 空正文不是有效回答，先就地重试流式，再回退非流式调用。
@@ -1726,7 +1851,7 @@ async function chatWithStream(
       throwIfTurnCancelled(request.signal);
       let content = "";
       onProviderRequest?.();
-      for await (const chunk of gateway.streamChat(request)) {
+      for await (const chunk of gateway.streamChat(scopedRequest())) {
         content += chunk.content;
         if (chunk.content) onChunk?.(chunk.content);
       }
@@ -1744,8 +1869,9 @@ async function chatWithStream(
   }
   // Batch 2D：abort 后不再回退发起非流式请求。
   throwIfTurnCancelled(request.signal);
+  deadline?.throwIfExceeded();
   onProviderRequest?.();
-  const response = await gateway.chat(request);
+  const response = await gateway.chat(scopedRequest());
   if (!request.tools && !response.content.trim() && response.toolCalls.length === 0) {
     throw new RetryableTurnError(
       "MODEL_EMPTY_COMPLETION",

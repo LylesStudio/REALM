@@ -59,11 +59,15 @@ const ERROR_STATUS: Readonly<Record<string, number>> = {
   TRANSFER_NOT_PROVISIONED: 503,
 };
 
-/** 统一错误映射（从不泄露内部细节；details 仅结构化安全字段）。 */
+/** 统一错误映射：只有明确的领域错误（WorldTransferError /
+ *  WorldImportError / WorldExportRequestError）透传其安全消息；pg/zlib/
+ *  内部异常一律静态通用文案——原始 message（可能含连接目标/库表细节）
+ *  不返回给客户端，也不进 details。HTTP 状态与成功协议不变。 */
 export function transferRouteError(error: unknown): Response {
-  const code = error instanceof WorldTransferError
-      || error instanceof WorldImportError
-      || error instanceof WorldExportRequestError
+  const isDomainError = error instanceof WorldTransferError
+    || error instanceof WorldImportError
+    || error instanceof WorldExportRequestError;
+  const code = isDomainError
     ? (error as { code: string }).code
     : "INTERNAL";
   const status = ERROR_STATUS[code] ?? 500;
@@ -75,7 +79,9 @@ export function transferRouteError(error: unknown): Response {
       ok: false as const,
       error: {
         code,
-        message: error instanceof Error ? error.message : String(error),
+        message: isDomainError && error instanceof Error
+          ? error.message
+          : "The transfer operation failed.",
         ...(details !== undefined ? { details } : {}),
       },
     },

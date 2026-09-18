@@ -30,7 +30,7 @@ function settings(providerId: "lmstudio" | "openrouter", model: string): ModelPr
     schemaVersion: 1,
     providerId,
     baseUrl: providerId === "lmstudio"
-      ? "http://127.0.0.1:8823/v1"
+      ? "http://127.0.0.1:1234/v1"
       : "https://openrouter.ai/api/v1",
     apiKey: providerId === "openrouter" ? "test-key" : "",
     selectedModel: model,
@@ -104,7 +104,7 @@ test("createOpenAICompatibleGateway 构造时盖章 catalog providerId（不暴�
     assert.ok(!keys.includes("apiKey") && !keys.includes("baseUrl") && !keys.includes("settings"));
     const serialized = JSON.stringify(gateway);
     assert.ok(!serialized.includes("test-key"));
-    assert.ok(!serialized.includes("127.0.0.1"));
+    assert.ok(!serialized.includes("127.0.0.1"), "事件不得携带端点地址");
     assert.ok(!serialized.includes("openrouter.ai"));
   }
 });
@@ -133,7 +133,7 @@ test("model-powered 整回合各 stage 观测流过盖章 providerId；未盖章
     const serialized = JSON.stringify(entry);
     assert.ok(!serialized.includes("apiKey"));
     assert.ok(!serialized.includes("baseUrl"));
-    assert.ok(!serialized.includes("127.0.0.1"));
+    assert.ok(!serialized.includes("127.0.0.1"), "事件不得携带端点地址");
   }
 });
 

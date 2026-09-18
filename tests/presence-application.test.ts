@@ -225,6 +225,9 @@ function createFixture(options: {
     async loadForPlayer() {
       return loadProjection();
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer() {
       return {
         record: await loadProjection(),

@@ -27,6 +27,8 @@ type LibraryRequest = {
   premise?: unknown;
   storyId?: unknown;
   label?: unknown;
+  /** branch 命令：分叉来源 record（空 worldline 幽灵路径已废弃）。 */
+  sourceRecordId?: unknown;
   style?: unknown;
   retrospection?: unknown;
   mergeTargetRecordId?: unknown;
@@ -160,6 +162,7 @@ function parseLibraryCommand(value: unknown): LibraryCreateCommand {
       kind,
       worldId: requiredString(body.worldId, "worldId", 120),
       label: requiredString(body.label, "label", 80),
+      sourceRecordId: requiredString(body.sourceRecordId, "sourceRecordId", 120),
     };
   }
   if (kind === "world-style") {

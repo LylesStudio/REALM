@@ -412,6 +412,9 @@ test("committed turn persists recipientId in the formal event payload", { timeou
     async loadForPlayer() {
       return baseProjection();
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer() {
       return {
         record: baseProjection(),

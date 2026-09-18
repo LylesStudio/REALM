@@ -246,6 +246,9 @@ function createFixture(options: {
     async loadForPlayer(input: { recordId: string }) {
       return stubProjection(input.recordId);
     },
+    async hasViewerProjection() {
+      return true;
+    },
     async loadDeliveryForPlayer(input: { recordId: string }) {
       return {
         record: stubProjection(input.recordId),

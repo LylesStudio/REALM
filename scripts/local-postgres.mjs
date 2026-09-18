@@ -4,17 +4,28 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+// 重定位（desktop launcher）：REALM_DATA_HOME 设置时，数据/日志/socket 默认
+// 全部落在数据目录；未设置时保持开发者既有 `.local/postgres` 行为。
+// Windows：可执行名带 .exe；不使用 unix socket（-k 仅 POSIX）；路径不依赖 POSIX。
+const dataHome = process.env.REALM_DATA_HOME?.trim();
 const postgresRoot = process.env.REALM_POSTGRES_BIN ?? "/opt/homebrew/opt/postgresql@17/bin";
-const dataDirectory = resolve(projectRoot, ".local/postgres/data");
-const logPath = resolve(projectRoot, ".local/postgres/postgres.log");
-const socketDirectory = "/tmp/realm-pg";
+const dataDirectory = process.env.REALM_POSTGRES_DATA_DIR
+  ?? (dataHome
+    ? resolve(dataHome, "postgres", "data")
+    : resolve(projectRoot, ".local/postgres/data"));
+const logPath = process.env.REALM_POSTGRES_LOG
+  ?? (dataHome
+    ? resolve(dataHome, "postgres", "postgres.log")
+    : resolve(projectRoot, ".local/postgres/postgres.log"));
+const socketDirectory = process.env.REALM_POSTGRES_SOCKET_DIR ?? "/tmp/realm-pg";
 const host = "127.0.0.1";
-const port = "55432";
-const database = "realm_dev";
+const port = process.env.REALM_POSTGRES_PORT ?? "5432";
+const database = process.env.REALM_POSTGRES_DB ?? "realm_local";
 const action = process.argv[2] ?? "status";
+const exeSuffix = process.platform === "win32" ? ".exe" : "";
 
 function executable(name) {
-  const path = resolve(postgresRoot, name);
+  const path = resolve(postgresRoot, `${name}${exeSuffix}`);
   if (!existsSync(path)) {
     throw new Error(
       `Local PostgreSQL executable not found: ${path}. Install postgresql@17 locally or set REALM_POSTGRES_BIN.`,
@@ -55,18 +66,27 @@ function readiness() {
 
 function initialize() {
   if (existsSync(resolve(dataDirectory, "PG_VERSION"))) return;
-  mkdirSync(resolve(projectRoot, ".local/postgres"), { recursive: true });
+  mkdirSync(dataDirectory, { recursive: true });
+  mkdirSync(socketDirectory, { recursive: true });
+  // Windows initdb 不支持 --auth-local；trust 仅限本地开发/打包集群
+  // （生产部署必须改密码认证——见桌面打包文档）。
   run("initdb", [
     "-D",
     dataDirectory,
     "--encoding=UTF8",
     "--locale=C",
-    "--auth-local=trust",
-    "--auth-host=trust",
+    // 连接串固定使用 postgres 超级用户（DATABASE_URL 等）；initdb 缺省
+    // 超级用户 = OS 用户名，fresh 集群上会导致 provision/迁移连接失败。
+    "--username=postgres",
+    ...(process.platform === "win32"
+      ? ["--auth=trust"]
+      : ["--auth-local=trust", "--auth-host=trust"]),
   ]);
 }
 
 function ensureDatabase() {
+  // 集群超级用户固定为 postgres（initdb --username=postgres）；psql/
+  // createdb 缺省按 OS 用户连接，fresh 集群上 role 不存在。
   const lookup = run(
     "psql",
     [
@@ -74,6 +94,8 @@ function ensureDatabase() {
       host,
       "-p",
       port,
+      "-U",
+      "postgres",
       "-d",
       "postgres",
       "-tAc",
@@ -82,7 +104,7 @@ function ensureDatabase() {
     { capture: true },
   );
   if (lookup.stdout.trim() === "1") return;
-  run("createdb", ["-h", host, "-p", port, database]);
+  run("createdb", ["-h", host, "-p", port, "-U", "postgres", database]);
 }
 
 switch (action) {
@@ -101,7 +123,10 @@ switch (action) {
         "-l",
         logPath,
         "-o",
-        `-h ${host} -p ${port} -k ${socketDirectory}`,
+        // unix socket 目录仅 POSIX；Windows 走纯 TCP loopback。
+        process.platform === "win32"
+          ? `-h ${host} -p ${port}`
+          : `-h ${host} -p ${port} -k ${socketDirectory}`,
         "-w",
         "start",
       ]);

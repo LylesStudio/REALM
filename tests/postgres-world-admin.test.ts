@@ -203,6 +203,8 @@ test(
     assert.equal(archived.status, "archived");
 
     // 封存：归档世界不可开新局（F2：story/character/branch）。
+    const archivedStarterRecord = world.stories[0]?.records[0];
+    assert.ok(archivedStarterRecord, "world should have a starter record");
     for (const command of [
       { kind: "story", worldId: world.id, title: "封存故事", premise: "" },
       {
@@ -212,7 +214,12 @@ test(
         role: "守卫",
         summary: "",
       },
-      { kind: "branch", worldId: world.id, label: "封存分支" },
+      {
+        kind: "branch",
+        worldId: world.id,
+        label: "封存分支",
+        sourceRecordId: archivedStarterRecord.id,
+      },
     ] as const) {
       await assert.rejects(
         library.create(scope, command),

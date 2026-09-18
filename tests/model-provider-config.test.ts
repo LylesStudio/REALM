@@ -18,7 +18,7 @@ import { createModelSettingsService } from "../modules/application/model-setting
 const lmstudioSettings: ModelProviderSettings = {
   schemaVersion: 1,
   providerId: "lmstudio",
-  baseUrl: "http://127.0.0.1:8823/v1",
+  baseUrl: "http://127.0.0.1:1234/v1",
   apiKey: "",
   selectedModel: "unsloth/gemma-4-12b-it-qat",
   thinking: "disabled",
@@ -66,7 +66,14 @@ test("the local store migrates the legacy single-provider file and preserves bot
     });
     const migrated = await store.loadSnapshot();
     assert.equal(migrated.activeProviderId, "lmstudio");
-    assert.deepEqual(Object.keys(migrated.providers).sort(), ["lmstudio", "openrouter"]);
+    // 旧双供应商文档：两个 profile 原样保留，新供应商由 defaults 补齐。
+    assert.deepEqual(Object.keys(migrated.providers).sort(), [
+      "custom-openai",
+      "deepseek",
+      "kimi-coding",
+      "lmstudio",
+      "openrouter",
+    ]);
     assert.equal(migrated.providers.lmstudio?.selectedModel, lmstudioSettings.selectedModel);
     assert.equal(migrated.providers.lmstudio?.maxTokens, 2_048);
 
