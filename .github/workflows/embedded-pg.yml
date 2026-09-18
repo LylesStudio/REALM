@@ -173,9 +173,9 @@ jobs:
           curl -fsSL https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.6 -o %TEMP%\pgvector.tar.gz
           tar -xzf %TEMP%\pgvector.tar.gz -C %TEMP%
           cd /d %TEMP%\pgvector-0.8.6
-          set PG_CONFIG=C:\Program Files\PostgreSQL\17\bin\pg_config.exe
-          nmake /f Makefile.win
-          nmake /f Makefile.win install
+          rem GHA 镜像预装 PostgreSQL 14 且注册表有残留：必须用 PGROOT 显式锁定 17。
+          nmake /f Makefile.win PGROOT="C:\Program Files\PostgreSQL\17"
+          nmake /f Makefile.win PGROOT="C:\Program Files\PostgreSQL\17" install
       - name: 组装（vector.dll + 客户端 + pg_config shim）
         shell: pwsh
         run: |
