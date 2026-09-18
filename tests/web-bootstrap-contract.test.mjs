@@ -97,6 +97,9 @@ test("Node-less wrappers offer explicit package-manager installation paths", () 
   assert.match(unix, /setup-web\.mjs/);
   assert.match(windows, /OpenJS\.NodeJS\.LTS/);
   assert.match(windows, /setup-web\.mjs/);
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(packageJson.scripts["db:postgres:bootstrap"], /db:postgres:provision/);
+  assert.equal(packageJson.scripts["db:postgres:provision"], "node scripts/local-provision-realm-transfer.mjs");
   assert.match(windowsLauncher, /ExecutionPolicy Bypass/);
   assert.match(macLauncher, /scripts\/setup-web\.sh/);
   assert.match(linuxLauncher, /scripts\/setup-web\.sh/);

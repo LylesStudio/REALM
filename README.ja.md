@@ -4,6 +4,8 @@
 
 [简体中文](./README.md) · [English](./README.en.md) · [日本語](./README.ja.md)
 
+![REALM WebUI 世界の入口](./public/screenshots/webui-home.png)
+
 > **現在の状態：** Web版のセルフホスト・プレビューです。初回起動ではいくつかの環境が必要になります。不足しているものはランチャーが確認し、インストール前に必ず質問します。
 
 ## とにかく遊びたい方へ

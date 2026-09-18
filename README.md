@@ -4,6 +4,8 @@
 
 [简体中文](./README.md) · [English](./README.en.md) · [日本語](./README.ja.md)
 
+![REALM WebUI 世界入口](./public/screenshots/webui-home.png)
+
 > **当前状态：** Web 自托管预览版。第一次启动需要安装一些本地运行环境；项目会在命令行里告诉你缺什么，并在你确认后安装。
 
 ## 我只想马上玩

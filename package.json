@@ -25,7 +25,8 @@
     "db:postgres:status": "node scripts/local-postgres.mjs status",
     "db:postgres:migrate": "node --env-file-if-exists=.env.local scripts/postgres-migrate.mjs",
     "db:postgres:seed": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/postgres-seed-demo.mjs",
-    "db:postgres:bootstrap": "npm run db:postgres:start && npm run db:postgres:migrate && npm run db:postgres:seed",
+    "db:postgres:bootstrap": "npm run db:postgres:start && npm run db:postgres:provision && npm run db:postgres:migrate && npm run db:postgres:seed",
+    "db:postgres:provision": "node scripts/local-provision-realm-transfer.mjs",
     "test:postgres-runtime": "node scripts/test-postgres-runtime-with-scratch.mjs",
     "desktop:windows:bundle": "node scripts/desktop/bundle-windows.mjs",
     "desktop:macos:package": "bash scripts/desktop/package-macos.sh"
