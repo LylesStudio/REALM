@@ -70,3 +70,21 @@ test("install.ps1 -EmbeddedPg resolves windows-x64 with integrity check", () => 
   assert.match(ps1, /realm-embedded-pg-windows-x64/);
   assert.match(ps1, /Get-FileHash/);
 });
+
+test("embedded-pg manager supports safe upgrade with rollback", () => {
+  assert.match(manager, /upgrade\({/);
+  assert.match(manager, /rolled back/);
+  // 运行中拒绝替换二进制。
+  assert.match(manager, /PostgreSQL is running/);
+  // 版本探测支撑安装器的版本比较。
+  assert.match(manager, /installedVersion/);
+});
+
+test("local-postgres defaults data to user dir with legacy migration", () => {
+  const lp = readFileSync(new URL("../scripts/local-postgres.mjs", import.meta.url), "utf8");
+  // 默认数据落 ~/.local/realm-pgsql/data（与源码分离），日志同目录旁。
+  assert.match(lp, /\.local., .realm-pgsql., .data./);
+  // 旧项目内 .local/postgres 数据自动整体搬迁，不是另起新库。
+  assert.match(lp, /migrated data directory/);
+  assert.match(lp, /renameSync/);
+});

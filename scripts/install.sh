@@ -177,9 +177,10 @@ log "installing npm dependencies (ci)"
 npm --prefix "$APP_DIR" ci
 
 # --- 4. Embedded PostgreSQL（--embedded-pg 自动解析 / --pg-artifact 显式指定） ---
+# 重跑同一条安装命令即完整升级：源码 fetch 更新（上文）+ 此处构件版本比较。
 PG_SHA_URL=""
+PG_ART_VERSION="${REALM_PG_VERSION:-}"
 if [[ "$EMBEDDED_PG" == 1 && -z "$PG_ARTIFACT" ]]; then
-  PG_ART_VERSION="17.10"
   case "$(uname -s)" in
     Linux)
       [[ "$(uname -m)" == "x86_64" ]] \
@@ -191,38 +192,55 @@ if [[ "$EMBEDDED_PG" == 1 && -z "$PG_ARTIFACT" ]]; then
       PG_PLATFORM="darwin-arm64" ;;
     *) die "--embedded-pg: unsupported OS: $(uname -s)" ;;
   esac
+  # 目标版本：显式 REALM_PG_VERSION > GitHub latest release API（静默失败回落内置）。
+  if [[ -z "$PG_ART_VERSION" ]]; then
+    api_version="$(curl -fsSL --max-time 8 \
+      "https://api.github.com/repos/Silver-Aurora/REALM/releases/latest" 2>/dev/null \
+      | grep -m1 '"tag_name"' | sed -E 's/.*"pg-([^"]+)".*/\1/')"
+    PG_ART_VERSION="${api_version:-17.10}"
+  fi
   PG_BASE="${REALM_PG_RELEASE_BASE:-https://github.com/Silver-Aurora/REALM/releases/download/embedded-pg-${PG_ART_VERSION}}"
   PG_ARTIFACT="${PG_BASE}/realm-embedded-pg-${PG_PLATFORM}-${PG_ART_VERSION}.tar.gz"
   PG_SHA_URL="${PG_BASE}/sha256sums.txt"
   log "embedded PostgreSQL artifact: $PG_ARTIFACT"
-  confirm "Download embedded PostgreSQL ${PG_ART_VERSION} + pgvector (${PG_PLATFORM}, ~30-50MB) from GitHub Releases and install it under ~/.local/realm-pgsql?" \
-    || die "aborted"
 fi
 
 if [[ -n "$PG_ARTIFACT" ]]; then
-  pg_tmp="$PG_ARTIFACT"
-  if [[ "$PG_ARTIFACT" == http* ]]; then
-    pg_tmp="$(mktemp "${TMPDIR:-/tmp}/realm-pg-artifact.XXXXXX.tar.gz")"
-    trap 'rm -f "$pg_tmp"' EXIT
-    log "downloading $PG_ARTIFACT"
-    curl -fsSL "$PG_ARTIFACT" -o "$pg_tmp" || die "failed to download $PG_ARTIFACT"
-    if [[ -n "$PG_SHA_URL" ]]; then
-      sums_tmp="$(mktemp)"
-      curl -fsSL "$PG_SHA_URL" -o "$sums_tmp" || die "failed to download $PG_SHA_URL"
-      ( cd "$(dirname "$pg_tmp")" \
-          && grep " $(basename "$PG_ARTIFACT")\$" "$sums_tmp" | sed "s| .*$|  $(basename "$pg_tmp")|" | sha256sum -c - ) \
-        || die "artifact checksum mismatch"
-      rm -f "$sums_tmp"
-    fi
-  fi
-  if node "$APP_DIR/scripts/embedded-pg.mjs" info >/dev/null 2>&1; then
-    log "embedded PostgreSQL already installed; skipping (--pg-artifact kept as update path)"
+  installed_version="$(node "$APP_DIR/scripts/embedded-pg.mjs" version 2>/dev/null || true)"
+  if [[ -n "$installed_version" && -n "$PG_ART_VERSION" \
+      && "$installed_version" == "$PG_ART_VERSION" ]]; then
+    log "embedded PostgreSQL $installed_version already up to date; skipping"
   else
-    log "installing embedded PostgreSQL 17 + pgvector (user directory, no sudo)"
-    node "$APP_DIR/scripts/embedded-pg.mjs" install --artifact "$pg_tmp" \
-      || die "embedded PostgreSQL install failed"
+    if [[ "$EMBEDDED_PG" == 1 ]]; then
+      confirm "Download embedded PostgreSQL ${PG_ART_VERSION} + pgvector (${PG_PLATFORM:-artifact}, ~30-50MB) from GitHub Releases and install it under ~/.local/realm-pgsql?" \
+        || die "aborted"
+    fi
+    pg_tmp="$PG_ARTIFACT"
+    if [[ "$PG_ARTIFACT" == http* ]]; then
+      pg_tmp="$(mktemp "${TMPDIR:-/tmp}/realm-pg-artifact.XXXXXX.tar.gz")"
+      trap 'rm -f "$pg_tmp"' EXIT
+      log "downloading $PG_ARTIFACT"
+      curl -fsSL "$PG_ARTIFACT" -o "$pg_tmp" || die "failed to download $PG_ARTIFACT"
+      if [[ -n "$PG_SHA_URL" ]]; then
+        sums_tmp="$(mktemp)"
+        curl -fsSL "$PG_SHA_URL" -o "$sums_tmp" || die "failed to download $PG_SHA_URL"
+        ( cd "$(dirname "$pg_tmp")" \
+            && grep " $(basename "$PG_ARTIFACT")\$" "$sums_tmp" | sed "s| .*$|  $(basename "$pg_tmp")|" | sha256sum -c - ) \
+          || die "artifact checksum mismatch"
+        rm -f "$sums_tmp"
+      fi
+    fi
+    if [[ -n "$installed_version" ]]; then
+      log "upgrading embedded PostgreSQL $installed_version → ${PG_ART_VERSION:-new artifact}"
+      node "$APP_DIR/scripts/embedded-pg.mjs" upgrade --artifact "$pg_tmp" \
+        || die "embedded PostgreSQL upgrade failed (rolled back)"
+    else
+      log "installing embedded PostgreSQL 17 + pgvector (user directory, no sudo)"
+      node "$APP_DIR/scripts/embedded-pg.mjs" install --artifact "$pg_tmp" \
+        || die "embedded PostgreSQL install failed"
+    fi
+    [[ "$PG_ARTIFACT" == http* ]] && { rm -f "$pg_tmp"; trap - EXIT; }
   fi
-  [[ "$PG_ARTIFACT" == http* ]] && { rm -f "$pg_tmp"; trap - EXIT; }
 fi
 
 # --- 5. Hand off to the interactive web bootstrap -------------------------------

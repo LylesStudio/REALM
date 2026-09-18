@@ -50,6 +50,16 @@ bash scripts/install.sh --embedded-pg   # Linux / macOS
 > macOS requires Apple Silicon (M-series). On an Intel Mac, install PostgreSQL 17 + pgvector with Homebrew and setup-web will detect it.
 > The raw URLs above work as soon as the repository is made Public; while it is private, clone first and run the local scripts.
 
+### Upgrading
+
+**Re-running the same command is a full upgrade**: the installer fetches the latest source, updates dependencies, and compares the embedded PostgreSQL version — skipping when already current, otherwise downloading the new artifact, verifying SHA256, and swapping the old install with a backup (automatic rollback on failure). Your database stays untouched.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/install.sh | bash -s -- --embedded-pg
+```
+
+Programs and data live apart: binaries under `~/.local/realm-pgsql/<version>`, database under `~/.local/realm-pgsql/data` — upgrades only replace the binaries.
+
 If you already have the REALM project folder, choose the entry point for your system.
 
 ### Windows

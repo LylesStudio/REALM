@@ -1,22 +1,40 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-// 重定位（desktop launcher）：REALM_DATA_HOME 设置时，数据/日志/socket 默认
-// 全部落在数据目录；未设置时保持开发者既有 `.local/postgres` 行为。
+// 数据目录解析优先级：
+// 1. REALM_POSTGRES_DATA_DIR（显式最高优先）；
+// 2. REALM_DATA_HOME（desktop launcher 重定位）；
+// 3. 默认 ~/.local/realm-pgsql/data——用户目录、与源码分离，删除 ~/.realm/app 不丢世界。
 // Windows：可执行名带 .exe；不使用 unix socket（-k 仅 POSIX）；路径不依赖 POSIX。
 const dataHome = process.env.REALM_DATA_HOME?.trim();
 const postgresRoot = process.env.REALM_POSTGRES_BIN ?? "/opt/homebrew/opt/postgresql@17/bin";
+const userDataDefault = resolve(homedir(), ".local", "realm-pgsql", "data");
+const legacyProjectData = resolve(projectRoot, ".local", "postgres", "data");
 const dataDirectory = process.env.REALM_POSTGRES_DATA_DIR
-  ?? (dataHome
+  ? resolve(process.env.REALM_POSTGRES_DATA_DIR)
+  : (dataHome
     ? resolve(dataHome, "postgres", "data")
-    : resolve(projectRoot, ".local/postgres/data"));
+    : userDataDefault);
 const logPath = process.env.REALM_POSTGRES_LOG
   ?? (dataHome
     ? resolve(dataHome, "postgres", "postgres.log")
-    : resolve(projectRoot, ".local/postgres/postgres.log"));
+    : resolve(homedir(), ".local", "realm-pgsql", "postgres.log"));
+// 旧默认（项目内 .local/postgres）无缝迁移：新位置无数据而旧位置有时整体搬。
+// 同分区 renameSync 是原子操作；搬完旧位置不再存在，不会双份占用。
+if (
+  !process.env.REALM_POSTGRES_DATA_DIR
+  && !dataHome
+  && !existsSync(resolve(dataDirectory, "PG_VERSION"))
+  && existsSync(resolve(legacyProjectData, "PG_VERSION"))
+) {
+  mkdirSync(dirname(dataDirectory), { recursive: true });
+  renameSync(legacyProjectData, dataDirectory);
+  console.log(`[local-postgres] migrated data directory: ${legacyProjectData} -> ${dataDirectory}`);
+}
 const host = "127.0.0.1";
 const port = process.env.REALM_POSTGRES_PORT ?? "5432";
 const database = process.env.REALM_POSTGRES_DB ?? "realm_local";
