@@ -119,11 +119,21 @@ export function findPostgresBin(environment = process.env, platform = process.pl
     .find((candidate) => hasPostgresTools(candidate, platform)) ?? null;
 }
 
+// Windows 上 Node spawn 无法直接执行 .cmd/.bat（CreateProcess 不认脚本，
+// 需经 cmd.exe 解释）——嵌入式构件的 pg_config 恰好是 .cmd shim。
+function spawnWithShell(command, args, options = {}) {
+  const isWinScript = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  return spawnSync(command, args, {
+    ...options,
+    ...(isWinScript ? { shell: true } : {}),
+  });
+}
+
 function pgVectorAvailable(bin, platform = process.platform) {
   if (!bin) return false;
   const pgConfig = resolveExecutablePath(bin, "pg_config", platform);
   if (!pgConfig) return false;
-  const result = spawnSync(pgConfig, ["--sharedir"], { encoding: "utf8", stdio: "pipe" });
+  const result = spawnWithShell(pgConfig, ["--sharedir"], { encoding: "utf8", stdio: "pipe" });
   if (result.status !== 0) return false;
   const share = result.stdout.trim();
   return existsSync(join(share, "extension", "vector.control"));
@@ -244,7 +254,7 @@ function npmCommand(platform = process.platform) {
 }
 
 function runCommand(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const result = spawnWithShell(command, args, {
     cwd: options.cwd ?? projectRoot,
     env: options.env ?? process.env,
     stdio: options.capture ? "pipe" : "inherit",
