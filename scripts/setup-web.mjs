@@ -148,6 +148,18 @@ function pgVectorAvailable(bin, platform = process.platform) {
   return existsSync(join(share, "extension", "vector.control"));
 }
 
+function localPgReady(pgBin) {
+  const probe = spawnWithShell(resolveExecutablePath(pgBin, "pg_isready") ?? join(pgBin, "pg_isready"),
+    ["-h", "127.0.0.1", "-p", String(DEFAULT_PORT), "-q"], { stdio: "ignore" });
+  return probe.status === 0;
+}
+
+function dockerContainerRunning() {
+  const result = spawnSync("docker", ["ps", "--filter", `name=${DOCKER_NAME}`, "--format", "{{.Names}}"],
+    { encoding: "utf8", stdio: "pipe" });
+  return result.status === 0 && result.stdout.includes(DOCKER_NAME);
+}
+
 export function detectEnvironment({ environment = process.env, platform = process.platform } = {}) {
   const localPostgresBin = findPostgresBin(environment, platform);
   const dockerInstalled = commandAvailable("docker", platform);
@@ -498,11 +510,30 @@ export async function main(argv = process.argv.slice(2)) {
     if (!await confirm("Install npm dependencies with npm ci?", assumeYes)) return 1;
     runCommand(npmCommand(process.platform), ["ci"], { env: childEnvironment });
   }
-  runCommand(npmCommand(process.platform), ["run", "db:postgres:bootstrap"], {
-    env: childEnvironment,
-  });
-  await launchWebServer(childEnvironment);
-  return 0;
+
+  // 会话所有权：记录数据库是不是本次启动前就已经在跑。只有本次会话
+  // 启动的服务，退出时才跟随关闭——不把玩家自己起的其它会话误杀。
+  const dbWasRunning = plan.mode === "local"
+    ? localPgReady(plan.pgBin)
+    : plan.mode === "docker" && dockerContainerRunning();
+  try {
+    runCommand(npmCommand(process.platform), ["run", "db:postgres:bootstrap"], {
+      env: childEnvironment,
+    });
+    await launchWebServer(childEnvironment);
+    return 0;
+  } finally {
+    if (!dbWasRunning && plan.mode === "local") {
+      console.log("stopping local PostgreSQL (restart anytime with npm run setup:web)...");
+      spawnSync(process.execPath, [resolve(projectRoot, "scripts/local-postgres.mjs"), "stop"], {
+        stdio: "ignore",
+        env: childEnvironment,
+      });
+    } else if (!dbWasRunning && plan.mode === "docker") {
+      console.log("stopping the realm-postgres container...");
+      spawnSync("docker", ["stop", DOCKER_NAME], { stdio: "ignore" });
+    }
+  }
 }
 
 const isMain = process.argv[1]

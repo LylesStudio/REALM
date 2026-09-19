@@ -61,6 +61,10 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 
 プログラムとデータは分離されています：実行ファイルは `~/.local/realm-pgsql/<バージョン>`、データベースは `~/.local/realm-pgsql/data` ——アップグレードは実行ファイルだけを差し替えます。
 
+### 終了方法
+
+**Ctrl+C またはターミナルを閉じるだけで全部終了します**。REALM が停止するとき、それが起動したデータベース（組み込み／システムの PostgreSQL、または Docker コンテナ）も一緒に停止します——残存プロセスは残りません。次に同じインストールコマンドを実行すれば再開できます。世界・キャラクター・記録はデータディレクトリにそのまま残り、再起動の影響を受けません。
+
 REALMのフォルダをすでに持っている場合は、OSに合わせて起動してください。
 
 ### Windows

@@ -61,6 +61,10 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 
 Programs and data live apart: binaries under `~/.local/realm-pgsql/<version>`, database under `~/.local/realm-pgsql/data` — upgrades only replace the binaries.
 
+### Closing
+
+**Ctrl+C or closing the terminal = everything stops.** When REALM stops, the database it started (embedded/system PostgreSQL or the Docker container) stops with it — no orphan processes left behind. Rerun the same install command to start again. Your worlds, characters, and records stay safe in the data directory, unaffected by restarts.
+
 If you already have the REALM project folder, choose the entry point for your system.
 
 ### Windows

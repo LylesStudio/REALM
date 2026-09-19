@@ -61,6 +61,10 @@ curl -fsSL https://raw.githubusercontent.com/Silver-Aurora/REALM/main/scripts/in
 
 数据与程序分离存放：程序在 `~/.local/realm-pgsql/<版本>`，数据库在 `~/.local/realm-pgsql/data`——升级只换程序，世界安然无恙。
 
+### 关闭
+
+**Ctrl+C 或关闭终端 = 全部关闭**：REALM 停止时，它启动的数据库（嵌入式/系统 PostgreSQL 或 Docker 容器）会跟随停止，不会留下孤儿进程。下次运行同一条安装命令会自动重启。你的数据（世界、角色、记录）都安好在数据目录里，不受启停影响。
+
 如果你已经拿到了 REALM 项目文件夹，按系统选择一个入口：
 
 ### Windows
