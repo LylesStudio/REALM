@@ -168,10 +168,30 @@ if ($PgArtifact) {
     Select-Object -First 1
   $installedVersion = $null
   if ($installedBin) {
-    $versionOut = (& node (Join-Path $AppDir 'scripts/embedded-pg.mjs') version 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $versionOut -match '(\d+\.\d+)') { $installedVersion = $Matches[1] }
+    # Stop 语义会把原生命令的 stderr 提升为 NativeCommandError——探测必须可捕获，
+    # 任何失败一律视为「未安装/损坏」，交给下方安装路径处理。
+    try {
+      $versionOut = (& node (Join-Path $AppDir 'scripts/embedded-pg.mjs') version 2>$null)
+      if ($LASTEXITCODE -eq 0 -and $versionOut -match '(\d+\.\d+)') { $installedVersion = $Matches[1] }
+    } catch {
+      $installedVersion = $null
+    }
   }
-  if ($installedVersion -and $pgArtVersion -and $installedVersion -eq $pgArtVersion) {
+  # shim 健康检查：同版本构件可能来自旧构建（如 shim 修复前的 17.10）。
+  # pg_config --sharedir 必须非空输出且 exit 0，否则视为需重装（走 upgrade）。
+  $pgHealthy = $false
+  if ($installedVersion) {
+    $pgConfigBin = Join-Path $installedBin 'pg_config.cmd'
+    if (Test-Path $pgConfigBin) {
+      try {
+        $sharedir = (& $pgConfigBin --sharedir 2>$null)
+        $pgHealthy = ($LASTEXITCODE -eq 0 -and $sharedir -match 'share')
+      } catch {
+        $pgHealthy = $false
+      }
+    }
+  }
+  if ($installedVersion -and $pgHealthy -and $pgArtVersion -and $installedVersion -eq $pgArtVersion) {
     Write-RealmLog "embedded PostgreSQL $installedVersion already up to date; skipping"
   } else {
     if ($EmbeddedPg) {

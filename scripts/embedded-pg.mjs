@@ -75,12 +75,13 @@ function resolveExecutablePath(binDir, name) {
   return null;
 }
 
+// 校验构件完整性；不合格抛 Error（调用方决定 fail 还是清理后重试）。
 function verifyBundle(binDir) {
   const missing = REQUIRED_BINARIES.filter(
     (name) => resolveExecutablePath(binDir, name) === null,
   );
   if (missing.length > 0) {
-    fail(`bundle incomplete, missing: ${missing.join(", ")}`);
+    throw new Error(`bundle incomplete, missing: ${missing.join(", ")}`);
   }
   // zonkyio 布局平台差异：Windows 是 share/extension，Linux/macOS 是
   // share/postgresql/extension——校验要按平台找 vector.control。
@@ -88,7 +89,7 @@ function verifyBundle(binDir) {
     ? join("share", "extension")
     : join("share", "postgresql", "extension");
   if (!existsSync(join(binDir, "..", shareExtensionDir, "vector.control"))) {
-    fail("bundle incomplete: pgvector extension control file missing");
+    throw new Error("bundle incomplete: pgvector extension control file missing");
   }
   const probe = spawnSync(join(binDir, executableName("postgres")), ["--version"], {
     encoding: "utf8",
@@ -96,7 +97,7 @@ function verifyBundle(binDir) {
     env: { ...process.env, LD_LIBRARY_PATH: "" },
   });
   if (probe.status !== 0) {
-    fail(`bin/postgres --version failed: ${(probe.stderr || "").trim() || "unknown error"}`);
+    throw new Error(`postgres --version probe failed: ${(probe.stderr ?? "").trim() || probe.status}`);
   }
   return probe.stdout.trim();
 }
@@ -146,7 +147,11 @@ function installedVersion(dir) {
   const target = resolve(dir ?? DEFAULT_DIR);
   const binDir = join(target, "bin");
   if (resolveExecutablePath(binDir, "postgres") === null) return null;
-  if (!existsSync(join(target, "share", "postgresql", "extension", "vector.control"))) {
+  // 与 verifyBundle 同规则的平台感知布局检查。
+  const shareExtensionDir = platform() === "win32"
+    ? join("share", "extension")
+    : join("share", "postgresql", "extension");
+  if (!existsSync(join(target, shareExtensionDir, "vector.control"))) {
     return null;
   }
   const probe = spawnSync(resolveExecutablePath(binDir, "postgres"), ["--version"], {
@@ -205,8 +210,12 @@ function version({ dir }) {
 }
 
 const { action, options } = parseArgs(process.argv.slice(2));
-if (action === "install") install(options);
-else if (action === "upgrade") upgrade(options);
-else if (action === "info") info(options);
-else if (action === "version") version(options);
-else fail("usage: node scripts/embedded-pg.mjs {install|upgrade --artifact <tarball> [--dir <path>] | info | version}");
+try {
+  if (action === "install") install(options);
+  else if (action === "upgrade") upgrade(options);
+  else if (action === "info") info(options);
+  else if (action === "version") version(options);
+  else throw new Error("usage: node scripts/embedded-pg.mjs {install|upgrade --artifact <tarball> [--dir <path>] | info | version}");
+} catch (error) {
+  fail(error.message);
+}
