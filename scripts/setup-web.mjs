@@ -119,14 +119,23 @@ export function findPostgresBin(environment = process.env, platform = process.pl
     .find((candidate) => hasPostgresTools(candidate, platform)) ?? null;
 }
 
-// Windows 上 Node spawn 无法直接执行 .cmd/.bat（CreateProcess 不认脚本，
-// 需经 cmd.exe 解释）——嵌入式构件的 pg_config 恰好是 .cmd shim。
+// Windows 上 Node spawn 无法直接执行 .cmd/.bat（Node 20.12+ 安全修复后
+// 裸 spawn 直接 EINVAL）——须经 cmd.exe 解释，且 args 要拼进命令串
+// （shell:true 下传 args 数组不转义，见 DEP0190）。
+function quoteForCmd(parts) {
+  return parts.map((part) => `"${part}"`).join(" ");
+}
+
 function spawnWithShell(command, args, options = {}) {
   const isWinScript = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-  return spawnSync(command, args, {
-    ...options,
-    ...(isWinScript ? { shell: true } : {}),
-  });
+  if (!isWinScript) return spawnSync(command, args, options);
+  return spawnSync(quoteForCmd([command, ...args]), { ...options, shell: true });
+}
+
+function spawnWithShellAsync(command, args, options = {}) {
+  const isWinScript = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  if (!isWinScript) return spawn(command, args, options);
+  return spawn(quoteForCmd([command, ...args]), { ...options, shell: true });
 }
 
 function pgVectorAvailable(bin, platform = process.platform) {
@@ -361,7 +370,7 @@ function openBrowser(url, platform = process.platform) {
 
 async function launchWebServer(environment) {
   const command = npmCommand(process.platform);
-  const child = spawn(command, ["run", "dev"], {
+  const child = spawnWithShellAsync(command, ["run", "dev"], {
     cwd: projectRoot,
     env: environment,
     stdio: "inherit",
