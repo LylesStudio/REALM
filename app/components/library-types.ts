@@ -1,5 +1,6 @@
 export type LibraryCreateCommand =
   | { kind: "world"; name: string; era: string; summary: string }
+  | { kind: "preset-world"; presetKey: string }
   | { kind: "story"; worldId: string; title: string; premise: string }
   | {
       kind: "record";

@@ -3504,6 +3504,83 @@ button:disabled {
   flex-direction: column;
 }
 
+/* 批次 U：预设世界入口（世界库面板）。 */
+.library-presets {
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+}
+
+.library-presets h3 {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.library-presets-hint {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
+.library-preset-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.library-preset-card {
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  text-align: left;
+}
+
+.library-preset-card:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.library-preset-card:disabled {
+  opacity: 0.6;
+}
+
+.library-preset-tag {
+  background: var(--tint-gold);
+  border: 1px solid var(--tint-gold-line);
+  color: var(--tint-gold-text);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+}
+
+.library-preset-card strong {
+  font-family: var(--font-serif);
+  font-size: 14px;
+}
+
+.library-preset-card small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.library-preset-action {
+  align-self: flex-end;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-top: 4px;
+}
+
 .library-manual-toggle {
   align-items: center;
   background: transparent;
@@ -3746,6 +3823,84 @@ button:disabled {
 .onboarding-worlds li strong {
   font-family: var(--font-serif);
   font-size: 14px;
+}
+
+/* 批次 U：预设世界入口（引导屏）。 */
+.onboarding-presets {
+  margin-top: 26px;
+  width: min(480px, 92vw);
+}
+
+.onboarding-presets h2 {
+  border-top: 1px solid var(--line-dark);
+  color: var(--ink-faint);
+  font-family: var(--font-serif);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding-top: 14px;
+}
+
+.onboarding-presets > p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  margin: 6px 0 12px;
+}
+
+.onboarding-preset-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.onboarding-preset-card {
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  text-align: left;
+}
+
+.onboarding-preset-card:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.onboarding-preset-card:disabled {
+  opacity: 0.6;
+}
+
+.onboarding-preset-tag {
+  background: var(--tint-gold);
+  border: 1px solid var(--tint-gold-line);
+  color: var(--tint-gold-text);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+}
+
+.onboarding-preset-card strong {
+  font-family: var(--font-serif);
+  font-size: 15px;
+}
+
+.onboarding-preset-card small {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.onboarding-preset-action {
+  align-self: flex-end;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-top: 4px;
 }
 
 .onboarding-worlds li small {

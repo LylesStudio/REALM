@@ -141,6 +141,28 @@ test(
     assert.equal(createdWorld?.stories[0]?.records[0]?.timelineKind, "primary");
     // 缺省无 style 键：读取为空串，前端/运行时按 modern 兜底。
     assert.equal(createdWorld?.style, "");
+
+    // 批次 U：预设世界模板一键创建，直接返回可玩记录。
+    const presetResult = await service.create(scope, {
+      kind: "preset-world",
+      presetKey: "dnd-tavern",
+    });
+    assert.ok(presetResult?.recordId, "preset-world should return a recordId");
+    const afterPreset = await service.list(scope);
+    const presetWorld = afterPreset.worlds.find(
+      (world) => world.name === "遗忘酒馆",
+    );
+    assert.ok(presetWorld, "preset world should be listed");
+    assert.equal(presetWorld?.style, "western_fantasy");
+    assert.equal(presetWorld?.stories.length, 1);
+    assert.equal(presetWorld?.stories[0]?.records.length, 1);
+    assert.equal(presetWorld?.stories[0]?.records[0]?.id, presetResult.recordId);
+    assert.equal(presetWorld?.characters.length, 3); // 玩家 + 2 名同伴
+
+    const createdWorldAfterPreset = afterPreset.worlds.find(
+      (world) => world.name === "白塔遗境",
+    );
+    assert.ok(createdWorldAfterPreset);
     const keenInsight = await ownerPool.query<{ metadata: Record<string, unknown> }>(
       `SELECT metadata
        FROM skill_definitions

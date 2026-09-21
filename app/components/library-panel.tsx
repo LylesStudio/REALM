@@ -20,6 +20,7 @@ import type {
   LibraryStory,
   LibraryWorld,
 } from "./library-types";
+import { listPresetWorlds, type PresetWorld } from "../../modules/application/preset-worlds.ts";
 
 interface LibraryPanelProps {
   snapshot: LibrarySnapshot;
@@ -76,6 +77,17 @@ export function LibraryPanel({
   onClose,
 }: LibraryPanelProps) {
   const [manualOpen, setManualOpen] = useState(false);
+  const [busyPreset, setBusyPreset] = useState<string | null>(null);
+
+  async function handlePreset(preset: PresetWorld) {
+    if (busyPreset) return;
+    setBusyPreset(preset.key);
+    try {
+      await onCreate({ kind: "preset-world", presetKey: preset.key });
+    } finally {
+      setBusyPreset(null);
+    }
+  }
 
   return (
     <section className="library-panel" aria-label={uiText("ui.header.library", uiLanguage)}>
@@ -355,6 +367,31 @@ export function LibraryPanel({
             </span>
             <span aria-hidden="true">▸</span>
           </button>
+
+          <section className="library-presets" aria-label={uiText("ui.presetWorld.title", uiLanguage)}>
+            <h3>{uiText("ui.presetWorld.title", uiLanguage)}</h3>
+            <p className="library-presets-hint">{uiText("ui.presetWorld.description", uiLanguage)}</p>
+            <div className="library-preset-grid">
+              {listPresetWorlds().map((preset) => (
+                <button
+                  key={preset.key}
+                  className="library-preset-card"
+                  disabled={busyPreset !== null}
+                  onClick={() => void handlePreset(preset)}
+                  type="button"
+                >
+                  <span className="library-preset-tag">{uiText(preset.tagKey, uiLanguage)}</span>
+                  <strong>{uiText(preset.titleKey, uiLanguage)}</strong>
+                  <small>{uiText(preset.descriptionKey, uiLanguage)}</small>
+                  <span className="library-preset-action">
+                    {busyPreset === preset.key
+                      ? uiText("ui.library.submitting", uiLanguage)
+                      : uiText("ui.onboarding.open", uiLanguage)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
 
           <section className="library-manual">
             <button

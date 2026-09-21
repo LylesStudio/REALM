@@ -354,6 +354,19 @@ const MESSAGES: Record<string, MessageTable> = {
   "ui.settings.languageHint": M("切换后界面与世界内系统文本随之改变，世界文风保持不变。", "Switching changes interface and in-world system text; world style is kept.", "切替で界面と世界内のシステム文が変わります。世界の文風は変わりません。"),
   "ui.settings.languageSaved": M("界面语言已保存。", "Language saved.", "表示言語を保存しました。"),
   "ui.settings.languageFailed": M("界面语言保存失败，请重试。", "Could not save the language. Try again.", "言語の保存に失敗しました。"),
+  // 批次 U：预设世界（一键可玩模板）。
+  "ui.presetWorld.title": M("预设世界", "Preset worlds", "プリセット世界"),
+  "ui.presetWorld.description": M("选择一个现成模板，立即进入可玩世界。", "Pick a ready-made template and enter a playable world.", "テンプレートを選んで、すぐに遊べる世界に入る。"),
+  "ui.presetWorld.dndTavern.title": M("遗忘酒馆", "The Forgotten Tavern", "忘れられた酒場"),
+  "ui.presetWorld.dndTavern.description": M("标准 D\u0026D 西式奇幻：边境小镇的酒馆、藏宝图与苏醒的远古威胁。", "Classic D\u0026D-style fantasy: a frontier tavern, a treasure map, and an ancient threat awakening.", "定番の D\u0026D 風ファンタジー：辺境の酒場、宝の地図、目覚める古代の脅威。"),
+  "ui.presetWorld.animeHero.title": M("魔王城前的村庄", "Village Before the Demon King", "魔王城前の村"),
+  "ui.presetWorld.animeHero.description": M("二次元勇者斗恶龙：新手村启程、同伴与预言书缺页的王道冒险。", "Anime hero-versus-demon-king adventure: leave the starter village with companions and an incomplete prophecy.", "アニメ風勇者冒険：初心者の村を出発し、仲間と欠けた予言書で王道の旅へ。"),
+  "ui.presetWorld.urbanCultivation.title": M("灵气复苏的咖啡馆", "The Cultivation Café", "霊気復興の喫茶店"),
+  "ui.presetWorld.urbanCultivation.description": M("中式都市轻小说：现代都市里的灵气复苏、散修店主与雨夜警告。", "Urban Chinese cultivation lite: modern city, spiritual-energy revival, a café-owning rogue cultivator, and a rainy-night warning.", "中華都市ライト小説：現代都市の霊気復興、カフェを営む散修、雨夜の警告。"),
+  "ui.presetWorld.tagWesternFantasy": M("西式奇幻", "Western fantasy", "西洋ファンタジー"),
+  "ui.presetWorld.tagAnime": M("二次元", "Anime", "アニメ"),
+  "ui.presetWorld.tagModern": M("都市", "Urban", "都市"),
+
   // 批次 S：世界入口引导屏（无「最近打开」记忆时的首页）。
   "ui.onboarding.mark": M("界", "REALM", "界"),
   "ui.onboarding.eyebrow": M("界核 · 世界入口", "REALM · World entry", "界核 · 世界の入口"),

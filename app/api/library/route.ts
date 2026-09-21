@@ -34,6 +34,8 @@ type LibraryRequest = {
   mergeTargetRecordId?: unknown;
   /** 批次 S：character 命令——同事务装配进该记录阵容。 */
   attachRecordId?: unknown;
+  /** 批次 U：从预设世界模板一键创建。 */
+  presetKey?: unknown;
   /** 批次 S：player-stance 命令——入局 / 观察者。 */
   stance?: unknown;
   /** 批次 T6：attach-character 命令——既有角色挂入既有记录。 */
@@ -101,6 +103,12 @@ function parseLibraryCommand(value: unknown): LibraryCreateCommand {
       name: requiredString(body.name, "name", 80),
       era: optionalString(body.era, 80),
       summary: optionalString(body.summary, 300),
+    };
+  }
+  if (kind === "preset-world") {
+    return {
+      kind,
+      presetKey: requiredString(body.presetKey, "presetKey", 40),
     };
   }
   if (kind === "story") {

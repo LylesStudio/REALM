@@ -307,6 +307,13 @@ export function RealmClient() {
         return false;
       }
       await loadLibrary();
+      // 批次 U：预设世界一键创建后直接跳入新记录。
+      if (command.kind === "preset-world") {
+        const recordId = (payload as { recordId?: unknown } | null)?.recordId;
+        if (typeof recordId === "string" && recordId.trim()) {
+          void openRecord(recordId.trim());
+        }
+      }
       return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "创建失败，请重试。");
@@ -1279,6 +1286,9 @@ export function RealmClient() {
           onOpenGuided={() => openCreation("guided", "onboarding")}
           onOpenLobby={() => setLobbyOpen(true)}
           onOpenRecord={openRecord}
+          onCreatePreset={async (presetKey) =>
+            createLibraryItem({ kind: "preset-world", presetKey })
+          }
         />
         {renderCreationOverlay()}
         {renderLobbyOverlay()}

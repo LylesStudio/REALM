@@ -17,6 +17,7 @@ import {
   composeDeterministicOpening,
   type FirstNightContext,
 } from "./first-night.ts";
+import { getPresetWorld } from "./preset-worlds.ts";
 import type { WorldGenesisDraft } from "./world-genesis.ts";
 
 export interface LibraryScope {
@@ -116,6 +117,7 @@ export interface RecordBranchResult {
 
 export type LibraryCreateCommand =
   | { kind: "world"; name: string; era: string; summary: string }
+  | { kind: "preset-world"; presetKey: string }
   | { kind: "story"; worldId: string; title: string; premise: string }
   | {
       kind: "record";
@@ -505,6 +507,15 @@ export function createPostgresLibraryService(
               command.summary.trim(),
             );
             return { recordId: starter.recordId };
+          }
+
+          if (command.kind === "preset-world") {
+            const preset = getPresetWorld(command.presetKey);
+            if (!preset) {
+              throw new LibraryServiceError("INVALID_COMMAND", "Unknown preset world key.");
+            }
+            const ids = await this.createGenesis(scope, preset.draft);
+            return { recordId: ids.recordId };
           }
 
           if (command.kind === "world-style") {
@@ -2190,6 +2201,7 @@ async function insertOpeningEvent(
 const OWNER_POOL_COMMAND_KINDS: ReadonlySet<LibraryCreateCommand["kind"]> =
   new Set([
     "world",
+    "preset-world",
     "character",
     "record",
     "attach-character",

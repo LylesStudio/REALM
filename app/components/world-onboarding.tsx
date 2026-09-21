@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 import type { LibraryRecord, LibrarySnapshot, LibraryWorld } from "./library-types";
+import { listPresetWorlds, type PresetWorld } from "../../modules/application/preset-worlds.ts";
 
 export interface WorldOnboardingProps {
   uiLanguage: UiLanguage;
@@ -13,6 +15,8 @@ export interface WorldOnboardingProps {
   onOpenLobby: () => void;
   /** 打开指定记录（已有世界入口）。 */
   onOpenRecord: (recordId: string) => void;
+  /** 批次 U：从预设世界模板一键创建并进入。 */
+  onCreatePreset: (presetKey: string) => Promise<boolean>;
 }
 
 interface WorldEntry {
@@ -35,10 +39,21 @@ function latestRecordOf(world: LibraryWorld): LibraryRecord | null {
  * 已有世界列表。本屏只是入口，不改动任何既有世界数据。
  */
 export function WorldOnboarding(props: WorldOnboardingProps) {
-  const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenLobby, onOpenRecord } = props;
+  const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenLobby, onOpenRecord, onCreatePreset } = props;
+  const [busyPreset, setBusyPreset] = useState<string | null>(null);
   const entries: WorldEntry[] = library.worlds
     .map((world) => ({ world, latestRecord: latestRecordOf(world) }))
     .filter((entry): entry is WorldEntry => entry.world.id.trim().length > 0);
+
+  async function handlePreset(preset: PresetWorld) {
+    if (busyPreset) return;
+    setBusyPreset(preset.key);
+    try {
+      await onCreatePreset(preset.key);
+    } finally {
+      setBusyPreset(null);
+    }
+  }
 
   return (
     <main className="state-screen world-onboarding">
@@ -90,6 +105,31 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
           </span>
         </button>
       </div>
+
+      <section className="onboarding-presets" aria-label={uiText("ui.presetWorld.title", uiLanguage)}>
+        <h2>{uiText("ui.presetWorld.title", uiLanguage)}</h2>
+        <p>{uiText("ui.presetWorld.description", uiLanguage)}</p>
+        <div className="onboarding-preset-grid">
+          {listPresetWorlds().map((preset) => (
+            <button
+              key={preset.key}
+              className="onboarding-preset-card"
+              disabled={busyPreset !== null}
+              onClick={() => void handlePreset(preset)}
+              type="button"
+            >
+              <span className="onboarding-preset-tag">{uiText(preset.tagKey, uiLanguage)}</span>
+              <strong>{uiText(preset.titleKey, uiLanguage)}</strong>
+              <small>{uiText(preset.descriptionKey, uiLanguage)}</small>
+              <span className="onboarding-preset-action">
+                {busyPreset === preset.key
+                  ? uiText("ui.library.submitting", uiLanguage)
+                  : uiText("ui.onboarding.open", uiLanguage)}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
 
       {entries.length > 0 ? (
         <section className="onboarding-worlds" aria-label={uiText("ui.onboarding.continueTitle", uiLanguage)}>
