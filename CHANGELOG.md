@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-21
+
+### Added
+
+- 三个一键可玩预设世界：标准 DND「遗忘酒馆」、二次元勇者「魔王城前的村庄」、中式都市轻小说「灵气复苏的咖啡馆」。
+- 世界引导屏与世界库面板新增「预设世界」入口，点击后直接创建并进入首个记录。
+- `scripts/configure-comfyui-workflow.mjs`：检测并指引用户补全 Anima 工作流所需模型（UNet/CLIP/VAE），支持自定义 manifest 与 ComfyUI 目录。
+
+### Changed
+
+- `LibraryCreateCommand` 扩展 `kind: "preset-world"`，复用现有创世事务创建完整世界、故事、记录与开场。
+- i18n 新增预设世界相关键，覆盖 zh-CN / en / ja 三语。
+
 ## [0.2.0] - 2026-09-21
 
 ### Added
