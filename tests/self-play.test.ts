@@ -1,5 +1,5 @@
 /**
- * 批次 T7 世界自演——Core 纯函数契约（public documentation §4.1）。
+ * 批次 T7 世界自演——Core 纯函数契约（docs/development/T7-OBSERVATION-VISION.md §4.1）。
  * 覆盖：状态规整 fail-closed、终态/活动态判定、预算钳制（默认 3、硬上限 5）、
  * 三语引导语与未知语言回落。
  */

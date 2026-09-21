@@ -28,20 +28,20 @@ test("normalizeAdvertisedOrigin：合法/非法矩阵", () => {
   assert.deepEqual(normalizeAdvertisedOrigin(undefined), { origin: null, invalid: false });
   assert.deepEqual(normalizeAdvertisedOrigin("  "), { origin: null, invalid: false });
   assert.deepEqual(
-    normalizeAdvertisedOrigin("http://192.0.2.20:9999"),
-    { origin: "http://192.0.2.20:9999", invalid: false },
+    normalizeAdvertisedOrigin("http://192.168.1.20:9999"),
+    { origin: "http://192.168.1.20:9999", invalid: false },
   );
   assert.deepEqual(
     normalizeAdvertisedOrigin(" https://realm.example.cn/ "),
     { origin: "https://realm.example.cn", invalid: false },
   );
   for (const bad of [
-    "ftp://192.0.2.20",
-    "http://user:pass@192.0.2.20:9999",
-    "http://token@192.0.2.20",
-    "http://192.0.2.20:9999?token=x",
-    "http://192.0.2.20:9999#frag",
-    "http://192.0.2.20:9999/path",
+    "ftp://192.168.1.20",
+    "http://user:pass@192.168.1.20:9999",
+    "http://token@192.168.1.20",
+    "http://192.168.1.20:9999?token=x",
+    "http://192.168.1.20:9999#frag",
+    "http://192.168.1.20:9999/path",
     "not-a-url",
     "http://",
   ]) {
@@ -60,7 +60,7 @@ test("loopback 判定只用于提示（不参与授权）", () => {
   assert.equal(isLoopbackOrigin("http://127.0.0.1:9999"), true);
   assert.equal(isLoopbackOrigin("http://localhost:9999"), true);
   assert.equal(isLoopbackOrigin("http://[::1]:9999"), true);
-  assert.equal(isLoopbackOrigin("http://192.0.2.20:9999"), false);
+  assert.equal(isLoopbackOrigin("http://192.168.1.20:9999"), false);
   assert.equal(isLoopbackOrigin("not-a-url"), true, "非法 origin 按 loopback 处理（提示保守）");
 });
 

@@ -53,21 +53,25 @@ type Repository = RuntimeRepository<
 >;
 
 const SESSION_PRINCIPAL = "principal_demo_player";
-const GATE_TOKEN = "preview-cancel-auth-gate-token";
 
 function sessionCookie(principalId: string): string {
   return `realm_session=${createSessionValue(principalId)}`;
 }
 
+// 新门禁（0051 后）：REALM_RUNTIME_DATABASE_URL 存在即要求账户会话；
+// 401 在 resolveRequestPrincipal 即返回（不触 DB），fake URL 足够。
 async function withGate<T>(enabled: boolean, run: () => Promise<T>): Promise<T> {
-  const saved = process.env.REALM_ACCESS_TOKEN;
+  const saved = process.env.REALM_RUNTIME_DATABASE_URL;
   try {
-    if (enabled) process.env.REALM_ACCESS_TOKEN = GATE_TOKEN;
-    else delete process.env.REALM_ACCESS_TOKEN;
+    if (enabled) {
+      process.env.REALM_RUNTIME_DATABASE_URL = "postgresql://realm_runtime@127.0.0.1:5432/realm";
+    } else {
+      delete process.env.REALM_RUNTIME_DATABASE_URL;
+    }
     return await run();
   } finally {
-    if (saved === undefined) delete process.env.REALM_ACCESS_TOKEN;
-    else process.env.REALM_ACCESS_TOKEN = saved;
+    if (saved === undefined) delete process.env.REALM_RUNTIME_DATABASE_URL;
+    else process.env.REALM_RUNTIME_DATABASE_URL = saved;
   }
 }
 

@@ -1,6 +1,6 @@
 /**
  * 批次 T3 角色在场——PostgreSQL 集成测试
- * （public documentation §4.1）。
+ * （docs/development/T3-CHARACTER-PRESENCE.md §4.1）。
  * 覆盖：在场事件经真实 PG 运行时落库（utterance.committed + payload 在场标记）、
  * 头指针连续无空洞、预算恰 1/回合、不产生额外玩家事件、observations 落库、
  * delivery 投影透出 presence。门禁为内联确定性实现，不依赖真实模型。

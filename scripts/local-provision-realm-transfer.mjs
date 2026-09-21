@@ -2,7 +2,7 @@
 /**
  * 本地 fresh bootstrap 的 realm_transfer provisioning 步骤（P0-1）。
  *
- * 顺序保证：local-postgres start（initdb/start/create realm_local）之后、
+ * 顺序保证：local-postgres start（initdb/start/create realm_dev）之后、
  * postgres-migrate 之前运行——0042 要求 realm_transfer 已由
  * `scripts/provision-realm-transfer.mjs` 创建（migration 永不自建角色）。
  * 本脚本只负责"安全地把密码交给既有 provisioning 入口"：
@@ -34,7 +34,7 @@ function fail(message) {
 }
 
 const connectionString = process.env.DATABASE_URL
-  ?? "postgresql://postgres@127.0.0.1:5432/realm_local";
+  ?? "postgresql://postgres@127.0.0.1:55432/realm_dev";
 try {
   const url = new URL(connectionString);
   const host = url.hostname.replace(/^\[|\]$/g, "");

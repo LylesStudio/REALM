@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  REALM 场景图自动 Worker —— Windows Task Scheduler 用户级可选模板。
+
+  这是仓库模板，不会默认安装：只有用户显式选择“开机后台运行 worker”时
+  才导入（安装/启用待 Iris 验收后由用户执行）。参考导入（当前用户，
+  不需要管理员权限）：
+    schtasks /Create /TN "REALM Scene Image Worker" /XML realm-scene-image-worker-task.xml
+  删除：
+    schtasks /Delete /TN "REALM Scene Image Worker" /F
+
+  导入前必须把两处占位路径改成实际安装路径：
+    - <WorkingDirectory>：REALM 仓库目录
+    - <Command> / <Arguments>：node 可执行文件与 host 脚本路径
+  本文件不含任何凭据；worker 运行环境（loopback REALM_RUNTIME_DATABASE_URL）
+  由仓库 .env.local 或用户环境提供，不写进任务定义。
+
+  ExecStart 与 systemd/LaunchAgent 入口一致：跨平台 supervisor
+  launcher/scene-image-worker-host.mjs（启动、日志隔离、优雅停止、退出
+  传播同一套逻辑；PG advisory lock 兜底跨进程单实例）。
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>REALM scene image worker (auto scene background generation consumer). Optional user-level background mode; not installed by default.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <!-- 导入时由 Task Scheduler 解析为当前交互用户；不要求管理员。 -->
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <!-- TODO(用户): 改成实际 node.exe 绝对路径，例如 C:\Program Files\nodejs\node.exe -->
+      <Command>C:\Path\To\node.exe</Command>
+      <!-- TODO(用户): 改成实际仓库路径下的 host 脚本 -->
+      <Arguments>--env-file-if-exists=.env.local launcher\scene-image-worker-host.mjs</Arguments>
+      <WorkingDirectory>C:\Path\To\REALM</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

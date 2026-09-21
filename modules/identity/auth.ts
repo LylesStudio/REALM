@@ -1,34 +1,23 @@
 /**
- * Access gate + identity-aware sessions.
+ * 账户登录门禁 + identity-aware sessions。
  *
- * REALM_ACCESS_TOKEN unset → gate disabled, everything falls back to the
- * local single-user principal. Set → every page and API requires a session.
- * Sessions are stateless HMAC cookies; credentials are never stored, logged
- * or hashed into any digest.
+ * 门禁语义（DEPLOY-AUTH 新版）：REALM_RUNTIME_DATABASE_URL 存在 → 页面与
+ * API 要求账户会话（账户名 + 可选密码）；缺失 → 纯单机/测试回落本地单用户
+ * principal。REALM_ACCESS_TOKEN 已退役——存在也仅被忽略，绝不再作为凭据。
+ * Sessions 是 30 天 httpOnly HMAC cookie；cookie 只携带 principalId，
+ * 签名密钥来自 session-secret.ts（环境变量 → 安装级 0600 文件 → 开发兜底），
+ * 绝不依赖已退役的访问令牌。
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { sessionSecret } from "./session-secret.ts";
 
 export const SESSION_COOKIE = "realm_session";
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** 门禁 = 运行时数据库存在（账户登录需要 accounts 表）。 */
 export function isAccessGateEnabled(): boolean {
-  return Boolean(process.env.REALM_ACCESS_TOKEN?.trim());
-}
-
-export function verifyAccessToken(candidate: string): boolean {
-  const expected = process.env.REALM_ACCESS_TOKEN ?? "";
-  if (!expected) return false;
-  const left = Buffer.from(candidate);
-  const right = Buffer.from(expected);
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
-
-function sessionSecret(): string {
-  return process.env.REALM_SESSION_SECRET?.trim()
-    || process.env.REALM_ACCESS_TOKEN?.trim()
-    || "realm-local-development-only";
+  return Boolean(process.env.REALM_RUNTIME_DATABASE_URL?.trim());
 }
 
 function sign(payload: string): string {

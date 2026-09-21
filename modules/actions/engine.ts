@@ -2,7 +2,7 @@
  * 批次 T4：三个引擎工具的真实实现（M2 §4 落地）。
  * 批次 T5：resolve_uncertainty 换密码学安全随机源（node:crypto randomInt），
  * 伪随机查表（deterministicInteger）删除；多骰系解算（规范
- * public documentation）。
+ * docs/development/T5-DICE-RANDOMNESS.md）。
  *
  * 全部引擎权威——DM 与角色均不代填规则值；引擎工具只在发布事务内
  * 由已授权的 Action Receipt 驱动：
@@ -14,8 +14,8 @@
  * - apply_effect：账本事务内 apply/remove character_effects；
  *   目标必须是行动者自身，定义必须存在于本世界。
  *
- * 失败矩阵见 public documentation §5 与
- * public documentation §4。
+ * 失败矩阵见 docs/development/T4-RULE-REALIZATION.md §5 与
+ * docs/development/T5-DICE-RANDOMNESS.md §4。
  */
 import { randomInt as cryptoRandomInt } from "node:crypto";
 import type { PoolClient } from "pg";

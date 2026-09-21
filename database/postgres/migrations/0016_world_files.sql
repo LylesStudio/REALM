@@ -1,5 +1,5 @@
 -- REALM World Files
--- 批次 R（public documentation）：二进制文件存储层，
+-- 批次 R（docs/development/TAVERN-IMPORT.md）：二进制文件存储层，
 -- 承载角色卡头像等世界资产。Postgres bytea：与运行时契约一致、
 -- 导入与元数据同事务提交、pg_dump 即备份，不走文件系统。
 CREATE TABLE IF NOT EXISTS world_files (

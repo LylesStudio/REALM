@@ -1,6 +1,6 @@
 /**
  * 批次 T7：世界自演（observer 之眼的内容供给）——纯类型、常量与状态机契约。
- * 设计规范：public documentation。
+ * 设计规范：docs/development/T7-OBSERVATION-VISION.md。
  *
  * 自演会话 = 记录级账本行（record_self_play_sessions，迁移 0020）+ 单飞
  * 调度器逐拍推进；每拍是一次完整 executeTurn 自治回合（payload.selfPlay），

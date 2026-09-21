@@ -36,6 +36,16 @@ type SettingsState = {
 type Operation = "save" | "discover" | "test" | null;
 const MODEL_PAGE_SIZE = 20;
 
+type ComfyDraft = {
+  enabled: boolean;
+  baseUrl: string;
+  requestTimeoutMs: number;
+  workflowId: string;
+  apiKey: string;
+};
+
+type ComfySnapshot = Omit<ComfyDraft, "apiKey"> & { apiKeyConfigured: boolean };
+
 export function ModelSettingsClient() {
   const [settings, setSettings] = useState<PublicModelSettingsSnapshot | null>(null);
   const [draft, setDraft] = useState<SettingsState | null>(null);
@@ -46,6 +56,16 @@ export function ModelSettingsClient() {
   const [modelQuery, setModelQuery] = useState("");
   const [freeOnly, setFreeOnly] = useState(false);
   const [modelPage, setModelPage] = useState(0);
+  const [comfy, setComfy] = useState<ComfyDraft | null>(null);
+  const [comfySnapshot, setComfySnapshot] = useState<ComfySnapshot | null>(null);
+  const [comfyBusy, setComfyBusy] = useState<"save" | "test" | null>(null);
+  const [comfyNotice, setComfyNotice] = useState<string | null>(null);
+  const [comfyError, setComfyError] = useState<string | null>(null);
+  const [passwordCurrent, setPasswordCurrent] = useState("");
+  const [passwordNext, setPasswordNext] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
 
   useEffect(() => subscribeUiLanguage(() => setUiLanguage(readUiLanguage())), []);
 
@@ -69,6 +89,23 @@ export function ModelSettingsClient() {
         );
         if (!activeProfile) throw new Error(uiText("ui.settings.errMissingProfile", readUiLanguage()));
         setDraft(toDraft(activeProfile));
+        // ComfyUI 图像生成卡：独立加载，失败只影响该卡（模型设置照常）。
+        void (async () => {
+          try {
+            const comfyResponse = await fetch("/api/settings/comfyui", {
+              cache: "no-store",
+              headers: { Accept: "application/json" },
+            });
+            const comfyBody: unknown = await comfyResponse.json();
+            const loaded = parseComfyEnvelope(comfyBody);
+            if (!comfyResponse.ok || !loaded) throw new Error("load failed");
+            if (!active) return;
+            setComfySnapshot(loaded);
+            setComfy({ ...loaded, apiKey: "" });
+          } catch {
+            if (active) setComfyError(uiText("ui.comfyui.errLoad", readUiLanguage()));
+          }
+        })();
       } catch (caught) {
         if (active) setError(caught instanceof Error ? caught.message : uiText("ui.settings.errLoad", readUiLanguage()));
       }
@@ -136,6 +173,70 @@ export function ModelSettingsClient() {
       setError(caught instanceof Error ? caught.message : uiText("ui.settings.errOperation", uiLanguage));
     } finally {
       setOperation(null);
+    }
+  }
+
+  async function runComfy(action: "save" | "test") {
+    if (!comfy || comfyBusy) return;
+    setComfyBusy(action);
+    setComfyNotice(null);
+    setComfyError(null);
+    try {
+      const response = await fetch("/api/settings/comfyui", {
+        method: action === "save" ? "PUT" : "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(action === "test" ? { action: "test" } : {}),
+          enabled: comfy.enabled,
+          baseUrl: comfy.baseUrl,
+          requestTimeoutMs: comfy.requestTimeoutMs,
+          workflowId: comfy.workflowId,
+          apiKey: comfy.apiKey,
+        }),
+      });
+      const body: unknown = await response.json();
+      if (action === "test") {
+        if (!response.ok) throw new Error(readError(body, uiText("ui.comfyui.errTest", uiLanguage)));
+        setComfyNotice(uiText("ui.comfyui.testOk", uiLanguage));
+      } else {
+        if (!response.ok) throw new Error(readError(body, uiText("ui.comfyui.errSave", uiLanguage)));
+        const saved = parseComfyEnvelope(body);
+        if (!saved) throw new Error(uiText("ui.comfyui.errInvalidResponse", uiLanguage));
+        setComfySnapshot(saved);
+        setComfy({ ...saved, apiKey: "" });
+        setComfyNotice(uiText("ui.comfyui.saveOk", uiLanguage));
+      }
+    } catch (caught) {
+      setComfyError(caught instanceof Error ? caught.message : uiText("ui.comfyui.errSave", uiLanguage));
+    } finally {
+      setComfyBusy(null);
+    }
+  }
+
+  /** 账户密码设置/清除（当前会话 principal；清除需明确动作）。 */
+  async function savePassword(clear: boolean) {
+    if (passwordBusy) return;
+    setPasswordBusy(true);
+    setPasswordNotice(null);
+    setPasswordError(null);
+    try {
+      const response = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: passwordCurrent,
+          newPassword: clear ? "" : passwordNext,
+          confirmClear: clear,
+        }),
+      });
+      if (!response.ok) throw new Error("password failed");
+      setPasswordNotice(uiText(clear ? "ui.password.clearOk" : "ui.password.saveOk", uiLanguage));
+      setPasswordCurrent("");
+      setPasswordNext("");
+    } catch {
+      setPasswordError(uiText("ui.password.failed", uiLanguage));
+    } finally {
+      setPasswordBusy(false);
     }
   }
 
@@ -445,8 +546,126 @@ export function ModelSettingsClient() {
             </footer>
           </section>
 
+          <section className="settings-card" data-testid="comfyui-card">
+            <header><span>03</span><div><h3>{uiText("ui.comfyui.cardTitle", uiLanguage)}</h3><p>{uiText("ui.comfyui.cardBody", uiLanguage)}</p></div></header>
+            {comfy ? (
+              <>
+                {comfyNotice ? <div className="settings-notice is-success" role="status">{comfyNotice}</div> : null}
+                {comfyError ? <div className="settings-notice is-error" role="alert">{comfyError}</div> : null}
+                <div className="settings-form-grid">
+                  <label>
+                    <span>{uiText("ui.comfyui.fieldEnabled", uiLanguage)}</span>
+                    <button
+                      aria-pressed={comfy.enabled}
+                      className={comfy.enabled ? "is-filter-active" : "button-secondary"}
+                      onClick={() => setComfy({ ...comfy, enabled: !comfy.enabled })}
+                      type="button"
+                    >
+                      {comfy.enabled
+                        ? uiText("ui.comfyui.enabledOn", uiLanguage)
+                        : uiText("ui.comfyui.enabledOff", uiLanguage)}
+                    </button>
+                  </label>
+                  <label>
+                    <span>ComfyUI Base URL</span>
+                    <input
+                      value={comfy.baseUrl}
+                      onChange={(event) => setComfy({ ...comfy, baseUrl: event.target.value })}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label>
+                    <span>{uiText("ui.comfyui.fieldTimeout", uiLanguage)}</span>
+                    <select
+                      value={String(comfy.requestTimeoutMs)}
+                      onChange={(event) => setComfy({ ...comfy, requestTimeoutMs: Number(event.target.value) })}
+                    >
+                      <option value="10000">10s</option>
+                      <option value="30000">30s</option>
+                      <option value="60000">60s</option>
+                      <option value="120000">120s</option>
+                    </select>
+                  </label>
+                  <label className="settings-field-wide">
+                    <span>API Key <small>{comfySnapshot?.apiKeyConfigured
+                      ? uiText("ui.comfyui.apiKeyConfigured", uiLanguage)
+                      : uiText("ui.comfyui.apiKeyMissing", uiLanguage)}</small></span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={comfy.apiKey}
+                      onChange={(event) => setComfy({ ...comfy, apiKey: event.target.value })}
+                      placeholder={comfySnapshot?.apiKeyConfigured
+                        ? uiText("ui.comfyui.apiKeyKeepPlaceholder", uiLanguage)
+                        : uiText("ui.comfyui.apiKeyEnterPlaceholder", uiLanguage)}
+                    />
+                  </label>
+                </div>
+                <footer>
+                  <p>{uiText("ui.comfyui.cardNote", uiLanguage)}</p>
+                  <div className="settings-actions">
+                    <button className="button-secondary" disabled={comfyBusy !== null} onClick={() => void runComfy("test")} type="button">
+                      {comfyBusy === "test" ? uiText("ui.comfyui.testBusy", uiLanguage) : uiText("ui.comfyui.testAction", uiLanguage)}
+                    </button>
+                    <button disabled={comfyBusy !== null} onClick={() => void runComfy("save")} type="button">
+                      {comfyBusy === "save" ? uiText("ui.comfyui.saveBusy", uiLanguage) : uiText("ui.comfyui.saveAction", uiLanguage)}
+                    </button>
+                  </div>
+                </footer>
+              </>
+            ) : (
+              <p role="status">{comfyError ?? uiText("ui.comfyui.loading", uiLanguage)}</p>
+            )}
+          </section>
+
+          <section className="settings-card" data-testid="password-card">
+            <header><span>04</span><div><h3>{uiText("ui.password.cardTitle", uiLanguage)}</h3><p>{uiText("ui.password.cardBody", uiLanguage)}</p></div></header>
+            <div className="settings-form-grid">
+              <label>
+                <span>{uiText("ui.password.current", uiLanguage)}</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={passwordCurrent}
+                  onChange={(event) => setPasswordCurrent(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>{uiText("ui.password.new", uiLanguage)}</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  maxLength={128}
+                  value={passwordNext}
+                  onChange={(event) => setPasswordNext(event.target.value)}
+                />
+              </label>
+            </div>
+            {passwordNotice ? <div className="settings-notice is-success" role="status">{passwordNotice}</div> : null}
+            {passwordError ? <div className="settings-notice is-error" role="alert">{passwordError}</div> : null}
+            <footer>
+              <div className="settings-actions">
+                <button
+                  className="button-secondary"
+                  disabled={passwordBusy}
+                  onClick={() => void savePassword(true)}
+                  type="button"
+                >
+                  {uiText("ui.password.clear", uiLanguage)}
+                </button>
+                <button
+                  disabled={passwordBusy}
+                  onClick={() => void savePassword(false)}
+                  type="button"
+                >
+                  {passwordBusy ? uiText("ui.password.saveBusy", uiLanguage) : uiText("ui.password.saveAction", uiLanguage)}
+                </button>
+              </div>
+            </footer>
+          </section>
+
           <section className="settings-card settings-data-card">
-            <header><span>03</span><div><h3>{uiText("ui.settings.cardBoundaryTitle", uiLanguage)}</h3><p>{uiText("ui.settings.cardBoundaryBody", uiLanguage)}</p></div></header>
+            <header><span>05</span><div><h3>{uiText("ui.settings.cardBoundaryTitle", uiLanguage)}</h3><p>{uiText("ui.settings.cardBoundaryBody", uiLanguage)}</p></div></header>
             <div className="settings-data-boundary">
               <section>
                 <p className="eyebrow">{uiText("ui.settings.boundarySend", uiLanguage)}</p>
@@ -475,6 +694,25 @@ export function ModelSettingsClient() {
       </main>
     </div>
   );
+}
+
+function parseComfyEnvelope(value: unknown): ComfySnapshot | null {
+  if (!isObject(value) || value.ok !== true || !isObject(value.settings)) return null;
+  const settings = value.settings;
+  if (
+    typeof settings.enabled !== "boolean"
+    || typeof settings.baseUrl !== "string"
+    || typeof settings.requestTimeoutMs !== "number"
+    || typeof settings.workflowId !== "string"
+    || typeof settings.apiKeyConfigured !== "boolean"
+  ) return null;
+  return {
+    enabled: settings.enabled,
+    baseUrl: settings.baseUrl,
+    requestTimeoutMs: settings.requestTimeoutMs,
+    workflowId: settings.workflowId,
+    apiKeyConfigured: settings.apiKeyConfigured,
+  };
 }
 
 function toDraft(settings: PublicModelProviderSettings): SettingsState {

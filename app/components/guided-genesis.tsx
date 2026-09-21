@@ -17,7 +17,7 @@ import type {
 
 /**
  * AI 引导创建：全屏分步问答。
- * 规范见 public documentation。
+ * 规范见 docs/development/UI-GUIDED-GENESIS.md。
  */
 
 import {

@@ -854,7 +854,7 @@ test("dual codec round-trip: camel→snake keys and all value kinds", () => {
 // D.7 export-matrix 围栏
 // ---------------------------------------------------------------------------
 
-test("export-matrix fences: 63-table diff / text[] list / scope sets", async () => {
+test("export-matrix fences: 65-table diff / text[] list / scope sets", async () => {
   const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
   const tablePattern = /CREATE TABLE IF NOT EXISTS ([a-z_]+)/g;
   const actual = new Set<string>();
@@ -866,9 +866,9 @@ test("export-matrix fences: 63-table diff / text[] list / scope sets", async () 
   }
   // 0042 已入库：5 个规划表成为实有表（56+5=61，planned 集合为空）。
   const planned: string[] = [];
-  assert.equal(actual.size, 63, `实有表应为 63（56+0042 五表+0045 大厅两表；0046 不加表），实际 ${actual.size}`);
+  assert.equal(actual.size, 65, `实有表应为 65（56+0042 五表+0045 大厅两表+0048 场景图台账+0050 自动请求队列；0046/0049 不加表），实际 ${actual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 63, `矩阵应为 63 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 65, `矩阵应为 65 行，实际 ${matrixTables.size}`);
   for (const table of [...actual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }

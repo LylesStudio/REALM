@@ -1,6 +1,6 @@
 /**
  * 批次 T11-A2——图谱失效账本 + graph-specific SSE（规范
- * public documentation §六）。
+ * docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md §六）。
  * 真实临时 PG 库（t.after 强制拆库，迁移 0001–0024 全链）：
  * 事件 schema/cursor 单调；写事务成功产生事件、回滚不产生事件；
  * Last-Event-ID 重放/去重、跨 world/worldline/workspace 不泄露；
@@ -13,6 +13,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
 import { GET as graphEventsGET } from "../app/api/world-knowledge/events/route.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
 import {
   POSTGRES_DEMO_IDS,
   createPostgresCanonRepository,
@@ -100,6 +101,8 @@ test(
     const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
     const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
     process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
+    // 新门禁：runtime DB 存在即要求账户会话（0051 后语义）。
+    const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
     delete process.env.REALM_ACCESS_TOKEN;
 
     t.after(async () => {
@@ -324,18 +327,18 @@ test(
 
     // 路由参数与成员边界：缺 worldId 400、非法 Last-Event-ID 400、未知世界 404。
     const missingWorldId = await graphEventsGET(
-      new Request("http://localhost/api/world-knowledge/events"),
+      new Request("http://localhost/api/world-knowledge/events", { headers: { cookie: sessionCookie } }),
     );
     assert.equal(missingWorldId.status, 400);
     const badCursor = await graphEventsGET(
       new Request(
         `http://localhost/api/world-knowledge/events?worldId=${SCOPE.worldId}`,
-        { headers: { "Last-Event-ID": "abc" } },
+        { headers: { cookie: sessionCookie, "Last-Event-ID": "abc" } },
       ),
     );
     assert.equal(badCursor.status, 400);
     const unknownWorld = await graphEventsGET(
-      new Request("http://localhost/api/world-knowledge/events?worldId=world_nope"),
+      new Request("http://localhost/api/world-knowledge/events?worldId=world_nope", { headers: { cookie: sessionCookie } }),
     );
     assert.equal(unknownWorld.status, 404);
 
@@ -347,7 +350,7 @@ test(
       new Request(
         `http://localhost/api/world-knowledge/events?worldId=${SCOPE.worldId}`,
         {
-          headers: { "Last-Event-ID": String(maxCursor) },
+          headers: { "Last-Event-ID": String(maxCursor), cookie: sessionCookie },
           signal: controller.signal,
         },
       ),

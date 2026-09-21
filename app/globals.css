@@ -19,6 +19,16 @@
   --semantic-action: #526b50;
   --semantic-dialogue: #9b4938;
   --white: #fffdf8;
+  /* 内容表面与编辑控件：夜间主题不能只翻转页面底色，
+     文本和表面必须成对切换，避免浅色控件上叠浅色文字。 */
+  --surface: #fffdf8;
+  --field-bg: #fffdf8;
+  --field-text: #20231f;
+  --field-placeholder: #7a7c72;
+  --field-disabled-bg: #ded7c7;
+  --field-disabled-text: #7a7c72;
+  --field-option-bg: #fffdf8;
+  --field-option-text: #20231f;
   /* 深色块（chrome/primary chip）与其上文字：独立于 --ink/--paper，
      夜间主题翻转纸墨色时不随动。 */
   --chip: #20231f;
@@ -90,6 +100,14 @@
   --semantic-action: #7fa176;
   --semantic-dialogue: #c0705c;
   --white: #f4f1e8;
+  --surface: #1b1e26;
+  --field-bg: #1b1e26;
+  --field-text: #e9e5da;
+  --field-placeholder: #aaa99f;
+  --field-disabled-bg: #20262c;
+  --field-disabled-text: #8c887c;
+  --field-option-bg: #1b1e26;
+  --field-option-text: #e9e5da;
   --chip: #0d1016;
   --onchip: #e9e5da;
   --chrome-line: #343a47;
@@ -128,6 +146,11 @@
   --shadow: rgba(0, 0, 0, 0.45);
   --shadow-strong: rgba(0, 0, 0, 0.6);
   --grid-line: rgba(233, 229, 218, 0.03);
+  /* 场景氛围背景的夜间强度：深色纸面遮罩略强，保证文本对比度不被压低。 */
+  --record-scene-veil-strength: 84%;
+  --record-scene-edge-strength: 21%;
+  --record-scene-edge-strength-soft: 13%;
+  --record-scene-plate-strength: 30%;
   color-scheme: dark;
 }
 
@@ -200,6 +223,32 @@ input,
 select {
   color: inherit;
   font: inherit;
+}
+
+textarea,
+input:not([type="radio"]):not([type="checkbox"]):not([type="file"]),
+select {
+  background-color: var(--field-bg);
+  color: var(--field-text);
+}
+
+textarea::placeholder,
+input::placeholder {
+  color: var(--field-placeholder);
+  opacity: 1;
+}
+
+select option {
+  background: var(--field-option-bg);
+  color: var(--field-option-text);
+}
+
+textarea:disabled,
+input:disabled,
+select:disabled {
+  background-color: var(--field-disabled-bg);
+  color: var(--field-disabled-text);
+  opacity: 1;
 }
 
 button {
@@ -632,6 +681,27 @@ button:disabled {
 
 /* Main record */
 
+/*
+ * Record 聊天主区场景氛围背景 token（独立 :root 块：theme-night-contract 只
+ * 审计首个主题变量块，非颜色 token 不纳入夜间覆盖矩阵）。过滤/遮罩强度集中
+ * 在此，后续按世界/视觉风格替换时只改这一组；遮罩色跟随 --paper，
+ * 浅色/夜间自动同面，不压低文本对比度。
+ */
+:root {
+  --record-scene-image: url("/scenes/record-scene-v0.png");
+  --record-scene-opacity: 0.55;
+  --record-scene-saturate: 0.55;
+  --record-scene-contrast: 0.92;
+  --record-scene-veil-strength: 76%;
+  /* 古籍插图装裱：偏心径向纸边做旧（轻微不规则，非撕纸）+ 版心框线。
+     做旧色向 --paper-deep（浅=旧纸深边，夜=石墨深处），框线色取
+     --line-dark——两主题都朝“更暗的纸”收敛，对比度安全。 */
+  --record-scene-edge-strength: 15%;
+  --record-scene-edge-strength-soft: 9%;
+  --record-scene-plate-inset: 15px;
+  --record-scene-plate-strength: 24%;
+}
+
 .record-main {
   background: var(--main-bg);
   display: flex;
@@ -639,6 +709,75 @@ button:disabled {
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  position: relative;
+}
+
+/*
+ * Record 场景氛围背景（装饰层，aria-hidden）。
+ * 独立绝对层 + 前景纸面遮罩：::before 只承载图像（token 集中控制
+ * 不透明度/饱和度/对比度），::after 依次叠放纸边做旧（偏心径向渐变）、
+ * 均匀纸面遮罩与版心框线（负 offset outline）——强度全部走
+ * --record-scene-* token，浅色/夜间自动同面，不压低对比度。
+ * pointer-events 关闭，不参与布局（absolute），不改变滚动高度；
+ * heading/composer 自带不透明纸面，天然不被覆盖。
+ */
+.record-scene-bg {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+.record-scene-bg::before {
+  background-image: var(--record-scene-image);
+  background-position: center 30%;
+  background-size: cover;
+  content: "";
+  filter: saturate(var(--record-scene-saturate)) contrast(var(--record-scene-contrast));
+  inset: 0;
+  opacity: var(--record-scene-opacity);
+  position: absolute;
+}
+
+.record-scene-bg::after {
+  background:
+    /* 纸边做旧：两组偏心径向渐变叠加（边缘轻微不规则；中心保持通透）。
+       色相向 --paper-deep 收敛——浅色是旧纸深边、夜间是石墨暗角。 */
+    radial-gradient(
+      118% 92% at 46% 38%,
+      transparent 62%,
+      color-mix(in srgb, var(--paper-deep) var(--record-scene-edge-strength), transparent)
+    ),
+    radial-gradient(
+      126% 100% at 57% 66%,
+      transparent 68%,
+      color-mix(in srgb, var(--paper-deep) var(--record-scene-edge-strength-soft), transparent)
+    ),
+    /* 均匀纸面遮罩（不改变既有文字区对比度）。 */
+    linear-gradient(
+      color-mix(in srgb, var(--paper) var(--record-scene-veil-strength), transparent),
+      color-mix(in srgb, var(--paper) var(--record-scene-veil-strength), transparent)
+    );
+  content: "";
+  inset: 0;
+  /* 版心框线：负 offset outline 收进层内缘，1px 细线、低存在感的装裱感。 */
+  outline: 1px solid color-mix(in srgb, var(--line-dark) var(--record-scene-plate-strength), transparent);
+  outline-offset: calc(-1 * var(--record-scene-plate-inset));
+  position: absolute;
+}
+
+/* 背景层之上的内容前景：record-main 的直接子节点当前全部是 in-flow
+   块（无 absolute/fixed），统一抬升；新增直接子节点时沿用同一约束。 */
+.record-main > :not(.record-scene-bg) {
+  position: relative;
+  z-index: 1;
+}
+
+/* 场景图 auto popover 在 header 内向下展开，必须压过同 z-1 的后续面板
+   （self-play/timeline）；写在毯规则之后（同优先级靠后序生效）。 */
+.record-main > .record-heading {
+  z-index: 2;
 }
 
 .record-heading {
@@ -663,6 +802,62 @@ button:disabled {
   color: var(--ink-faint);
   font-size: 11px;
   margin: 7px 0 0;
+}
+
+/* 场景图生成状态条（Stage 3）：与 record-subtitle 同一字级/色阶。 */
+.record-scene-status {
+  color: var(--ink-faint);
+  font-size: 11px;
+  margin: 7px 0 0;
+}
+
+/* 自动场景图模式控制（0049）：直角纸墨 popover，无圆角/玻璃。 */
+.scene-auto-control {
+  position: relative;
+}
+
+.scene-auto-menu {
+  background: var(--paper);
+  border: 1px solid var(--line-dark);
+  min-width: 220px;
+  padding: 8px 10px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+}
+
+.scene-auto-menu button {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  display: block;
+  font-size: 12px;
+  padding: 6px 4px;
+  text-align: left;
+  width: 100%;
+}
+
+.scene-auto-menu button.is-selected {
+  background: var(--paper-active);
+}
+
+.scene-auto-menu button:hover:not(:disabled) {
+  background: var(--paper-soft);
+}
+
+.scene-auto-note {
+  color: var(--ink-faint);
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+
+.scene-auto-notice {
+  color: var(--ink-soft);
+  font-size: 10px;
+  margin: 6px 0 0;
 }
 
 .record-heading-actions {
@@ -1005,7 +1200,7 @@ button:disabled {
 }
 
 .event-card > article {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line);
   box-shadow: 3px 3px 0 rgba(32, 35, 31, 0.06);
   margin-left: 19px;
@@ -1470,7 +1665,7 @@ button:disabled {
 }
 
 .composer-row textarea {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   border-left: 0;
   border-right: 0;
@@ -1585,7 +1780,7 @@ button:disabled {
 }
 
 .affordance-list > button {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line);
   color: var(--ink);
   display: grid;
@@ -1698,7 +1893,7 @@ button:disabled {
 }
 
 .visibility-proposal-actions button {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   font-size: 10px;
@@ -1985,7 +2180,7 @@ button:disabled {
 
 .memory-card .memory-summarize {
   align-self: flex-start;
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   font-size: 9px;
@@ -2364,7 +2559,7 @@ button:disabled {
 
 .settings-form-grid input,
 .settings-form-grid select {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   border-radius: 0;
   height: 42px;
@@ -2489,7 +2684,7 @@ button:disabled {
 }
 
 .model-list-toolbar input {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   border-radius: 0;
   height: 38px;
@@ -2514,7 +2709,7 @@ button:disabled {
 
 .model-list label {
   align-items: center;
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line);
   display: grid;
   gap: 10px;
@@ -2797,7 +2992,7 @@ button:disabled {
 @media (max-width: 720px) {
   .app-header {
     flex: 0 0 94px;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 58%);
     /* 第二行放紧凑面包屑：窄屏不再丢失 世界/故事/记录 视图切换。 */
     grid-template-rows: 60px 34px;
   }
@@ -2813,7 +3008,7 @@ button:disabled {
   }
 
   .breadcrumb {
-    border-top: 1px solid rgb(245 241 232 / 18%);
+    border-top: 1px solid var(--chrome-line);
     display: flex;
     gap: 6px;
     grid-column: 1 / -1;
@@ -2839,15 +3034,32 @@ button:disabled {
   }
 
   .view-mode {
-    display: inline !important;
+    display: none !important;
   }
 
   .header-status {
-    padding-right: 12px;
+    gap: 5px;
+    min-width: 0;
+    overflow-x: auto;
+    padding-left: 6px;
+    padding-right: 8px;
+    scrollbar-width: none;
+  }
+
+  .header-status::-webkit-scrollbar {
+    display: none;
+  }
+
+  .header-settings-link {
+    flex: 0 0 auto;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    padding: 6px 7px;
   }
 
   .header-status > span {
-    padding: 6px 8px;
+    flex: 0 0 auto;
+    padding: 6px 7px;
   }
 
   .realm-grid {
@@ -3251,7 +3463,7 @@ button:disabled {
 .library-fields input,
 .library-fields select,
 .library-fields textarea {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -3409,7 +3621,7 @@ button:disabled {
 
 .guided-entry {
   align-items: center;
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   box-shadow: 3px 3px 0 rgba(32, 35, 31, 0.08);
   color: var(--ink);
@@ -3513,7 +3725,7 @@ button:disabled {
 .onboarding-worlds li button,
 .onboarding-worlds li .onboarding-world-empty {
   align-items: baseline;
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line);
   color: var(--ink);
   display: flex;
@@ -3810,7 +4022,7 @@ button:disabled {
 }
 
 .guided-review-scroll {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   box-shadow: 3px 3px 0 rgba(32, 35, 31, 0.08);
   display: grid;
@@ -4032,7 +4244,7 @@ button:disabled {
 }
 
 .graph-canvas {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   flex: 1;
   min-height: 320px;
@@ -4041,7 +4253,7 @@ button:disabled {
 
 .graph-canvas-empty {
   align-items: center;
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   display: flex;
   flex-direction: column;
@@ -4149,7 +4361,7 @@ button:disabled {
 
 .graph-side {
   border: 1px solid var(--line-dark);
-  background: var(--white);
+  background: var(--surface);
   box-shadow: 3px 3px 0 rgba(32, 35, 31, 0.08);
   min-height: 0;
   overflow-y: auto;
@@ -4279,7 +4491,7 @@ button:disabled {
 .graph-edit-form input,
 .graph-edit-form textarea,
 .graph-edit-form select {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   font-size: 13px;
@@ -4380,7 +4592,7 @@ button:disabled {
 }
 
 .canon-mapping-form select {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   min-height: 30px;
@@ -4473,7 +4685,7 @@ button:disabled {
 }
 
 .login-card input {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   color: var(--ink);
   font-size: 14px;
@@ -4605,7 +4817,7 @@ button:disabled {
 
 .chat-turn {
   border: 1px solid var(--line);
-  background: var(--white);
+  background: var(--surface);
   padding: 8px 11px;
   text-align: left;
 }
@@ -4655,7 +4867,7 @@ button:disabled {
 
 .genesis-chat-silent button {
   border: 1px solid var(--ink);
-  background: var(--white);
+  background: var(--surface);
   cursor: pointer;
   font-size: 12px;
   padding: 5px 12px;
@@ -4669,7 +4881,7 @@ button:disabled {
 }
 
 .genesis-chat-form input {
-  background: var(--white);
+  background: var(--surface);
   border: 1px solid var(--line-dark);
   flex: 1;
   font: inherit;
@@ -4697,7 +4909,7 @@ button:disabled {
 
 .genesis-proposal-card {
   border: 1px solid var(--line-dark);
-  background: var(--white);
+  background: var(--surface);
   box-shadow: 4px 4px 0 rgba(32, 35, 31, 0.08);
   display: flex;
   flex-direction: column;

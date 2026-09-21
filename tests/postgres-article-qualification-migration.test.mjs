@@ -1,6 +1,6 @@
 /**
  * Article qualification G1——0041 隔离应用验证（plan v10 §7 G1）。
- * 全部在 loopback 临时库（finally DROP；绝不触碰共享 realm_test）：
+ * 全部在 loopback 临时库（finally DROP；绝不触碰共享 realm_dev）：
  * DB-A（真实 scripts/postgres-migrate.mjs 应用 0001–0041 全链）：
  *   ① pgcrypto 扩展、两表、复合 FK、全部具名 CHECK、append-only 触发器、
  *      FORCE RLS + policy、realm_runtime 最小 grants 实查；

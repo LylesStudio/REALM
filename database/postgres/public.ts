@@ -21,6 +21,20 @@ export {
   type PostgresDeliveryProjectionRepository,
 } from "./delivery-projection.ts";
 export {
+  createPostgresSceneImageStore,
+  type SceneImageGeneration,
+  type SceneImageGenerationStatus,
+  type SceneImageStore,
+} from "./scene-image-store.ts";
+export {
+  createPostgresSceneImageQueue,
+  SceneImageQueueError,
+  type SceneImageQueue,
+  type SceneImageRequest,
+  type SceneImageRequestStatus,
+  type SceneImageRequestTrigger,
+} from "./scene-image-queue.ts";
+export {
   POSTGRES_DEMO_IDS,
   seedPostgresDemo,
   seedPostgresDemoPropagationTopology,
@@ -77,7 +91,10 @@ export {
 } from "./propagation-topology.ts";
 export { createPostgresPropagationJobQueue } from "./propagation-job-queue.ts";
 export { createPostgresSemanticConflictEvidenceStore } from "./semantic-conflict-repository.ts";
-export { createPostgresAccountRepository } from "./account-repository.ts";
+export {
+  AccountAuthError,
+  createPostgresAccountRepository,
+} from "./account-repository.ts";
 export {
   createPostgresSceneCrystallizationStore,
   sceneCrystallizationDigest,

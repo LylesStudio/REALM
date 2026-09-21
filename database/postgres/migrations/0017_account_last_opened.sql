@@ -1,5 +1,5 @@
 -- REALM Account Last Opened
--- 批次 S（public documentation）：账号级「最近打开」记忆。
+-- 批次 S（docs/development/WORLD-ONBOARDING.md）：账号级「最近打开」记忆。
 -- 默认入口 GET /api/record 读取 accounts.last_record_id；无记忆时前端进入
 -- 创世引导。列模式沿用批次 Q（0015）：用户级列 + realm_runtime 最小列级授权。
 

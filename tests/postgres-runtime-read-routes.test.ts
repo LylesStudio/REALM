@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B8-A——残余 owner-pool 读路由下沉（files/[id]、settings/language、
- * auth/me）focused 测试（public documentation §五）。
+ * auth/me）focused 测试（docs/development/T10-B8-A-RUNTIME-READ-ROUTES.md §五）。
  * 真实临时 PG（库名 realm_t10b8_*，t.after 强制 DROP）：文件成员隔离与
  * immutable 响应头、语言写回、auth/me gate 两态与 best-effort 回落；
  * 全程 REALM_RUNTIME_DATABASE_URL 受限角色池，零 owner 引用。
@@ -211,8 +211,9 @@ test(
       "非法语言值回落默认中文",
     );
 
-    // gate 关闭：本地单用户应答，不触 DB。
-    delete process.env.REALM_ACCESS_TOKEN;
+    // gate 关闭（0051 后语义：runtime DB 缺席 = 本地单用户回落，不触 DB）。
+    const savedRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
+    delete process.env.REALM_RUNTIME_DATABASE_URL;
     const local = await meGET(new Request("http://localhost/api/auth/me"));
     assert.equal(local.status, 200);
     const localBody = (await local.json()) as {
@@ -221,6 +222,6 @@ test(
     };
     assert.equal(localBody.gated, false);
     assert.equal(localBody.principalId, "principal_demo_player");
-    process.env.REALM_ACCESS_TOKEN = "t10b8-gate-token";
+    process.env.REALM_RUNTIME_DATABASE_URL = savedRuntimeUrl!;
   },
 );

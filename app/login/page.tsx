@@ -6,15 +6,17 @@ import { LanguageMenu } from "../components/language-menu.tsx";
 import { readUiLanguage, subscribeUiLanguage } from "../ui-language.ts";
 
 export default function LoginPage() {
-  const [token, setToken] = useState("");
+  const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   // 登录页在会话之外：SSR/首帧恒为默认中文（hydration 安全），
   // 挂载后读取本机语言或按浏览器/系统检测，并订阅切换广播。
   const [language, setLanguage] = useState<UiLanguage>("zh-CN");
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration-safe 首帧后同步本机语言
     setLanguage(readUiLanguage());
+    setHydrated(true);
     return subscribeUiLanguage(() => setLanguage(readUiLanguage()));
   }, []);
   const [busy, setBusy] = useState(false);
@@ -27,14 +29,14 @@ export default function LoginPage() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ token, displayName }),
+        body: JSON.stringify({ displayName, password }),
       });
       const payload = (await response.json()) as {
         ok: boolean;
         error?: { message?: string };
       };
       if (!response.ok || !payload.ok) {
-        setError(payload.error?.message ?? "登录没有成功，请重试。");
+        setError(payload.error?.message ?? uiText("ui.login.error", language));
         return;
       }
       const returnTo = new URLSearchParams(window.location.search).get("return_to");
@@ -51,7 +53,7 @@ export default function LoginPage() {
       <div className="login-language-corner">
         <LanguageMenu uiLanguage={language} />
       </div>
-      <form className="login-card" onSubmit={submit}>
+      <form className="login-card" data-hydrated={hydrated ? "true" : "false"} onSubmit={submit}>
         <div className="login-brand">
           <span className="brand-seal" aria-hidden="true">界</span>
           <div>
@@ -66,16 +68,6 @@ export default function LoginPage() {
           <div className="settings-notice is-error" role="alert">{error}</div>
         ) : null}
         <label>
-          {uiText("ui.login.token", language)}
-          <input
-            autoComplete="off"
-            onChange={(event) => setToken(event.target.value)}
-            required
-            type="password"
-            value={token}
-          />
-        </label>
-        <label>
           {uiText("ui.login.name", language)}
           <input
             maxLength={40}
@@ -84,7 +76,17 @@ export default function LoginPage() {
             value={displayName}
           />
         </label>
-        <button disabled={busy} type="submit">
+        <label>
+          {uiText("ui.login.password", language)}
+          <input
+            autoComplete="current-password"
+            maxLength={128}
+            onChange={(event) => setPassword(event.target.value)}
+            type="password"
+            value={password}
+          />
+        </label>
+        <button disabled={busy || !hydrated} type="submit">
           {busy ? uiText("ui.login.busy", language) : uiText("ui.login.submit", language)}
         </button>
       </form>

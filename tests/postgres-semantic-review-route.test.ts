@@ -19,6 +19,10 @@ import {
 } from "../database/postgres/public.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createWorldKnowledgeService } from "../modules/world-knowledge/public.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
+
+// 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
+const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -141,7 +145,7 @@ test(
       "http://localhost/api/worldline/conflict/semantic",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           worldId: SCOPE.worldId,
           existingFuture: { tick: 5, ordinal: 0 },
@@ -201,7 +205,7 @@ test(
       "http://localhost/api/worldline/conflict/semantic",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           worldId: SCOPE.worldId,
           existingFuture: { tick: 5, ordinal: 0 },
@@ -229,7 +233,7 @@ test(
       "http://localhost/api/worldline/conflict/semantic",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           worldId: "world_nope",
           existingFuture: { tick: 5, ordinal: 0 },
@@ -242,7 +246,7 @@ test(
       "http://localhost/api/worldline/conflict/semantic",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({ existingFuture: { tick: 5, ordinal: 0 }, changeSet: { changes: [{ kind: "assert", subjectEntityId: "e", predicate: "p", objectValue: "v", effectiveCursor: { tick: 1, ordinal: 0 } }] } }),
       },
     ));
@@ -257,7 +261,7 @@ test(
       "http://localhost/api/worldline/conflict",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           pastChange: { tick: 1, ordinal: 0 },
           existingFuture: { tick: 5, ordinal: 0 },
@@ -273,7 +277,7 @@ test(
       "http://localhost/api/worldline/conflict",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "causal",
           worldId: SCOPE.worldId,

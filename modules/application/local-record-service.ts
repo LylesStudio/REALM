@@ -12,6 +12,8 @@ import {
   createPostgresRuntimeRepository,
   createPostgresRecordRuntimeScopeRepository,
   createPostgresSceneCrystallizationStore,
+  createPostgresSceneImageStore,
+  createPostgresSceneImageQueue,
   type PlayerDeliveryScope,
   type PostgresDeliveryProjectionRepository,
   type PostgresFormalEventMappingContext,
@@ -21,6 +23,8 @@ import {
   type RecordRuntimeScopeRepository,
   type RuntimeActor,
   type SceneCrystallizationStore,
+  type SceneImageQueue,
+  type SceneImageStore,
 } from "../../database/postgres/public.ts";
 import {
   RuntimeIdempotencyConflictError,
@@ -38,6 +42,11 @@ import {
   createTurnControl,
   type TurnControl,
 } from "../runtime/turn-control.ts";
+import {
+  createSceneImageAutoTrigger,
+  deltaChangesScene,
+  type SceneImageAutoTrigger,
+} from "./scene-image-trigger.ts";
 import {
   fallbackCompositeSemanticSegments,
   semanticPresentation,
@@ -357,6 +366,25 @@ export interface LocalRecordEnvelope {
     beatsCompleted: number;
     lastError: string | null;
   } | null;
+  /**
+   * 场景建立图（Stage 3）：当前 Record 最新 ready 场景背景；无图 → null
+   * （完全向后兼容）。fileUrl 恒为服务端生成的 /api/files/<id> 相对路径，
+   * 绝不携带 provider 远端 URL/路径。
+   */
+  sceneImage?: {
+    fileId: string;
+    fileUrl: string;
+    status: "ready";
+  } | null;
+  /**
+   * 场景图自动请求状态（0050 队列最新行的安全摘要：queued/running/ready/
+   * failed + triggerKind）；不透出 prompt_id/provider 路径/body/key。
+   * 无请求 → null（完全向后兼容）。
+   */
+  sceneImageJob?: {
+    status: "queued" | "running" | "ready" | "failed";
+    triggerKind: "scene_change" | "every_turn";
+  } | null;
 }
 
 export interface SubmitLocalMessageInput {
@@ -670,6 +698,18 @@ export interface LocalRecordServiceDependencies {
     consume(recordId: string, characterInstanceId: string): string;
     end(handle: MemoryPrefetchHandle): void;
   };
+  /**
+   * 场景建立图（Stage 3）：最新 ready 背景读取；缺省不启用（既有测试
+   * 零变化），读取失败 fail-closed 为 null（绝不影响信封主路径）。
+   */
+  sceneImageStore?: Pick<SceneImageStore, "findLatestReady">;
+  /** 自动模式请求状态（0050 队列最新行）；缺省不启用（内存测试零变化）。 */
+  sceneImageQueue?: Pick<SceneImageQueue, "findLatestForRecord">;
+  /**
+   * 场景图自动模式（0049/0050）：玩家回合/场景变化后的幂等入队触发器；
+   * 缺省不启用（内存测试零变化）。
+   */
+  sceneImageAuto?: SceneImageAutoTrigger;
   /**
    * 批次 T3 在场：回合后在场门禁；缺省不启用（内存测试零变化）。
    * factory 与单实例二选一，factory 优先（可携带 scope 的 brief/style）。
@@ -1017,7 +1057,7 @@ export function createLocalRecordService(
   }
 
   /**
-   * 批次 T3 角色在场（public documentation §2.1）：
+   * 批次 T3 角色在场（docs/development/T3-CHARACTER-PRESENCE.md §2.1）：
    * public 回合提交后，确定性抽取触发素材 → 候选过滤 → 模型门禁 →
    * 若裁决发声则取发言租约执行 presence 回合。任何失败只留日志，
    * 绝不影响玩家回合（F9）。
@@ -1502,7 +1542,7 @@ export function createLocalRecordService(
   }
 
   /**
-   * 设定结晶（public documentation）：
+   * 设定结晶（docs/development/SCENE-CRYSTALLIZATION.md）：
    * 回合成功后异步提取场景增量并经逻辑一致性裁决后才写回；
    * 任一环节失败都只留日志，绝不中断或污染玩家回合。
    * 同一次结构化提取还带出 bounded 的世界知识/人物设定 growth
@@ -1634,6 +1674,17 @@ export function createLocalRecordService(
       // P0 写点守护⑤：graph inflow（applyDelta 后的实体/claims 写入）前——
       // stale 不得继续扩大写面。
       if (!isCurrentGeneration()) return;
+      // 场景图自动模式（scene_change，0049/0050）：晶化真正写出且 delta 含
+      // 场景字段才入队（source = 晶化事件 id，幂等证据）；拒绝/无场景变化/
+      // 失败不触发。self-play 产生的新场景按同一规则触发（方案 §2）。
+      if (deltaChangesScene(finalDelta)) {
+        void dependencies.sceneImageAuto?.afterSceneChange({
+          runtimeScope: input.runtimeScope,
+          sceneId: written.sceneId,
+          principalId: input.principalId ?? input.runtimeScope.principalId,
+          sourceEventId: written.eventId,
+        });
+      }
       // 批次 T9 晶化入图谱（缺陷 #14 产生侧）：晶化主事务成功后的独立
       // best-effort 步骤——世界本体实体 upsert 幂等 + 白名单谓词 Claim
       // （record 级 record_confirmed，来源=结晶事件）；任何失败只留日志，
@@ -2193,6 +2244,14 @@ export function createLocalRecordService(
             // growth 仅公共回合落库；来源事件供审计追踪。
             visibility: visibility.plan,
             sourceEventId: playerSourceEventId(run) ?? undefined,
+          });
+          // 场景图自动模式（every_turn，0049/0050）：成功 committed 非 replay
+          // 玩家回合后幂等入队（source = 提交幂等键）；模式读取触发
+          // principal 的账号偏好；入队失败只留日志，绝不阻塞回合。
+          void dependencies.sceneImageAuto?.afterPlayerTurn({
+            runtimeScope,
+            principalId: input.principalId ?? runtimeScope.principalId,
+            sourceEventId: input.idempotencyKey,
           });
         }
         return {
@@ -2998,11 +3057,46 @@ async function loadConsistentEnvelope(
   // 互相无数据依赖，并行发起。提交后快照仍单独重读（writeToken 依赖新
   // canonicalVersion），不新增任何 SQL/query；firstNight 懒调度与
   // selfPlay failStale→findLatest、warn→null 语义均保持不变。
-  const [snapshot, affordances, firstNight, selfPlay] = await Promise.all([
+  // 场景图（Stage 3）：latest ready 背景随信封透出；缺 store（内存测试）
+  // 或读取失败一律 fail-closed null，绝不影响信封主路径。
+  const sceneImageStore = dependencies.sceneImageStore;
+  const sceneImageQueue = dependencies.sceneImageQueue;
+  const [snapshot, affordances, firstNight, selfPlay, sceneImage, sceneImageJob] = await Promise.all([
     loadConsistentSnapshot(dependencies, recordId, principalId),
     listAuthorizedAffordances(actionCatalog, scope),
     loadFirstNightState(dependencies, recordId),
     loadSelfPlayState(dependencies, recordId),
+    sceneImageStore
+      ? sceneImageStore
+        .findLatestReady({ workspaceId: scope.workspaceId, recordId })
+        .then((generation) =>
+          generation?.fileId
+            ? {
+              fileId: generation.fileId,
+              fileUrl: `/api/files/${generation.fileId}`,
+              status: "ready" as const,
+            }
+            : null
+        )
+        .catch(() => null)
+      : Promise.resolve(null),
+    sceneImageQueue
+      ? sceneImageQueue
+        .findLatestForRecord({ workspaceId: scope.workspaceId, recordId })
+        .then((request) =>
+          request
+            ? {
+              status: request.status === "leased"
+                ? "running" as const
+                : request.status === "completed"
+                  ? "ready" as const
+                  : request.status,
+              triggerKind: request.triggerKind,
+            }
+            : null
+        )
+        .catch(() => null)
+      : Promise.resolve(null),
   ]);
   return {
     record: snapshot.projection,
@@ -3015,6 +3109,8 @@ async function loadConsistentEnvelope(
     suggestions: snapshot.suggestions,
     firstNight,
     selfPlay,
+    sceneImage,
+    sceneImageJob,
   };
 }
 
@@ -3468,6 +3564,14 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
         }
       : {}),
     runtimeScopeProvider: createPostgresRecordRuntimeScopeRepository(pool),
+    // 场景建立图（Stage 3）：envelope 透出 latest ready 背景（0048 台账）。
+    sceneImageStore: createPostgresSceneImageStore(pool),
+    // 场景图自动模式（0049/0050）：账号级模式 + 幂等队列触发器。
+    sceneImageAuto: createSceneImageAutoTrigger({
+      queue: createPostgresSceneImageQueue(pool),
+      accounts: createPostgresAccountRepository(pool),
+    }),
+    sceneImageQueue: createPostgresSceneImageQueue(pool),
     actionCatalog: createPostgresActionAffordanceCatalog(pool),
     sceneCrystallizationStore: createPostgresSceneCrystallizationStore(pool),
     sceneCrystallizer: createSceneCrystallizer({

@@ -1,31 +1,29 @@
 # Security Policy
 
-## Supported scope
+## 当前支持范围
 
-The public REALM snapshot is a self-hosted single-user / research preview. It is not a public multi-tenant service. Do not expose a default development instance directly to the internet.
+REALM 当前公开准备版本是 self-hosted single-user / research preview。
+公网多人服务尚未作为稳定产品提供，因此不要把未审计的实例直接暴露到互联网。
 
-The operator is responsible for network placement, PostgreSQL access, backups, model-provider configuration, authentication in front of the service, rate limits, cost controls, retention, and deletion.
+## 报告安全问题
 
-## Reporting a vulnerability
+请不要在公开 Issue 中发布可利用细节、访问令牌、数据库内容、模型密钥或真实用户数据。
 
-Please do not publish exploitable details, credentials, database contents, model keys, private network addresses, or real user data in a public issue.
+优先使用 GitHub 的 **Private vulnerability reporting / Security Advisory** 提交；如果目标仓库尚未启用该功能，请先通过维护者公开主页提供的私下渠道联系维护者，并附上：
 
-For the GitHub repository, use a private security report or security advisory when available. If private reporting is not enabled, contact the maintainer through a private channel listed on the maintainer profile and include:
+- 受影响的 commit 或版本；
+- 可重复的最小步骤；
+- 影响范围；
+- 建议的修复方向。
 
-- the affected commit or version;
-- the smallest reproducible steps;
-- impact and affected boundary;
-- a suggested mitigation, if known.
+请对凭据、个人信息、玩家输入和世界内容进行脱敏。
 
-Please redact personal information, player input, world content, access tokens, and provider responses.
+## 已知边界
 
-## Known boundaries
+- 当前访问门禁和昵称身份模型面向本机/Beta，不等价于公网多租户认证。
+- 模型供应商、数据库和部署环境由运行者自行管理；不要把 secret 写入仓库、Issue、日志或模型 prompt。
+- 生产级限流、费用控制、数据保留和删除政策需要由部署者在公开服务前补齐。
 
-- The local access/session model is not a production public identity system.
-- Model providers and databases are operator-managed; secrets must stay outside Git, issues, logs, and model prompts.
-- PostgreSQL RLS and visibility projections are part of the runtime contract. Do not bypass them for convenience.
-- Production-grade hosted-service controls are not included in this research preview.
+## 依赖和供应链
 
-## Dependencies and supply chain
-
-Dependency updates must include the lockfile and should be reviewed in CI. A new runtime dependency should be justified in the pull request, including its source and license.
+依赖更新应通过锁文件提交，并在 CI 中运行完整测试。引入新的运行时依赖时，请在 Pull Request 中说明许可证、来源和必要性。

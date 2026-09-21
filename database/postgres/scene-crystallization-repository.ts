@@ -22,7 +22,7 @@ import { gateRecordActive, gateWorldWrite } from "./world-write-gate.ts";
 /**
  * 设定结晶写回仓储：仅裁决通过的增量落库（append-oriented），
  * 裁决拒绝写入 semantic_conflict_evaluations 审计。规范见
- * public documentation。
+ * docs/development/SCENE-CRYSTALLIZATION.md。
  */
 
 export interface SceneCrystallizationScope {
@@ -53,7 +53,7 @@ export interface SceneCrystallizationStore {
   applyDelta(
     scope: SceneCrystallizationScope,
     delta: SceneDelta,
-  ): Promise<{ eventId: string; tick: number; ordinal: number }>;
+  ): Promise<{ eventId: string; tick: number; ordinal: number; sceneId?: string }>;
   recordRejection(audit: SceneRejectionAudit): Promise<void>;
 }
 
@@ -335,6 +335,7 @@ export function createPostgresSceneCrystallizationStore(
           );
           return {
             eventId: newEventId,
+            sceneId: activeSceneId ?? undefined,
             tick: Number(tick),
             ordinal: Number(ordinal),
           };

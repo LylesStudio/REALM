@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B3：路由内部故障的脱敏结构化诊断
- * （public documentation）。
+ * （docs/development/T10-B3-ROUTE-OBSERVABILITY.md）。
  *
  * 字段白名单：route/stage/errorType/code。绝不输出连接串、环境变量值、
  * 凭据、error.message/stack（可能带连接串）、请求 payload、claim/source

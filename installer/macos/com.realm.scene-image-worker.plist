@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  REALM 场景图自动 Worker —— macOS LaunchAgent 用户级可选模板。
+
+  这是仓库模板，不会默认安装：只有用户显式选择“登录后后台运行 worker”
+  时才安装（安装/启用待 Iris 验收后由用户执行）。参考安装（当前用户
+  LaunchAgents，不需要管理员权限）：
+    cp installer/macos/com.realm.scene-image-worker.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.realm.scene-image-worker.plist
+  卸载：
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.realm.scene-image-worker.plist
+
+  安装前必须把 ProgramArguments 里的占位路径改成实际路径（node 可执行
+  文件与 REALM 仓库目录），WorkingDirectory 同理。本文件不含任何凭据；
+  worker 运行环境（loopback REALM_RUNTIME_DATABASE_URL）由仓库 .env.local
+  或用户环境提供，不写进 plist。
+
+  入口与 systemd / Task Scheduler 一致：跨平台 supervisor
+  launcher/scene-image-worker-host.mjs（启动、日志隔离、优雅停止、退出
+  传播同一套逻辑；PG advisory lock 兜底跨进程单实例）。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.realm.scene-image-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- TODO(用户): 改成实际 node 绝对路径，例如 /opt/homebrew/bin/node -->
+    <string>/Path/To/node</string>
+    <string>--env-file-if-exists=.env.local</string>
+    <!-- TODO(用户): 改成实际仓库路径下的 host 脚本 -->
+    <string>/Path/To/REALM/launcher/scene-image-worker-host.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <!-- TODO(用户): 改成实际 REALM 仓库目录 -->
+  <string>/Path/To/REALM</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <!-- 只在异常退出后由 launchd 拉起；正常 SIGTERM 停止不复活。 -->
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

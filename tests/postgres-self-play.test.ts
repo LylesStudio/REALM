@@ -1,6 +1,6 @@
 /**
  * 批次 T7 世界自演——PostgreSQL 集成测试
- * （public documentation §4.3）。
+ * （docs/development/T7-OBSERVATION-VISION.md §4.3）。
  * 覆盖：迁移 0020 应用与授权（realm_runtime 真实角色）、会话账本状态机
  * （start 幂等/拍记账/stop/finish/failStale/部分唯一索引/RLS 隔离）、
  * 自演拍经真实 PG 运行时落库（metadata.selfPlay 标记、头指针连续、无玩家事件）、

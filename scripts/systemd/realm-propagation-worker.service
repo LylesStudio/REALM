@@ -1,0 +1,26 @@
+# REALM 传播 Worker（批次 T11-B）——systemd 单元模板。
+#
+# 这是仓库模板，不是已安装单元：安装/启用待 Iris 验收后由用户执行，
+# 本批不得擅自安装或修改用户 systemd 单元。参考安装（用户级）：
+#   cp scripts/systemd/realm-propagation-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now realm-propagation-worker.service
+#
+# 与 realm-dev.service 分离生命周期；Worker 崩溃不影响 Web 请求池。
+
+[Unit]
+Description=REALM propagation worker (independent offline propagation consumer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lyle/works/REALM
+# 环境经 .env.local 装载（loopback runtime 连接串；不落任何凭据到本文件）。
+# node 用绝对路径（与 realm-dev.service 同源运行时）：user manager 的 PATH
+# 会经 mise shims 解析到其他主版本，/usr/bin/env node 不可靠。
+ExecStart=/home/lyle/.hermes/node/bin/node --env-file-if-exists=.env.local --experimental-strip-types scripts/propagation-worker.mjs
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

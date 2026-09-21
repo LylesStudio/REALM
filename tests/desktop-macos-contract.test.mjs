@@ -81,7 +81,7 @@ test("macOS child environment keeps loopback and bundled library boundaries", ()
       PATH: "/usr/bin",
       HOME: "/Users/demo",
       OPENAI_API_KEY: "must-not-cross",
-      DATABASE_URL: "postgresql://example.invalid/secret",
+      DATABASE_URL: "postgresql://private.example/secret",
     },
   });
   assert.equal(
@@ -90,7 +90,7 @@ test("macOS child environment keeps loopback and bundled library boundaries", ()
   );
   assert.equal(env.REALM_DATA_HOME, "/Users/demo/Library/Application Support/REALM");
   assert.equal("OPENAI_API_KEY" in env, false);
-  assert.equal("DATABASE_URL" in env && env.DATABASE_URL.includes("example.invalid"), false);
+  assert.equal("DATABASE_URL" in env && env.DATABASE_URL.includes("private.example"), false);
   for (const name of ["DATABASE_URL", "REALM_RUNTIME_DATABASE_URL", "REALM_TRANSFER_DATABASE_URL"]) {
     const url = new URL(env[name]);
     assert.equal(url.hostname, "127.0.0.1");

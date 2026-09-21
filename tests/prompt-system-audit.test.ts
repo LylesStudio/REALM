@@ -1,5 +1,5 @@
 /**
- * Prompt System v2 全量审计（public documentation）：
+ * Prompt System v2 全量审计（docs/development/PROMPT-SYSTEM.md）：
  * 1. 每条生产链的 system message 必须 English-only（无 CJK）；
  * 2. 动态中文世界资料/角色名/玩家原话只出现在 user context block；
  * 3. anti-AI（NATURAL_VOICE_RULES）只注入自然语言生成链，分类器没有；

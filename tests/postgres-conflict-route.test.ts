@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B2——/api/worldline/conflict causal 分支生产接线
- * （public documentation §四）。
+ * （docs/development/T10-B2-CONFLICT-DETECTION.md §四）。
  * 真实临时 PG 库（t.after 拆库，不污染开发库）：legacy 分支零回归；
  * causal 400/404 各态；成员请求从 DB 读事实（life_state 终止 hard 冲突、
  * dependency 依赖冲突、报告含 DB 独有 claim 证明非客户端注入）；全程零写库。
@@ -18,6 +18,10 @@ import { createPostgresLibraryService } from "../modules/application/library-ser
 import { createWorldKnowledgeService } from "../modules/world-knowledge/public.ts";
 import { POST } from "../app/api/worldline/conflict/route.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
+
+// 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
+const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -63,7 +67,7 @@ function quoteIdentifier(value: string): string {
 function postJson(body: unknown): Request {
   return new Request("http://localhost/api/worldline/conflict", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { cookie: sessionCookie, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }

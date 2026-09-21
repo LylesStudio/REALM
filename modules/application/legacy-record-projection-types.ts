@@ -5,7 +5,7 @@
  * segments/presence/dice/selfPlay）的唯一类型来源——不是
  * modules/story-record/public.ts 的 Core `RecordProjection`
  * （persistence-neutral 回合/上下文契约），两者同名不同语义，不得合并、
- * 不得互相 re-export（见 public documentation §一）。
+ * 不得互相 re-export（见 docs/development/T10-B12-A-PORTABLE-PROJECTION-TYPES.md §一）。
  *
  * 纯度约束：只允许 `import type` 依赖其他模块的纯类型；不得出现值导入，
  * 不得 import db/、drizzle、database/postgres 或 HTTP/路由层。

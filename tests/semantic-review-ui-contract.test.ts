@@ -1,6 +1,6 @@
 /**
  * 批次 T11-D——semantic review 操作面 UI/静态契约
- * （public documentation §五.2）。
+ * （docs/development/T11-D-SEMANTIC-REVIEW-OPERATOR-SURFACE.md §五.2）。
  * 纯函数层：三种 change kind 的 payload 形态、context 游标来源、结果白名单、
  * 错误码映射；静态层：面板不渲染内部 evidence 字段、无自动 merge、
  * 无轮询/自动 POST。全程不依赖真实模型输出。

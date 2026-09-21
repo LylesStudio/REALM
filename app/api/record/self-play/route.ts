@@ -12,7 +12,7 @@ import {
 export const runtime = "nodejs";
 
 /**
- * 批次 T7：世界自演控制面（public documentation §2.5）。
+ * 批次 T7：世界自演控制面（docs/development/T7-OBSERVATION-VISION.md §2.5）。
  * POST {recordId, action: "start" | "stop"}：
  * - start 幂等——活动会话在 → 返回现状不重复起拍；
  * - stop 幂等——在途拍跑完，拍边界收束 cancelled；无活动会话返回最近状态。

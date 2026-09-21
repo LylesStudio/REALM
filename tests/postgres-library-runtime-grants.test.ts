@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B7——迁移 0023 后 library/创世/导入全量下沉受限角色
- *（public documentation §五）。
+ *（docs/development/T10-B7-LIBRARY-RUNTIME-GRANTS.md §五）。
  * 双临时库（t.after 强制 DROP）：pre-0023 库记录授权缺口实锤，
  * 0023 库上 runtime-only 逐项真实成功；RLS 跨 workspace 隔离；
  * T6/T8 门禁不回退；路由层不再需要 DATABASE_URL。
@@ -21,6 +21,7 @@ import {
   GET as libraryGET,
   POST as libraryPOST,
 } from "../app/api/library/route.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -322,13 +323,15 @@ test(
     const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
     runtimeUrl.pathname = `/${post.databaseName}`;
     process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
+    // 新门禁：runtime DB 存在即要求账户会话（0051 后语义）。
+    const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
     delete process.env.DATABASE_URL;
     delete process.env.REALM_ACCESS_TOKEN;
     try {
       const created = await libraryPOST(
         new Request("http://localhost/api/library", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", cookie: sessionCookie },
           body: JSON.stringify({
             kind: "world",
             name: "无 owner 直连世界",
@@ -339,7 +342,7 @@ test(
       );
       assert.equal(created.status, 201, "world 创建不再需要 owner URL");
       const listed = await libraryGET(
-        new Request("http://localhost/api/library"),
+        new Request("http://localhost/api/library", { headers: { cookie: sessionCookie } }),
       );
       assert.equal(listed.status, 200);
       const body = (await listed.json()) as { worlds: { name: string }[] };

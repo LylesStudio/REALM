@@ -1,6 +1,6 @@
 /**
  * 批次 T9 Canon 回读——PostgreSQL 集成测试（产生侧）
- * （public documentation §4.2）。
+ * （docs/development/T9-CANON-READBACK.md §4.2）。
  * 覆盖：晶化 approved delta 入图谱（世界本体实体 upsert 幂等、白名单谓词
  * Claim 落库 record_confirmed、来源事件/游标正确、裁决拒绝零入图）、
  * /api/world-knowledge 与 /api/canon 显式 worldId（非 demo 世界读写正确、
@@ -56,6 +56,10 @@ import type {
   M2TurnValidation,
   TurnVisibilityPlan,
 } from "../modules/orchestration/public.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
+
+// 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
+const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -388,17 +392,17 @@ test(
 
     // 缺失 worldId → 400。
     const missing = await knowledgeGET(
-      new Request("http://localhost/api/world-knowledge"),
+      new Request("http://localhost/api/world-knowledge", { headers: { cookie: sessionCookie } }),
     );
     assert.equal(missing.status, 400);
     const missingCanon = await canonGET(
-      new Request("http://localhost/api/canon"),
+      new Request("http://localhost/api/canon", { headers: { cookie: sessionCookie } }),
     );
     assert.equal(missingCanon.status, 400);
 
     // 不存在的世界 → 404（不泄露存在性）。
     const unknown = await knowledgeGET(
-      new Request("http://localhost/api/world-knowledge?worldId=world_nope"),
+      new Request("http://localhost/api/world-knowledge?worldId=world_nope", { headers: { cookie: sessionCookie } }),
     );
     assert.equal(unknown.status, 404);
 
@@ -416,7 +420,7 @@ test(
     const entityResponse = await knowledgePOST(
       new Request("http://localhost/api/world-knowledge", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "upsertEntity",
           entityKind: "setting",
@@ -432,7 +436,7 @@ test(
     const claimResponse = await knowledgePOST(
       new Request("http://localhost/api/world-knowledge", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "appendClaim",
           subjectEntityId: entityId,
@@ -450,7 +454,7 @@ test(
     const propose = await canonPOST(
       new Request("http://localhost/api/canon", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "propose",
           targetLevel: "story",
@@ -465,6 +469,7 @@ test(
     const listed = await canonGET(
       new Request(
         `http://localhost/api/canon?worldId=${encodeURIComponent(world.id)}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     assert.equal(listed.status, 200);
@@ -479,6 +484,7 @@ test(
     const demoListed = await knowledgeGET(
       new Request(
         `http://localhost/api/world-knowledge?worldId=${POSTGRES_DEMO_IDS.world}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     assert.equal(demoListed.status, 200);
@@ -564,7 +570,7 @@ test(
     const merge = await canonPOST(
       new Request("http://localhost/api/canon", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "propose",
           targetLevel: "story",
@@ -579,7 +585,7 @@ test(
     const decide = await canonPOST(
       new Request("http://localhost/api/canon", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "decide",
           proposalId,

@@ -123,7 +123,7 @@ if (!adminConnectionString) {
 
 
   // ------------------------------------------------------------------
-  test("0042/0043 full chain via real runner: ledger checksums, idempotent replay, 62 tables", { timeout: 300_000 }, async (t) => {
+  test("0042/0043 full chain via real runner: ledger checksums, idempotent replay, 66 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -132,7 +132,7 @@ if (!adminConnectionString) {
     )).stdout;
     assert.match(first, /apply 0042_realm_transfer_and_import_jobs\.sql/);
     assert.match(first, /apply 0043_propagation_node_audience_archived_guard\.sql/);
-    assert.match(first, /64 tables/);
+    assert.match(first, /66 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(
@@ -147,7 +147,7 @@ if (!adminConnectionString) {
     const ledger = await pool.query(
       "SELECT filename, checksum FROM realm_schema_migrations ORDER BY filename",
     );
-    assert.equal(ledger.rows.length, 47);
+    assert.equal(ledger.rows.length, 51);
     for (const row of ledger.rows) {
       const sql = await readFile(new URL(row.filename, migrationDir), "utf8");
       assert.equal(

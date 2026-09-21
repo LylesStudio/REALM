@@ -9,7 +9,7 @@
  * - 姿态 watchful_guard：effect_kind='stance'。
  *
  * 定义即数据：落 skill_definitions/asset_definitions/effect_definitions，
- * 判定参数写入 metadata（契约见 public documentation §2.2）。
+ * 判定参数写入 metadata（契约见 docs/development/T4-RULE-REALIZATION.md §2.2）。
  * 所有写入幂等（ON CONFLICT DO NOTHING），重复调用不产生重复行。
  */
 import type { PoolClient } from "pg";

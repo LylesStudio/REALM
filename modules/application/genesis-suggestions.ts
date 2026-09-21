@@ -14,7 +14,7 @@ import { GENESIS_LIMITS, type WorldGenesisDraft } from "./world-genesis.ts";
 /**
  * 司卷问答 · AI 代笔：按引导步骤与已定之卷生成候选。
  * 全部 fail-closed：任何模型/格式失败返回 null，由前端静默退回手动输入。
- * 规范见 public documentation。
+ * 规范见 docs/development/UI-GUIDED-GENESIS.md。
  */
 
 export const GUIDED_GENESIS_STEPS = [

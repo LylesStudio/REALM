@@ -1,6 +1,6 @@
 /**
  * 批次 T4 判定参数推导——应用层用例
- * （public documentation §2.2/§5/§7.3）。
+ * （docs/development/T4-RULE-REALIZATION.md §2.2/§5/§7.3）。
  *
  * 规则引擎数据驱动：判定形态与参数全部来自定义 metadata——
  * check 有效走检定（modifier/target 原样取自数据）、无 check 自动成功、

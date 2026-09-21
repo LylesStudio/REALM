@@ -1,6 +1,6 @@
 /**
  * 批次 T6 导入卡参局——PostgreSQL 集成测试
- * （public documentation §5）。
+ * （docs/development/T6-TAVERN-IMPORT-PLAY.md §5）。
  *
  * 覆盖（临时库 + 全 19 迁移，不新增 mock）：
  * 1. 导入带 extensions.realm_skills 的卡——合法条目落 skill_definitions

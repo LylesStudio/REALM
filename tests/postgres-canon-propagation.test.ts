@@ -1,6 +1,6 @@
 /**
  * 批次 T11-B——Canon merge 原子传播入队（规范
- * public documentation §四）。
+ * docs/development/T11-B-PROPAGATION-ENABLEMENT-IMPLEMENTATION.md §四）。
  * 真实临时 PG 库（t.after 强制拆库，迁移 0001–0025 全链 + demo 拓扑种子）：
  * merge+propagate:"public" 同事务产生恰一个 Campaign/root Packet/pending
  * job；拓扑缺失整事务回滚零残留；reject/无 attest/空晋升不创建；重复
@@ -20,6 +20,10 @@ import {
 } from "../database/postgres/public.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createWorldKnowledgeService } from "../modules/world-knowledge/public.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
+
+// 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
+const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -78,7 +82,7 @@ function newId(prefix: string): string {
 function canonRequest(body: Record<string, unknown>): Request {
   return new Request("http://localhost/api/canon", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { cookie: sessionCookie, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }

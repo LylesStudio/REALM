@@ -1,5 +1,5 @@
 -- REALM Scene Weather Snapshot
--- 批次 T12（public documentation §一）：
+-- 批次 T12（docs/development/T12-WORLD-STORY-RECORD-EXPERIENCE.md §一）：
 -- scenes 增加 weather 快照列——scene 行创建时落当时天气，使场景天气成为
 -- Record/世界线级可隔离状态（此前 weather 只从 worlds.settings 现场读取，
 -- 结晶推进后起点天气不可恢复）。旧行 weather=''：projection 按

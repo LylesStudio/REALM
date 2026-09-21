@@ -1,6 +1,6 @@
 /**
  * 批次 T11-D：semantic review 操作面的纯契约层（无 React、无 fetch）。
- * 规范 public documentation：
+ * 规范 docs/development/T11-D-SEMANTIC-REVIEW-OPERATOR-SURFACE.md：
  * - 三种 change kind 的 payload 形态严格对应服务端 parseChangeSet；
  * - effectiveCursor/existingFuture 只来自 context route 的服务端 head 游标；
  * - 结果展示白名单：classification/recommendation/rationale/source，

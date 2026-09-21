@@ -5,7 +5,7 @@ import type { RuleDefinitionProvider } from "./rule-pack.ts";
  * demo-seed（PostgreSQL 种子）与本地内存规则包共用这份数据——
  * 定义即数据，规则引擎不持有任何硬编码桥段。
  *
- * metadata 契约见 public documentation §2.2：
+ * metadata 契约见 docs/development/T4-RULE-REALIZATION.md §2.2：
  * facts 模板以 {actor} 占位，裁决时替换为行动者 displayName。
  */
 

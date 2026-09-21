@@ -44,7 +44,7 @@ test("child env carries full bootstrap contract, no secret values, loopback URLs
     ...process.env,
     PATH: process.env.PATH ?? "",
     OPENAI_API_KEY: "fake-api-key-must-not-cross-boundary",
-    DATABASE_URL: "postgresql://user:password@example.invalid/secret",
+    DATABASE_URL: "postgresql://user:password@private.example/secret",
   };
   const env = buildChildEnv({
     dataHome: join(tmpdir(), "realm-env-test"),

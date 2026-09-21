@@ -1,5 +1,5 @@
 /**
- * LAN 游戏大厅服务（public documentation）。
+ * LAN 游戏大厅服务（docs/development/LAN-GAME-LOBBY-PLAN.md）。
  *
  * 边界：
  * - 房间 = 约局元数据（房名/房主/成员/容量/密码/状态）；未绑定房间不触碰

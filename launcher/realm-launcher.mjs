@@ -192,9 +192,17 @@ export function validateLanBind(value) {
 
 // ---- child env ----
 
+/**
+ * launcher 管理的 PG 上某角色的 loopback 连接串（与 buildChildEnv 同形态）。
+ * 仅供宿主进程注入子进程 env（如 scene image worker）；绝不写进
+ * service-host 协议帧或日志。
+ */
+export function launcherPgUrl(user, pgPort) {
+  return `postgresql://${user}@127.0.0.1:${pgPort}/realm_dev`;
+}
+
 export function buildChildEnv(input) {
-  const pgUrl = (user) =>
-    `postgresql://${user}@127.0.0.1:${input.pgPort}/realm_local`;
+  const pgUrl = (user) => launcherPgUrl(user, input.pgPort);
   const platform = input.platform ?? process.platform;
   const bundledPgLibrary = input.pgLibraryPath
     ?? ((platform === "darwin" || platform === "linux") && input.pgBin
@@ -228,9 +236,8 @@ export function buildChildEnv(input) {
     DATABASE_URL: pgUrl("postgres"),
     REALM_RUNTIME_DATABASE_URL: pgUrl("realm_runtime"),
     REALM_TRANSFER_DATABASE_URL: pgUrl("realm_transfer"),
-    // LAN 模式的唯一例外：显式注入访问令牌（父 env 默认不透出任何 secret；
-    // 非 LAN 模式绝不注入，保持本地单用户回落语义）。
-    ...(input.accessToken ? { REALM_ACCESS_TOKEN: input.accessToken } : {}),
+    // 账户登录后 REALM_ACCESS_TOKEN 已退役：任何模式都不向子进程注入
+    // 令牌（LAN 也不再需要——账户名+密码门禁由服务端 accounts 承担）。
     // 显式校验过的 advertised origin 覆盖白名单透传（同名键后写生效）。
     ...(input.advertisedOrigin
       ? { REALM_ADVERTISED_ORIGIN: input.advertisedOrigin }
@@ -380,10 +387,9 @@ export async function startRealm(options = {}) {
   const home = options.home ?? realmHome();
   const dataHome = options.dataHome ?? resolveDataHome();
   const parentEnvironment = options.environment ?? process.env;
-  // LAN 模式校验必须早于任何副作用（日志流/实例锁/子进程）：非法 bind /
-  // 缺门禁令牌时 fail-closed，不留文件、不持锁。
+  // LAN 模式校验必须早于任何副作用（日志流/实例锁/子进程）：非法 bind
+  // 即 fail-closed，不留文件、不持锁。账户登录后 LAN 不再需要访问令牌。
   let hostBind = "127.0.0.1";
-  let accessToken = "";
   // advertised origin：显式 option > 环境变量；非法值在任何副作用之前
   // fail-closed（错误不 echo 原值——可能内嵌 userinfo）。0.0.0.0 或纯
   // loopback 时不得推导可分享地址（仅具体 IPv4 LAN bind 可安全推导）。
@@ -396,14 +402,7 @@ export async function startRealm(options = {}) {
   });
   const requestedLanBind = options.lanBind ?? parentEnvironment.REALM_LAN_BIND;
   if (requestedLanBind?.trim()) {
-    const bind = validateLanBind(requestedLanBind);
-    accessToken = (parentEnvironment.REALM_ACCESS_TOKEN ?? "").trim();
-    if (!accessToken) {
-      throw new LauncherError(
-        "LAN mode requires REALM_ACCESS_TOKEN to be set (access gate is mandatory on LAN).",
-      );
-    }
-    hostBind = bind;
+    hostBind = validateLanBind(requestedLanBind);
   }
   const logFile = resolve(dataHome, "logs", "launcher.log");
   mkdirSync(resolve(dataHome, "logs"), { recursive: true });
@@ -456,7 +455,6 @@ export async function startRealm(options = {}) {
     appPort,
     pgPort,
     hostBind,
-    accessToken,
     advertisedOrigin,
     environment: parentEnvironment,
   });

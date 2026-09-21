@@ -131,6 +131,11 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   // 大厅是 workspace 级约局元数据（非世界内容），不进 .realm 包。
   row("lobby_rooms", "excluded", null),
   row("lobby_room_members", "excluded", null),
+  // 场景图生成台账是运行时操作状态（queue/轮询/绑定），非世界内容；
+  // 图像字节由 world_files（fileref codec）承载，台账不进 .realm 包。
+  row("scene_image_generations", "excluded", null),
+  // 自动模式请求队列同样是运行时意图台账，不进 .realm 包。
+  row("scene_image_requests", "excluded", null),
   row("outbox", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [

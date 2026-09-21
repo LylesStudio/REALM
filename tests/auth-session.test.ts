@@ -6,9 +6,12 @@ import {
   principalFromRequest,
   principalIdForDisplayName,
   sessionCookieHeader,
-  verifyAccessToken,
   verifySessionValue,
 } from "../modules/identity/auth.ts";
+import {
+  hashAccountPassword,
+  verifyAccountPassword,
+} from "../modules/identity/password.ts";
 
 test("session value round-trips and rejects tampering and expiry", () => {
   const value = createSessionValue("principal_abc123", 1000);
@@ -43,18 +46,23 @@ test("principal derivation is deterministic and contains no credential material"
   assert.notEqual(principalIdForDisplayName("弥洛"), first);
 });
 
-test("access gate follows REALM_ACCESS_TOKEN and token compare is strict", () => {
-  const saved = process.env.REALM_ACCESS_TOKEN;
+test("access gate follows runtime DB presence; retired token is ignored", () => {
+  const savedDb = process.env.REALM_RUNTIME_DATABASE_URL;
+  const savedToken = process.env.REALM_ACCESS_TOKEN;
   try {
+    delete process.env.REALM_RUNTIME_DATABASE_URL;
     delete process.env.REALM_ACCESS_TOKEN;
     assert.equal(isAccessGateEnabled(), false);
-    assert.equal(verifyAccessToken("anything"), false);
 
-    process.env.REALM_ACCESS_TOKEN = "test-gate-token";
+    process.env.REALM_RUNTIME_DATABASE_URL = "postgresql://realm_runtime@127.0.0.1:5432/realm";
+    assert.equal(isAccessGateEnabled(), true, "runtime DB 存在即要求账户登录");
+
+    // 退役 token 存在与否不再影响门禁语义。
+    process.env.REALM_ACCESS_TOKEN = "legacy-token";
     assert.equal(isAccessGateEnabled(), true);
-    assert.equal(verifyAccessToken("test-gate-token"), true);
-    assert.equal(verifyAccessToken("test-gate-tokfn"), false);
-    assert.equal(verifyAccessToken(""), false);
+
+    delete process.env.REALM_RUNTIME_DATABASE_URL;
+    assert.equal(isAccessGateEnabled(), false);
 
     // 请求级解析：cookie 中的有效会话被接受。
     const value = createSessionValue("principal_demo_player");
@@ -67,7 +75,24 @@ test("access gate follows REALM_ACCESS_TOKEN and token compare is strict", () =>
       null,
     );
   } finally {
-    if (saved === undefined) delete process.env.REALM_ACCESS_TOKEN;
-    else process.env.REALM_ACCESS_TOKEN = saved;
+    if (savedDb === undefined) delete process.env.REALM_RUNTIME_DATABASE_URL;
+    else process.env.REALM_RUNTIME_DATABASE_URL = savedDb;
+    if (savedToken === undefined) delete process.env.REALM_ACCESS_TOKEN;
+    else process.env.REALM_ACCESS_TOKEN = savedToken;
   }
+});
+
+test("password hash: scrypt round-trip, salt per account, strict verify", () => {
+  const first = hashAccountPassword("灯塔口令");
+  const second = hashAccountPassword("灯塔口令");
+  assert.match(first, /^scrypt\$16384\$8\$1\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
+  assert.notEqual(first, second, "每账户随机 salt");
+  assert.equal(verifyAccountPassword("灯塔口令", first), true);
+  assert.equal(verifyAccountPassword("灯塔口另", first), false);
+  assert.equal(verifyAccountPassword("灯塔口令", null), false);
+  assert.equal(verifyAccountPassword("灯塔口令", "garbage"), false);
+  assert.equal(verifyAccountPassword("", first), false);
+  assert.equal(verifyAccountPassword("灯塔口令", "scrypt$999999999$8$1$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), false);
+  assert.equal(verifyAccountPassword("x".repeat(129), first), false);
+  assert.ok(!first.includes("灯塔口令"), "hash 不含明文");
 });

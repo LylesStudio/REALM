@@ -439,9 +439,9 @@ export function createPostgresRecordRuntimeScopeRepository(
  * 资格（链接合格 ≠ 正文安全）；无资格行 = pending_review fail-closed；
  * revoke 立即全隐藏；不 retroactive。excerpt 每条约 600 字符、至多 2 条、
  * 保留 title 来源标签。
- * If the qualification schema is unavailable, lore injection stays empty
- * (fail-closed) while canon reads continue; capability detection is cached per
- * pool and takes effect after the process is restarted following migrations.
+ * 缺 0041/pgcrypto 的库（如本阶段共享 realm_dev）：探测后 lore 跳过
+ * （fail-closed 空注入），canon 照常——探测结果按连接池缓存，migration
+ * 后需重启进程生效。
  */
 const LORE_EXCERPT_CHARS = 600;
 const LORE_TITLE_CHARS = 80;

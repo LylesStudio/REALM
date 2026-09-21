@@ -1,5 +1,5 @@
 -- REALM Propagation Topology & Semantic Evidence Scope
--- 批次 T11-B（public documentation）：
+-- 批次 T11-B（docs/development/T11-B-PROPAGATION-ENABLEMENT-IMPLEMENTATION.md）：
 --   1. propagation_nodes / propagation_routes — 显式社会传播拓扑（真实
 --      持久化来源，禁止用 world_relations 冒充通信渠道）；双端点复合 FK
 --      保证路线两端同 workspace/world/worldline；realm_runtime 只读，

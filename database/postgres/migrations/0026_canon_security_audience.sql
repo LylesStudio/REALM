@@ -1,5 +1,5 @@
 -- REALM Canon Security Class & Revision Audience
--- 批次 T11-G（public documentation 冻结契约）：
+-- 批次 T11-G（docs/development/T11-F-RESTRICTED-SECRET-QUALIFICATION.md 冻结契约）：
 --   1. canon_revisions 增加 security_class（默认 public，兼容既有行与
 --      T11-B public 路径）——Revision 是传播安全分类的唯一正史承载点；
 --   2. canon_revision_audiences：immutable audience snapshot（merge 同事务

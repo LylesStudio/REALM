@@ -23,6 +23,7 @@ import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSceneImageWorkerHost } from "../launcher/scene-image-worker-host.mjs";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const MIN_NODE = [22, 13, 0];
@@ -395,13 +396,37 @@ async function launchWebServer(environment) {
   }
   console.log(`REALM is ready at ${readyUrl}`);
   if (!process.env.REALM_SETUP_WEB_NO_OPEN) openBrowser(readyUrl);
-  await new Promise((resolvePromise, reject) => {
-    child.once("exit", (code, signal) => {
-      if (signal) reject(new Error(`REALM stopped by ${signal}`));
-      else resolvePromise(code ?? 0);
-    });
-    child.once("error", reject);
+  // Web ready 后启动 scene image worker（同一跨平台 supervisor；Windows
+  // 用 process.execPath 不经 cmd shell）。worker 失败只写自己的日志并在
+  // 控制台可见，不阻断 Web；dev server 退出前先停 worker，避免遗留进程。
+  const workerHost = createSceneImageWorkerHost({
+    environment: {
+      REALM_RUNTIME_DATABASE_URL: environment.REALM_RUNTIME_DATABASE_URL,
+      ...(environment.REALM_SCENE_IMAGE_WORKSPACES
+        ? { REALM_SCENE_IMAGE_WORKSPACES: environment.REALM_SCENE_IMAGE_WORKSPACES }
+        : {}),
+      ...(environment.REALM_DATA_HOME
+        ? { REALM_DATA_HOME: environment.REALM_DATA_HOME }
+        : {}),
+    },
+    onState: ({ state, reason }) => {
+      if (state === "unavailable") {
+        console.log(`scene image worker unavailable (${reason ?? "unknown"}); see worker log in data home`);
+      }
+    },
   });
+  workerHost.start();
+  try {
+    await new Promise((resolvePromise, reject) => {
+      child.once("exit", (code, signal) => {
+        if (signal) reject(new Error(`REALM stopped by ${signal}`));
+        else resolvePromise(code ?? 0);
+      });
+      child.once("error", reject);
+    });
+  } finally {
+    await workerHost.stop();
+  }
 }
 
 function printManualPlan(environment) {

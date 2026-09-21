@@ -15,7 +15,7 @@ import type { GraphClaim } from "./knowledge-graph-types";
 
 /**
  * 批次 T11-D：单条 Claim 的语义复审面板
- * （public documentation §2/§4）。
+ * （docs/development/T11-D-SEMANTIC-REVIEW-OPERATOR-SURFACE.md §2/§4）。
  * - 打开表单只读 context（服务端 head 游标），不调用模型；
  *   只有点击「请求复审」才 POST；不自动重试、不轮询；
  * - 结果是复审证据，绝不写入正史，不提供合并按钮；

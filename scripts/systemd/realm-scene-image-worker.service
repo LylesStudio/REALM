@@ -1,0 +1,31 @@
+# REALM 场景图自动 Worker（图像 Stage 自动模式批）——systemd 单元模板。
+#
+# 这是仓库模板，不是已安装单元：安装/启用待 Iris 验收后由用户执行，
+# 本批不得擅自安装或修改用户 systemd 单元。参考安装（用户级）：
+#   cp scripts/systemd/realm-scene-image-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now realm-scene-image-worker.service
+#
+# ExecStart 指向跨平台 supervisor（launcher/scene-image-worker-host.mjs），
+# 与 Tauri / setup-web / Windows / macOS 入口共用同一套启动、日志隔离与
+# 优雅停止逻辑，不在本单元里复制业务逻辑。Worker 与 realm-dev.service /
+# realm-propagation-worker.service 分离生命周期；Worker 崩溃不影响 Web
+# 请求池；PG advisory lock 保证跨进程单实例。
+
+[Unit]
+Description=REALM scene image worker (auto scene background generation consumer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lyle/works/REALM
+# 环境经 .env.local 装载（loopback runtime 连接串；不落任何凭据到本文件）。
+# node 用绝对路径（与 realm-dev.service 同源运行时）：user manager 的 PATH
+# 会经 mise shims 解析到其他主版本，/usr/bin/env node 不可靠。
+# supervisor 自身是纯 .mjs；worker 子进程由它带 --experimental-strip-types 启动。
+ExecStart=/home/lyle/.hermes/node/bin/node --env-file-if-exists=.env.local launcher/scene-image-worker-host.mjs
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

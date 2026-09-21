@@ -3,7 +3,7 @@
  * 现有通用 Canon 注入（record-scope resolve → brief.canon）必须
  * ① 排除 restricted/secret revision 晋升的 claim（security）；
  * ② 绑定 Record 当前 effective world cursor，排除 future/expired claim（temporal）。
- * 计划：public documentation §6 Task 0。
+ * 计划：docs/development/SHARED-WORLD-MEMORY-V2-PLAN.md §6 Task 0。
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";

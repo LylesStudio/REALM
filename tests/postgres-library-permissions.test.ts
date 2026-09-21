@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B6——Library 非管理命令权限矩阵 + 分池
- * （public documentation §六）。
+ * （docs/development/T10-B6-LIBRARY-PERMISSIONS.md §六）。
  * 真实临时 PG（t.after 拆库）：list 成员可见/非成员不见；矩阵逐格
  * （owner/player/observer/非成员 × style/content/stance/archive/delete）；
  * 受限 realm_runtime 池实锤（runtime-capable 命令真实完成、owner 例外在

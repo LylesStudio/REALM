@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../.tauri-resources/linux/realm": "realm"
+    }
+  }
+}

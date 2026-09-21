@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>REALM</title>
+<style>
+  :root {
+    --paper: #f5f1e8;
+    --paper-strong: #fbf8f0;
+    --ink: #2c2a26;
+    --ink-soft: #5b564c;
+    --accent: #7a5b2f;
+    --danger: #8b2e2e;
+  }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+    display: flex;
+    min-height: 100dvh;
+  }
+  main {
+    margin: auto;
+    max-width: 560px;
+    padding: 24px;
+    width: 100%;
+  }
+  .eyebrow {
+    color: var(--ink-soft);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    margin: 0 0 4px;
+  }
+  h1 { font-size: 28px; margin: 0 0 16px; }
+  .card {
+    background: var(--paper-strong);
+    border: 1px solid var(--ink);
+    box-shadow: 3px 3px 0 rgba(44, 42, 38, 0.25);
+    padding: 16px;
+  }
+  .status-line { margin: 0 0 12px; }
+  .status-line small { color: var(--ink-soft); display: block; margin-top: 4px; word-break: break-all; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button {
+    background: transparent;
+    border: 1px solid var(--ink);
+    color: var(--ink);
+    cursor: pointer;
+    font: inherit;
+    padding: 10px 16px;
+  }
+  button.is-primary { background: var(--ink); color: var(--paper); }
+  button:disabled { cursor: not-allowed; opacity: 0.55; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .error-box {
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    margin-top: 12px;
+    padding: 10px;
+    word-break: break-word;
+  }
+  label { display: block; margin-top: 12px; }
+  input[type="text"], input[type="url"] {
+    background: var(--paper-strong);
+    border: 1px solid var(--ink);
+    font: inherit;
+    margin-top: 4px;
+    padding: 10px;
+    width: 100%;
+  }
+  .spinner {
+    animation: spin 1s linear infinite;
+    border: 2px solid var(--ink-soft);
+    border-top-color: var(--ink);
+    display: inline-block;
+    height: 16px;
+    margin-right: 8px;
+    vertical-align: -3px;
+    width: 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hint { color: var(--ink-soft); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">REALM · 界核</p>
+  <h1 id="title">正在启动</h1>
+  <div class="card">
+    <p class="status-line" id="status"><span class="spinner" aria-hidden="true"></span>正在准备…</p>
+    <div id="error" class="error-box" hidden></div>
+    <div id="config" hidden>
+      <p class="hint">REALM 客户端只连接你自己运行的服务。请输入服务地址或大厅邀请链接（http/https，不要包含用户名、密码或令牌）。</p>
+      <label>服务地址
+        <input id="server-url" type="url" inputmode="url" autocomplete="off"
+               placeholder="http://192.168.1.20:9999 或粘贴 ?lobby= 邀请链接" />
+      </label>
+    </div>
+    <div class="actions" id="actions"></div>
+    <div id="lan-config" hidden>
+      <label>LAN 绑定地址（可选，具体 IPv4；0.0.0.0 需另填分享地址）
+        <input id="lan-bind" type="text" inputmode="decimal" autocomplete="off"
+               placeholder="192.168.1.20" />
+      </label>
+      <label>LAN 分享地址（可选，http(s) origin，不含路径/凭据）
+        <input id="advertised-origin" type="url" inputmode="url" autocomplete="off"
+               placeholder="http://192.168.1.20:9999" />
+      </label>
+      <p class="hint">绑定地址会让本地服务监听局域网；仅在你明确知道本机地址时填写。保存后重启服务生效，LAN 模式需要访问令牌。</p>
+    </div>
+  </div>
+  <p class="hint" id="footnote"></p>
+</main>
+<script>
+(() => {
+  "use strict";
+  const tauri = window.__TAURI__;
+  const title = document.getElementById("title");
+  const status = document.getElementById("status");
+  const errorBox = document.getElementById("error");
+  const actions = document.getElementById("actions");
+  const configBox = document.getElementById("config");
+  const urlInput = document.getElementById("server-url");
+  const footnote = document.getElementById("footnote");
+  const STORAGE_KEY = "realm.serverUrl";
+
+  const invoke = (name, args) => tauri.core.invoke(name, args);
+  const button = (label, onClick, primary) => {
+    const element = document.createElement("button");
+    element.type = "button";
+    element.textContent = label;
+    if (primary) element.className = "is-primary";
+    element.addEventListener("click", onClick);
+    return element;
+  };
+  // 状态渲染零 innerHTML：文本一律 textContent/TextNode（用户输入与
+  // 服务端值不未经转义进 HTML）；spinner/小字用 DOM 节点。
+  const render = (heading, statusText, buttons, foot, opts = {}) => {
+    title.textContent = heading;
+    status.replaceChildren();
+    if (opts.spinner) {
+      const spin = document.createElement("span");
+      spin.className = "spinner";
+      spin.setAttribute("aria-hidden", "true");
+      status.appendChild(spin);
+    }
+    status.appendChild(document.createTextNode(statusText));
+    if (opts.small) {
+      const small = document.createElement("small");
+      small.textContent = opts.small;
+      status.appendChild(small);
+    }
+    actions.replaceChildren(...buttons);
+    buttons[0]?.focus();
+    footnote.textContent = foot || "";
+  };
+  const showError = (message) => {
+    errorBox.hidden = !message;
+    errorBox.textContent = message || "";
+  };
+
+  const STEP_LABELS = {
+    spawn: "正在拉起本地服务…",
+    lock: "正在获取实例锁…",
+    postgres: "正在启动数据库…",
+    provision: "正在准备数据库角色…",
+    migrations: "正在应用数据迁移…",
+    seed: "正在准备演示世界…",
+    server: "正在启动应用服务…",
+    health: "正在等待服务就绪…",
+    ready: "服务已就绪",
+  };
+
+  let lastUrl = "";
+
+  function renderPhase(phase) {
+    if (!phase) return;
+    if (phase.phase === "idle") {
+      render("正在启动", "正在准备…", [], "", { spinner: true });
+    } else if (phase.phase === "starting") {
+      render("正在启动",
+        STEP_LABELS[phase.step] || "正在启动…",
+        [], "", { spinner: true });
+    } else if (phase.phase === "ready") {
+      lastUrl = phase.url;
+      render("服务已就绪",
+        "REALM 本地服务正在运行。", [
+          button("打开客户端", () => { window.location.replace(phase.url); }, true),
+          button("打开网页", async () => {
+            showError("");
+            try {
+              await invoke("open_in_browser", { url: phase.url });
+              render("网页已打开",
+                "已在系统浏览器打开。", [
+                  button("打开客户端", () => { window.location.replace(phase.url); }),
+                  button("停止服务并退出", async () => { await invoke("service_stop"); }),
+                ], "关闭本窗口也会停止服务。");
+            } catch (error) {
+              showError(String(error));
+            }
+          }),
+          button("停止服务并退出", async () => { await invoke("service_stop"); }),
+        ], "选择「打开客户端」在本窗口使用 REALM；选择「打开网页」用系统浏览器。", { small: phase.url });
+      footnote.textContent = shareOriginNote(phase);
+      actions.appendChild(button("LAN 分享设置", () => {
+        lanConfig.hidden = !lanConfig.hidden;
+        lanBindInput.value = localStorage.getItem(LAN_BIND_KEY) || "";
+        originInput.value = localStorage.getItem(ORIGIN_KEY) || "";
+        if (!lanConfig.hidden && !lanConfig.querySelector("button")) {
+          lanConfig.appendChild(button("保存并重启服务", () => void saveOriginAndRestart(), true));
+        }
+      }));
+    } else if (phase.phase === "failed") {
+      const already = phase.kind === "already-running";
+      render(already ? "已有实例在运行" : "启动失败",
+        already ? "检测到另一个 REALM 实例正在运行。请先关闭它，或稍后再试。" : "本地服务未能启动。", [
+          button("重试", async () => {
+            showError("");
+            try { await startService(); } catch (error) { showError(String(error)); }
+          }, true),
+          button("退出", () => { window.close(); }),
+        ]);
+      showError(phase.message || "");
+    } else if (phase.phase === "stopping") {
+      render("正在停止", "正在优雅停止服务…", [], "", { spinner: true });
+    } else if (phase.phase === "stopped") {
+      render("已停止", "本地服务已停止。", [
+        button("重新启动", async () => {
+          showError("");
+          try { await invoke("service_start"); } catch (error) { showError(String(error)); }
+        }, true),
+        button("退出", () => { window.close(); }),
+      ]);
+    }
+  }
+
+  async function checkAndConnect(normalized, lobbyRoomId) {
+    render("正在检查连接",
+      `正在连接 ${normalized} …`, [], "", { spinner: true });
+    try {
+      // 由 Tauri Rust 侧检查，避免从 tauri://localhost 对服务端发起
+      // 跨域 fetch；服务端无需为客户端壳开放 CORS。
+      await invoke("check_server", { url: normalized });
+      // 只持久化服务根地址——roomId/邀请 query 一次性导航用，绝不落盘。
+      localStorage.setItem(STORAGE_KEY, normalized);
+      window.location.replace(
+        lobbyRoomId
+          ? `${normalized}/?lobby=${encodeURIComponent(lobbyRoomId)}`
+          : normalized + "/",
+      );
+    } catch (error) {
+      render("连接失败", `无法连接 ${normalized}。`, [
+        button("重试", () => void checkAndConnect(normalized, lobbyRoomId), true),
+        button("更换服务地址", () => showConfig()),
+      ]);
+      showError(error instanceof DOMException && error.name === "AbortError"
+        ? "连接超时：请确认 REALM 服务已启动，且手机与电脑在同一局域网。"
+        : String(error));
+    }
+  }
+
+  function showConfig() {
+    configBox.hidden = false;
+    const saved = localStorage.getItem(STORAGE_KEY) || "";
+    if (saved) urlInput.value = saved;
+    render("连接 REALM 服务",
+      "输入你的 REALM 服务地址，或直接粘贴大厅邀请链接。", [
+        button("连接", async () => {
+          showError("");
+          try {
+            // 单一入口：服务根地址与邀请 URL 都由 Rust 校验（白名单结构）。
+            const target = await invoke("validate_invite_url", { input: urlInput.value });
+            await checkAndConnect(target.serverUrl, target.lobbyRoomId ?? null);
+          } catch (error) {
+            showError("服务地址或邀请链接无效：" + String(error));
+          }
+        }, true),
+      ], "首次使用：在电脑上启动 REALM 桌面端或本地服务，并开启可信局域网模式后，把地址填到这里；也可以直接粘贴房主分享的大厅邀请链接。HTTP 连接未加密，优先使用 HTTPS。");
+    urlInput.focus();
+  }
+
+  const ORIGIN_KEY = "realm.advertisedOrigin";
+  const LAN_BIND_KEY = "realm.lanBind";
+  const lanConfig = document.getElementById("lan-config");
+  const lanBindInput = document.getElementById("lan-bind");
+  const originInput = document.getElementById("advertised-origin");
+
+  async function startService() {
+    const savedOrigin = (localStorage.getItem(ORIGIN_KEY) || "").trim();
+    const savedBind = (localStorage.getItem(LAN_BIND_KEY) || "").trim();
+    const args = {
+      ...(savedOrigin ? { advertisedOrigin: savedOrigin } : {}),
+      ...(savedBind ? { lanBind: savedBind } : {}),
+    };
+    await invoke("service_start", args);
+  }
+
+  async function saveOriginAndRestart() {
+    showError("");
+    const rawOrigin = originInput.value.trim();
+    const rawBind = lanBindInput.value.trim();
+    try {
+      if (rawOrigin) await invoke("validate_advertised_origin", { input: rawOrigin });
+      if (rawBind) await invoke("validate_lan_bind", { input: rawBind });
+      localStorage.setItem(ORIGIN_KEY, rawOrigin);
+      localStorage.setItem(LAN_BIND_KEY, rawBind);
+      await invoke("service_stop");
+      const deadline = Date.now() + 45_000;
+      for (;;) {
+        const phase = await invoke("service_state");
+        if (phase.phase === "stopped" || phase.phase === "idle") break;
+        if (Date.now() > deadline) throw new Error("停止超时");
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      await startService();
+    } catch (error) {
+      showError("LAN 分享地址无效：" + String(error));
+    }
+  }
+
+  function shareOriginNote(phase) {
+    if (!phase || phase.phase !== "ready") return "";
+    return phase.advertised_origin
+      ? `LAN 分享地址已配置：${phase.advertised_origin}`
+      : "未配置 LAN 分享地址：邀请链接仅本机可用。";
+  }
+
+  async function boot() {
+    const kind = await invoke("host_kind");
+    if (kind === "android") {
+      showConfig();
+      return;
+    }
+    await tauri.event.listen("service-state", (event) => renderPhase(event.payload));
+    renderPhase(await invoke("service_state"));
+    try {
+      await startService();
+    } catch (error) {
+      showError(String(error));
+    }
+  }
+
+  boot().catch((error) => {
+    render("启动失败", "客户端引导失败。", [button("重试", () => window.location.reload(), true)]);
+    showError(String(error));
+  });
+})();
+</script>
+</body>
+</html>

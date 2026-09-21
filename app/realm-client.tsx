@@ -134,6 +134,16 @@ export function RealmClient() {
   } | null>(null);
   const [selfPlayBusy, setSelfPlayBusy] = useState(false);
   const [recordActionBusy, setRecordActionBusy] = useState(false);
+  // 场景建立图（Stage 3）：显式点击才消耗 GPU；状态只承载安全文案。
+  const [sceneImageBusy, setSceneImageBusy] = useState(false);
+  const [sceneImageNotice, setSceneImageNotice] = useState<string | null>(null);
+  // 自动场景图模式（0049 账号级偏好；默认 off，打开页面零 GPU 消耗）。
+  const [sceneAutoMode, setSceneAutoMode] = useState<"off" | "scene_change" | "every_turn">("off");
+  const [sceneAutoOpen, setSceneAutoOpen] = useState(false);
+  const [sceneAutoNotice, setSceneAutoNotice] = useState<string | null>(null);
+  // worker 心跳投影（GET /api/settings/scene-image 附带）：online/unavailable；
+  // null = 尚未读到。用于区分「等待后台 Worker」与真正的「排队中」。
+  const [sceneWorkerState, setSceneWorkerState] = useState<"online" | "unavailable" | null>(null);
   const [retrospectionConfirm, setRetrospectionConfirm] = useState(false);
   const [visibilityProposal, setVisibilityProposal] =
     useState<VisibilityProposal | null>(null);
@@ -431,6 +441,42 @@ export function RealmClient() {
         : uiText("ui.record.duplicateFailed", uiLanguage));
     } finally {
       setRecordActionBusy(false);
+    }
+  }
+
+  /**
+   * 场景建立图（Stage 3）：显式点击才消耗 GPU。成功 ready → 刷新信封换背景；
+   * running/failed 只显示安全状态文案；service 端 active 复用保证连点
+   * 不产生重复生成。
+   */
+  async function generateSceneImage() {
+    if (!projection || sceneImageBusy) return;
+    setSceneImageBusy(true);
+    setSceneImageNotice(null);
+    try {
+      const response = await fetch("/api/record/scene-image", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ recordId: projection.record.id, dispatch: true }),
+      });
+      const payload = await readJson(response);
+      if (!response.ok) {
+        setSceneImageNotice(uiText("ui.recordScene.failed", uiLanguage));
+        return;
+      }
+      const status = (payload as { status?: unknown } | null)?.status;
+      if (status === "ready") {
+        await loadRecord(projection.record.id, { silent: true });
+        setSceneImageNotice(uiText("ui.recordScene.ready", uiLanguage));
+      } else if (status === "running") {
+        setSceneImageNotice(uiText("ui.recordScene.running", uiLanguage));
+      } else {
+        setSceneImageNotice(uiText("ui.recordScene.failed", uiLanguage));
+      }
+    } catch {
+      setSceneImageNotice(uiText("ui.recordScene.failed", uiLanguage));
+    } finally {
+      setSceneImageBusy(false);
     }
   }
 
@@ -777,6 +823,98 @@ export function RealmClient() {
     }, 2_500);
     return () => window.clearInterval(timer);
   }, [selfPlayActive, selfPlayRecordId, loadRecord]);
+
+  // 场景图自动模式（0049）：挂载时读当前账号偏好（失败保持 off 显示），
+  // 同时读 worker 心跳投影（online/unavailable）。
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch("/api/settings/scene-image", {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        const body: unknown = await response.json();
+        if (!active || !response.ok) return;
+        const mode = (body as { mode?: unknown } | null)?.mode;
+        if (mode === "off" || mode === "scene_change" || mode === "every_turn") {
+          setSceneAutoMode(mode);
+        }
+        const workerState = (body as { worker?: { state?: unknown } | null } | null)
+          ?.worker?.state;
+        setSceneWorkerState(workerState === "online" ? "online" : "unavailable");
+      } catch {
+        // 读取失败保持 off（不阻断页面）。
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 场景图自动请求 queued/running 期间轻量轮询信封（沿用 T1/T7 先例；
+  // 有界 180s——worker 中断时状态经手动刷新仍可恢复）。
+  const sceneImageJobActive = envelope?.sceneImageJob?.status === "queued"
+    || envelope?.sceneImageJob?.status === "running";
+  const sceneImageJobRecordId = envelope?.record.record.id ?? "";
+  useEffect(() => {
+    if (!sceneImageJobActive || !sceneImageJobRecordId) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      if (Date.now() - startedAt > 180_000) {
+        window.clearInterval(timer);
+        return;
+      }
+      void loadRecord(sceneImageJobRecordId, { silent: true });
+    }, 2_500);
+    return () => window.clearInterval(timer);
+  }, [sceneImageJobActive, sceneImageJobRecordId, loadRecord]);
+
+  // 自动模式开启或有自动任务时轻量轮询 worker 心跳（5s；页面级有界），
+  // 让「Worker 未连接」与「排队中」的显示随真实状态翻转。
+  const sceneWorkerWatchActive = sceneAutoMode !== "off" || sceneImageJobActive;
+  useEffect(() => {
+    if (!sceneWorkerWatchActive) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const response = await fetch("/api/settings/scene-image", {
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+          });
+          const body: unknown = await response.json();
+          if (!active || !response.ok) return;
+          const workerState = (body as { worker?: { state?: unknown } | null } | null)
+            ?.worker?.state;
+          setSceneWorkerState(workerState === "online" ? "online" : "unavailable");
+        } catch {
+          // 轮询失败保持上次状态。
+        }
+      })();
+    }, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [sceneWorkerWatchActive]);
+
+  /** 选择自动模式：立即持久化（账号级）+ 可见状态反馈。 */
+  async function saveSceneAutoMode(mode: "off" | "scene_change" | "every_turn") {
+    setSceneAutoNotice(null);
+    try {
+      const response = await fetch("/api/settings/scene-image", {
+        method: "PUT",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!response.ok) throw new Error("save failed");
+      setSceneAutoMode(mode);
+      setSceneAutoNotice(uiText("ui.sceneAuto.saved", uiLanguage));
+    } catch {
+      setSceneAutoNotice(uiText("ui.sceneAuto.failed", uiLanguage));
+    }
+  }
 
   const streamRecordId = envelope?.record.record.id ?? "";
   const streamDynamicKnowledge = envelope?.viewer.dynamicKnowledgeVisible ?? false;
@@ -1300,6 +1438,16 @@ export function RealmClient() {
         ) : (
         <>
         <main className="record-main">
+          {/* 场景氛围背景：纯装饰层（aria-hidden），不承载事件/状态数据。
+              Stage 3：Record 有 ready 场景图时经 CSS 变量换成服务端
+              /api/files/<id>；无图保持既有静态样例。 */}
+          <div
+            className="record-scene-bg"
+            aria-hidden="true"
+            style={envelope.sceneImage
+              ? { ["--record-scene-image" as string]: `url("${envelope.sceneImage.fileUrl}")` }
+              : undefined}
+          />
           <header className="record-heading">
             <div>
               <p className="eyebrow">{uiText("ui.record.eyebrow", uiLanguage)}</p>
@@ -1346,6 +1494,80 @@ export function RealmClient() {
               >
                 {uiText("ui.record.branch", uiLanguage)}
               </button>
+              {envelope.viewer.membershipRole !== "observer" ? (
+                <button
+                  className="record-action-button"
+                  data-testid="scene-image-generate"
+                  disabled={recordActionBusy || sceneImageBusy}
+                  onClick={() => void generateSceneImage()}
+                  type="button"
+                >
+                  {sceneImageBusy
+                    ? uiText("ui.recordScene.busy", uiLanguage)
+                    : envelope.sceneImage
+                      ? uiText("ui.recordScene.regenerate", uiLanguage)
+                      : uiText("ui.recordScene.generate", uiLanguage)}
+                </button>
+              ) : null}
+              {/* 自动场景图模式（账号级偏好；默认 off；选择即持久化）。
+                  observer 可读自己的设置；无玩家回合故不会触发。 */}
+              <div className="scene-auto-control">
+                <button
+                  aria-expanded={sceneAutoOpen}
+                  aria-haspopup="dialog"
+                  className="record-action-button"
+                  data-testid="scene-auto-toggle"
+                  onClick={() => setSceneAutoOpen((open) => !open)}
+                  type="button"
+                >
+                  {uiText("ui.sceneAuto.control", uiLanguage)}：{uiText(`ui.sceneAuto.mode.${sceneAutoMode}`, uiLanguage)}
+                </button>
+                {sceneAutoOpen ? (
+                  <div
+                    className="scene-auto-menu"
+                    role="group"
+                    aria-label={uiText("ui.sceneAuto.control", uiLanguage)}
+                  >
+                    {(["off", "scene_change", "every_turn"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        aria-pressed={sceneAutoMode === mode}
+                        className={sceneAutoMode === mode ? "is-selected" : ""}
+                        onClick={() => void saveSceneAutoMode(mode)}
+                        type="button"
+                      >
+                        {uiText(`ui.sceneAuto.mode.${mode}`, uiLanguage)}
+                      </button>
+                    ))}
+                    <p className="scene-auto-note">{uiText("ui.sceneAuto.note", uiLanguage)}</p>
+                    {sceneAutoNotice ? (
+                      <p className="scene-auto-notice" role="status">{sceneAutoNotice}</p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              {/* worker 心跳不可用且自动模式开启：明确「后台 Worker 未连接」，
+                  不让 queued 被误读成真正的排队。 */}
+              {sceneAutoMode !== "off" && sceneWorkerState === "unavailable" ? (
+                <span
+                  className="record-timeline-badge"
+                  data-testid="scene-worker-unavailable"
+                  role="status"
+                >
+                  {uiText("ui.sceneAuto.workerUnavailable", uiLanguage)}
+                </span>
+              ) : null}
+              {envelope.sceneImageJob && envelope.sceneImageJob.status !== "ready" ? (
+                <span
+                  className="record-timeline-badge"
+                  data-testid="scene-image-job"
+                  role="status"
+                >
+                  {envelope.sceneImageJob.status === "queued" && sceneWorkerState === "unavailable"
+                    ? uiText("ui.recordScene.job.waitingWorker", uiLanguage)
+                    : uiText(`ui.recordScene.job.${envelope.sceneImageJob.status}`, uiLanguage)}
+                </span>
+              ) : null}
               {currentRecordMeta?.timelineKind === "retrospection" ? (
                 <button
                   className="record-action-button is-canon"
@@ -1357,6 +1579,9 @@ export function RealmClient() {
                 </button>
               ) : null}
             </div>
+            {sceneImageNotice ? (
+              <p className="record-scene-status" role="status">{sceneImageNotice}</p>
+            ) : null}
           </header>
 
           {retrospectionConfirm && currentRecordMeta?.timelineKind === "retrospection" ? (

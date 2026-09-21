@@ -1,22 +1,21 @@
 {
   "name": "realm-character-runtime",
   "version": "0.1.0",
-  "private": false,
+  "private": true,
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "node scripts/dev-server.mjs dev",
+    "dev": "npm run db:postgres:bootstrap && node scripts/dev-server.mjs dev",
     "build": "vinext build",
     "start": "node scripts/dev-server.mjs start",
     "setup:web": "node scripts/setup-web.mjs",
     "typecheck": "tsc --noEmit",
-    "test:core": "node --experimental-strip-types --test tests/runtime-turn.test.ts tests/m2-orchestration.test.ts tests/memory-recall.test.ts tests/memory-pipeline.test.ts tests/model-inference.test.ts tests/model-provider-config.test.ts tests/m4-m5-core.test.ts tests/m3-memory-completion.test.ts tests/m4-streaming-interruption.test.ts tests/m4-record-service.test.ts tests/m5-world-governance.test.ts tests/m5-batch2.test.ts tests/auth-session.test.ts tests/world-genesis.test.ts tests/scene-crystallization.test.ts tests/genesis-suggestions.test.ts tests/genesis-chat.test.ts tests/action-suggestions.test.ts tests/character-profile.test.ts tests/world-style.test.ts tests/i18n.test.ts tests/tavern-import.test.ts tests/presence.test.ts tests/rule-realization.test.ts tests/dice-systems.test.ts tests/self-play.test.ts tests/canon-readback.test.ts tests/m4-runtime-status.test.ts tests/semantic-review.test.ts tests/prompt-kit.test.ts tests/structured-output.test.ts tests/structured-output-repair.test.ts tests/prompt-system-audit.test.ts tests/dialogue-recipient.test.ts tests/world-growth.test.ts tests/json-schema-contract.test.ts tests/model-stage-policy.test.ts tests/stream-transport-timeout.test.ts tests/model-settings-gateway-cache.test.ts tests/model-call-observer.test.ts tests/context-budget-dedup.test.ts tests/true-cancellation.test.ts tests/envelope-parallelism.test.ts tests/crystallization-singleflight.test.ts tests/preview-cancel-auth.test.ts tests/model-call-observation-p1.test.ts tests/model-call-observation-p2.test.ts tests/model-provider-identity.test.ts tests/model-error-classification.test.ts tests/model-observation-errorcode.test.ts tests/model-stage-deadline.test.ts tests/narrator-english-authority.test.ts",
+    "test:core": "node --experimental-strip-types --test tests/runtime-turn.test.ts tests/m2-orchestration.test.ts tests/memory-recall.test.ts tests/memory-pipeline.test.ts tests/model-inference.test.ts tests/model-provider-config.test.ts tests/m4-m5-core.test.ts tests/m3-memory-completion.test.ts tests/m4-streaming-interruption.test.ts tests/m4-record-service.test.ts tests/m5-world-governance.test.ts tests/m5-batch2.test.ts tests/auth-session.test.ts tests/world-genesis.test.ts tests/scene-crystallization.test.ts tests/genesis-suggestions.test.ts tests/genesis-chat.test.ts tests/action-suggestions.test.ts tests/character-profile.test.ts tests/world-style.test.ts tests/i18n.test.ts tests/tavern-import.test.ts tests/presence.test.ts tests/rule-realization.test.ts tests/dice-systems.test.ts tests/self-play.test.ts tests/canon-readback.test.ts tests/m4-runtime-status.test.ts tests/semantic-review.test.ts tests/prompt-kit.test.ts tests/structured-output.test.ts tests/structured-output-repair.test.ts tests/prompt-system-audit.test.ts tests/dialogue-recipient.test.ts tests/world-growth.test.ts tests/json-schema-contract.test.ts tests/model-stage-policy.test.ts tests/stream-transport-timeout.test.ts tests/model-settings-gateway-cache.test.ts tests/model-call-observer.test.ts tests/context-budget-dedup.test.ts tests/true-cancellation.test.ts tests/envelope-parallelism.test.ts tests/crystallization-singleflight.test.ts tests/preview-cancel-auth.test.ts tests/model-call-observation-p1.test.ts tests/model-call-observation-p2.test.ts tests/model-provider-identity.test.ts tests/model-provider-catalog.test.ts tests/scene-image-prompt.test.ts tests/scene-image-workflow.test.ts tests/scene-visual-profiles.test.ts tests/comfyui-settings.test.ts tests/comfyui-client.test.ts tests/comfyui-settings-route.test.ts tests/scene-image-dispatch.test.ts tests/comfyui-history.test.ts tests/record-scene-image-ui.test.ts tests/scene-image-trigger.test.ts tests/scene-image-status.test.ts",
     "test:application": "node --experimental-strip-types --test tests/local-record-application.test.ts tests/memory-prefetch-application.test.ts tests/presence-application.test.ts tests/self-play-application.test.ts",
-    "test:frontend-contracts": "node --experimental-strip-types --test tests/frontend-record-contract.test.ts tests/semantic-segments.test.ts tests/semantic-review-ui-contract.test.ts tests/pending-submission-dice-reveal.test.ts tests/genesis-guided-contract.test.ts && node --test tests/world-transfer-ui-contract.test.mjs",
-    "test:lobby": "node --test tests/lobby-contract.test.mjs tests/lobby-invite-origin-contract.test.mjs && node --experimental-strip-types --test tests/transfer-error-boundary.test.ts tests/postgres-lobby.test.ts tests/postgres-preview-authorization.test.ts",
-    "test:contracts": "node --test tests/postgres-schema-contract.test.mjs tests/postgres-migration-runner.test.mjs tests/api-core-wiring.test.mjs tests/local-only-boundary.test.mjs tests/postgres-runtime-repository-contract.test.mjs tests/m5-runtime-status.test.mjs tests/world-write-gate-fence.test.mjs tests/desktop-windows-contract.test.mjs tests/desktop-macos-contract.test.mjs tests/web-bootstrap-contract.test.mjs && node --experimental-strip-types --test tests/realm-pack.test.ts && npm run test:application && npm run test:frontend-contracts && npm run test:lobby && npm run test:postgres-runtime",
+    "test:frontend-contracts": "node --experimental-strip-types --test tests/frontend-record-contract.test.ts tests/semantic-segments.test.ts tests/semantic-review-ui-contract.test.ts tests/pending-submission-dice-reveal.test.ts tests/genesis-guided-contract.test.ts && node --test tests/world-transfer-ui-contract.test.mjs tests/frontend-responsiveness-contract.test.mjs tests/genesis-entry-contract.test.mjs tests/theme-night-contract.test.mjs tests/record-scene-bg-contract.test.mjs",
+    "test:contracts": "node --test tests/postgres-schema-contract.test.mjs tests/postgres-migration-runner.test.mjs tests/api-core-wiring.test.mjs tests/documentation-layout.test.mjs tests/local-only-boundary.test.mjs tests/postgres-runtime-repository-contract.test.mjs tests/m5-runtime-status.test.mjs tests/d1-retirement-review.test.mjs tests/d1-pair-deletion-review.test.mjs tests/d1-drizzle-archive-review.test.mjs tests/d1-tooling-retirement-review.test.mjs tests/graph-auto-refresh-review.test.mjs tests/world-write-gate-fence.test.mjs tests/desktop-windows-contract.test.mjs tests/desktop-macos-contract.test.mjs tests/player-journey-contract.test.mjs tests/tauri-desktop-contract.test.mjs tests/lobby-contract.test.mjs tests/lobby-invite-origin-contract.test.mjs tests/launcher-advertised-origin.test.mjs tests/web-bootstrap-contract.test.mjs tests/anima-scene-manifest-contract.test.mjs tests/scene-image-wiring-contract.test.mjs tests/scene-image-worker-host.test.mjs tests/scene-image-worker-host-contract.test.mjs && node --experimental-strip-types --test tests/transfer-error-boundary.test.ts && node --experimental-strip-types --test tests/realm-pack.test.ts && npm run test:application && npm run test:frontend-contracts && npm run test:postgres-runtime",
     "test:render": "node --test tests/rendered-html.test.mjs",
     "test": "npm run typecheck && npm run test:core && npm run test:contracts && npm run build && npm run test:render",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .tauri-resources",
@@ -26,10 +25,17 @@
     "db:postgres:migrate": "node --env-file-if-exists=.env.local scripts/postgres-migrate.mjs",
     "db:postgres:seed": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/postgres-seed-demo.mjs",
     "db:postgres:bootstrap": "npm run db:postgres:start && npm run db:postgres:provision && npm run db:postgres:migrate && npm run db:postgres:seed",
-    "db:postgres:provision": "node scripts/local-provision-realm-transfer.mjs",
     "test:postgres-runtime": "node scripts/test-postgres-runtime-with-scratch.mjs",
+    "test:propagation-runtime-acceptance": "node --env-file-if-exists=.env.local scripts/require-local-postgres-env.mjs && node --env-file-if-exists=.env.local --experimental-strip-types --test --test-concurrency=1 tests/postgres-propagation-worker-runtime-acceptance.test.ts",
+    "db:postgres:provision": "node scripts/local-provision-realm-transfer.mjs",
     "desktop:windows:bundle": "node scripts/desktop/bundle-windows.mjs",
-    "desktop:macos:package": "bash scripts/desktop/package-macos.sh"
+    "desktop:macos:bundle": "node scripts/desktop/bundle-macos.mjs",
+    "desktop:macos:dmg": "node scripts/desktop/make-macos-dmg.mjs",
+    "desktop:macos:package": "bash scripts/desktop/package-macos.sh",
+    "desktop:tauri:prepare": "node scripts/desktop/prepare-tauri-resources.mjs",
+    "desktop:tauri:build": "bash scripts/desktop/build-tauri-desktop.sh",
+    "desktop:android:prepare": "node scripts/desktop/prepare-tauri-android.mjs",
+    "desktop:android:build": "bash scripts/desktop/build-tauri-android.sh"
   },
   "dependencies": {
     "fflate": "0.7.5",

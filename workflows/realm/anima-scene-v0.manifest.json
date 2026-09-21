@@ -1,0 +1,64 @@
+{
+  "manifestVersion": 1,
+  "id": "anima-scene-v0",
+  "title": "Anima scene workflows for REALM runtime (T2I + I2I)",
+  "runtime": "local",
+  "description": "Semantic manifest over the verified ComfyUI API graphs in this directory. REALM runtime code must resolve semantic bindings here instead of hardcoding raw node ids. Both graphs have run to success on the remote RTX 5090 ComfyUI host (smoke evidence 2026-09-19/20).",
+  "workflows": {
+    "t2i": {
+      "id": "anima-scene-t2i-v0",
+      "version": "0",
+      "kind": "text-to-image",
+      "graphFile": "anima-scene-t2i-v0.api.json",
+      "runtime": "local",
+      "requiresInputImage": false,
+      "outputNode": { "node": "9", "classType": "SaveImage" },
+      "modelDependencies": [
+        { "kind": "unet", "file": "anima-turbo-v1.0.safetensors", "node": "1", "input": "unet_name" },
+        { "kind": "clip", "file": "qwen_3_06b_base.safetensors", "node": "2", "input": "clip_name" },
+        { "kind": "vae", "file": "qwen_image_vae.safetensors", "node": "3", "input": "vae_name" }
+      ],
+      "bindings": {
+        "positivePrompt": { "node": "4", "input": "text" },
+        "negativePrompt": { "node": "5", "input": "text" },
+        "seed": { "node": "7", "input": "seed" },
+        "width": { "node": "6", "input": "width" },
+        "height": { "node": "6", "input": "height" },
+        "outputPrefix": { "node": "9", "input": "filename_prefix" }
+      }
+    },
+    "i2i": {
+      "id": "anima-scene-i2i-v0",
+      "version": "0",
+      "kind": "image-to-image",
+      "graphFile": "anima-scene-i2i-v0.api.json",
+      "runtime": "local",
+      "requiresInputImage": true,
+      "outputNode": { "node": "10", "classType": "SaveImage" },
+      "modelDependencies": [
+        { "kind": "unet", "file": "anima-turbo-v1.0.safetensors", "node": "1", "input": "unet_name" },
+        { "kind": "clip", "file": "qwen_3_06b_base.safetensors", "node": "2", "input": "clip_name" },
+        { "kind": "vae", "file": "qwen_image_vae.safetensors", "node": "3", "input": "vae_name" }
+      ],
+      "bindings": {
+        "positivePrompt": { "node": "6", "input": "text" },
+        "negativePrompt": { "node": "7", "input": "text" },
+        "seed": { "node": "8", "input": "seed" },
+        "inputImage": { "node": "4", "input": "image", "runtimeOverride": true },
+        "denoise": { "node": "8", "input": "denoise" },
+        "outputPrefix": { "node": "10", "input": "filename_prefix" }
+      }
+    }
+  },
+  "smokeInput": {
+    "workflow": "i2i",
+    "binding": "inputImage",
+    "node": "4",
+    "classType": "LoadImage",
+    "note": "Graph carries the ComfyUI input-directory placeholder filename realm_anima_scene_v0_input.png; runtime must always override this binding with an uploaded image. No remote temp/input absolute path is recorded anywhere in this manifest."
+  },
+  "deferredEnhancements": {
+    "note": "AnimaLLLite / ControlNet / tinyterraNodes are NOT required by these graphs; they gate future I2I control enhancement and must not be treated as current dependencies.",
+    "required": []
+  }
+}

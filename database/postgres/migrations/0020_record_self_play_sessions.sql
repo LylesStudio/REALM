@@ -1,5 +1,5 @@
 -- REALM Record Self-Play Sessions
--- 批次 T7（public documentation）：记录级「世界自演」会话账本。
+-- 批次 T7（docs/development/T7-OBSERVATION-VISION.md）：记录级「世界自演」会话账本。
 -- 观察者/成员显式触发一次自演（beat_budget 拍），调度器逐拍推进并心跳；
 -- 取消只进 stopping，拍边界收束为 cancelled；进程崩溃残留的活动行由
 -- 信封投影懒恢复（心跳超时落 failed）。终态行保留作审计，不删除。

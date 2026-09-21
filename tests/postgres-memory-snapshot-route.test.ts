@@ -1,6 +1,6 @@
 /**
  * 批次 T10-B4——/api/memory/snapshot 与 /api/memory/delta 生产入口
- * （public documentation §五）。
+ * （docs/development/T10-B4-MEMORY-D1-RETIREMENT.md §五）。
  * 真实临时 PG 库（t.after 拆库，受限 realm_runtime 池走路由）：
  * snapshot 404/400/伪造字段不生效/合法创建全字段；delta 初次为空、新增后
  * 出现增量、update/retract 后 epoch 递进旧 delta stale、伪造 snapshot 404；
@@ -24,6 +24,10 @@ import {
 } from "../database/postgres/public.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { lexicalEmbedding } from "../modules/memory/public.ts";
+import { createSessionValue } from "../modules/identity/auth.ts";
+
+// 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
+const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -133,7 +137,7 @@ test(
     const badKind = await snapshotPOST(
       new Request("http://localhost/api/memory/snapshot", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({ recordId: recordScope.recordId, kind: "bogus" }),
       }),
     );
@@ -143,7 +147,7 @@ test(
     const missing = await snapshotPOST(
       new Request("http://localhost/api/memory/snapshot", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({ recordId: "record_nope" }),
       }),
     );
@@ -153,7 +157,7 @@ test(
     const created = await snapshotPOST(
       new Request("http://localhost/api/memory/snapshot", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { cookie: sessionCookie, "Content-Type": "application/json" },
         body: JSON.stringify({
           recordId: recordScope.recordId,
           kind: "representation",
@@ -192,6 +196,7 @@ test(
     const first = await deltaGET(
       new Request(
         `http://localhost/api/memory/delta?recordId=${recordScope.recordId}&snapshotId=${snapshot.id}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     assert.equal(first.status, 200);
@@ -221,6 +226,7 @@ test(
     const afterAdd = await deltaGET(
       new Request(
         `http://localhost/api/memory/delta?recordId=${recordScope.recordId}&snapshotId=${snapshot.id}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     const addDelta = ((await afterAdd.json()) as {
@@ -250,6 +256,7 @@ test(
     const stale = await deltaGET(
       new Request(
         `http://localhost/api/memory/delta?recordId=${recordScope.recordId}&snapshotId=${snapshot.id}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     const staleDelta = ((await stale.json()) as {
@@ -262,12 +269,14 @@ test(
     const noId = await deltaGET(
       new Request(
         `http://localhost/api/memory/delta?recordId=${recordScope.recordId}`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     assert.equal(noId.status, 400);
     const forged = await deltaGET(
       new Request(
         `http://localhost/api/memory/delta?recordId=${recordScope.recordId}&snapshotId=snap_forged`,
+        { headers: { cookie: sessionCookie } },
       ),
     );
     assert.equal(forged.status, 404);

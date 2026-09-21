@@ -20,7 +20,7 @@ import type { TavernRealmSkillDraft } from "../import/tavern-parser.ts";
 /**
  * 酒馆导入服务：角色 + 头像文件 + 世界书条目单事务原子落库。
  * 任一失败整体回滚；允许重复导入（每次新 id）。
- * 规范见 public documentation。
+ * 规范见 docs/development/TAVERN-IMPORT.md。
  */
 
 export interface TavernImportReport {
@@ -146,9 +146,9 @@ export async function importTavernBundle(
 
     async function insertBookEntries(entries: readonly TavernWorldBookEntry[]) {
       if (entries.length === 0) return;
-      // If the optional qualification schema is unavailable, keep lore empty
-      // rather than failing the main read path. Imported articles remain
-      // pending until the qualification path is available.
+      // 0041 未应用的库（如共享 realm_dev 在本阶段）：回落旧行为——
+      // 只写 world_articles；文章无资格行即 pending_review，永远不进
+      // prompt（fail-closed），导入功能本身不回退。
       const support = await client.query<{
         qualifications: unknown;
         entries: unknown;

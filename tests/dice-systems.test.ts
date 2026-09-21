@@ -1,6 +1,6 @@
 /**
  * 批次 T5 多骰系——引擎语义与 metadata.check 推导（确定性注入随机源）。
- * （public documentation §2.2/§4）
+ * （docs/development/T5-DICE-RANDOMNESS.md §2.2/§4）
  *
  * 覆盖：五骰系边界语义（暴击/大失败/夹取）、parseCheckSpecification
  * 推导与 fail-closed、抽牌不放回（内存 provider 历史排除与抽空）。

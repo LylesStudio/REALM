@@ -73,6 +73,20 @@ export interface RecordEnvelope {
     beatsCompleted: number;
     lastError: string | null;
   } | null;
+  /**
+   * 场景建立图（Stage 3）：当前 Record 最新 ready 背景；无图/旧数据 → null。
+   * fileUrl 恒为服务端生成的 /api/files/<id> 相对路径。
+   */
+  sceneImage: {
+    fileId: string;
+    fileUrl: string;
+    status: "ready";
+  } | null;
+  /** 自动请求状态（0050 队列安全摘要）；无请求/旧数据 → null。 */
+  sceneImageJob: {
+    status: "queued" | "running" | "ready" | "failed";
+    triggerKind: "scene_change" | "every_turn";
+  } | null;
 }
 
 export interface VisibilityProposal {
@@ -729,7 +743,39 @@ export function normalizeRecordEnvelope(
       : [],
     firstNight: normalizeFirstNight(source.firstNight),
     selfPlay: normalizeSelfPlay(source.selfPlay),
+    sceneImage: normalizeSceneImage(source.sceneImage),
+    sceneImageJob: normalizeSceneImageJob(source.sceneImageJob),
   };
+}
+
+/** 自动请求状态（0050）：fail-closed——形状非法一律 null。 */
+function normalizeSceneImageJob(
+  value: unknown,
+): RecordEnvelope["sceneImageJob"] {
+  if (!isObject(value)) return null;
+  const status = value.status;
+  const triggerKind = value.triggerKind;
+  if (
+    (status !== "queued" && status !== "running" && status !== "ready" && status !== "failed")
+    || (triggerKind !== "scene_change" && triggerKind !== "every_turn")
+  ) return null;
+  return { status, triggerKind };
+}
+
+/** 场景建立图（Stage 3）：fail-closed——形状非法/null 一律 null（保持旧背景）。 */
+function normalizeSceneImage(
+  value: unknown,
+): RecordEnvelope["sceneImage"] {
+  if (!isObject(value)) return null;
+  const fileId = asString(value.fileId);
+  const fileUrl = asString(value.fileUrl);
+  if (
+    !fileId
+    || value.status !== "ready"
+    // 只接受服务端相对路径，绝不拼外部/绝对 URL 进背景层。
+    || !/^\/api\/files\/[a-z0-9_]+$/i.test(fileUrl)
+  ) return null;
+  return { fileId, fileUrl, status: "ready" };
 }
 
 /**
