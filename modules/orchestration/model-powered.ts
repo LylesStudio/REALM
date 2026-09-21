@@ -157,12 +157,12 @@ const CHARACTER_AUTHORITY_RULE =
 /** 静态 English system policy：规则 + 文风 + 变量化语言规则。 */
 function systemPolicy(
   rules: readonly string[],
-  options: { style?: WorldStyle } = {},
+  options: { style?: WorldStyle; language?: string } = {},
 ): string {
   return [
     ...rules,
     stylePromptBlock(options.style ?? DEFAULT_STYLE),
-    outputLanguageRule(),
+    outputLanguageRule(options.language),
     LORE_BACKGROUND_RULE,
   ].join("\n");
 }
@@ -513,6 +513,8 @@ export function createModelPoweredM2TurnOrchestrator(options: {
   brief?: WorldSceneBrief;
   /** 世界文风（缺省 modern）。 */
   style?: WorldStyle;
+  /** 世界内系统文本语言（缺省 zh-CN）。 */
+  language?: string;
   /**
    * 批次 T4：规则包注入点——真实模型路径注入 PostgreSQL 数据驱动规则包；
    * 缺省沿用本地演示规则包（纯内存测试组合）。
@@ -538,6 +540,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
     structuralDM,
     brief: options.brief,
     style: options.style,
+    language: options.language,
     stageDeadlineMs: options.stageDeadlineMs,
   });
   return createLocalM2TurnOrchestrator({
@@ -548,6 +551,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
       options.previewSink,
       options.brief,
       options.style,
+      options.language,
       options.subjectContext?.recordKnowledge,
       options.stageDeadlineMs,
     ),
@@ -560,6 +564,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
       options.previewSink,
       options.brief,
       options.style,
+      options.language,
       options.characterSkillProvider,
       options.subjectContext,
       options.stageDeadlineMs,
@@ -575,6 +580,7 @@ export function createModelPoweredM2TurnOrchestrator(options: {
 export function createModelDynamicDiscoveryGenerator(options: {
   getGateway: () => Promise<ModelGateway>;
   style?: WorldStyle;
+  language?: string;
 }): DynamicDiscoveryGenerator {
   const schema = jsonOutputInstruction([
     {
@@ -611,7 +617,7 @@ export function createModelDynamicDiscoveryGenerator(options: {
             CONTEXT_MATERIAL_RULE,
             NO_UNSUPPORTED_FACTS_RULE,
             NATURAL_VOICE_RULES,
-          ], { style: options.style }),
+          ], { style: options.style, language: options.language ?? input.context.language }),
           user: composeContext([
             worldContextFromDiscovery(context),
             // SWM v2：discovery 链同样消费合格 lore（背景参考，空缺席）。
@@ -672,6 +678,7 @@ export function createModelVisibilityAssessor(options: {
   getGateway: () => Promise<ModelGateway>;
   brief?: WorldSceneBrief;
   style?: WorldStyle;
+  language?: string;
 }) {
   const schema = jsonOutputInstruction([
     { name: "visibility", kind: "enum", values: ["public", "restricted"] },
@@ -703,7 +710,7 @@ export function createModelVisibilityAssessor(options: {
           CONTEXT_MATERIAL_RULE,
           CANON_BINDING_RULE,
           CONCISE_RATIONALE_RULE,
-        ], { style: options.style }),
+        ], { style: options.style, language: options.language ?? "zh-CN" }),
         user: composeContext([
           ...worldBlocks(options.brief),
           contextBlock("Player", {
@@ -740,6 +747,7 @@ export function createModelPresenceAssessor(options: {
   getGateway: () => Promise<ModelGateway>;
   brief?: WorldSceneBrief;
   style?: WorldStyle;
+  language?: string;
 }): PresenceAssessor {
   return {
     async assess({ context, candidates, budget, signal }) {
@@ -762,7 +770,7 @@ export function createModelPresenceAssessor(options: {
               CONTEXT_MATERIAL_RULE,
               CANON_BINDING_RULE,
               CONCISE_RATIONALE_RULE,
-            ], { style: options.style }),
+            ], { style: options.style, language: options.language ?? "zh-CN" }),
             user: composeContext([
               ...worldBlocks(options.brief),
               contextBlock("Presence budget for this turn", budget),
@@ -825,6 +833,7 @@ function createModelDMController(options: {
   structuralDM: DMController;
   brief?: WorldSceneBrief;
   style?: WorldStyle;
+  language?: string;
   stageDeadlineMs?: number;
 }): DMController {
   return {
@@ -843,7 +852,7 @@ function createModelDMController(options: {
           "If this turn's visibility is restricted, you may only activate characters inside the restricted audience; the Narrator may keep describing inanimate environment or public outcomes, but must never restate secret content.",
           CONTEXT_MATERIAL_RULE,
           CANON_BINDING_RULE,
-        ], { style: options.style }),
+        ], { style: options.style, language: options.language ?? "zh-CN" }),
         user: composeContext([
           ...worldBlocks(options.brief, { includeLore: true }),
           contextBlock("Available characters", roster),
@@ -931,6 +940,7 @@ function createModelDMController(options: {
         input.playerText,
         options.brief,
         options.style,
+        options.language,
         input.signal,
         options.stageDeadlineMs,
       );
@@ -998,6 +1008,7 @@ async function reviewCandidateWithModel(
   playerText?: string,
   brief?: WorldSceneBrief,
   style?: WorldStyle,
+  language?: string,
   signal?: AbortSignal,
   stageDeadlineMs?: number,
 ): Promise<{ mode: "model" | "degraded"; vetoes: number; reason: string }> {
@@ -1017,7 +1028,7 @@ async function reviewCandidateWithModel(
           "Check whether the candidate output ends completely, is consistent with the given world facts, leaks no rule-mechanics vocabulary, and makes no undeclared decisions for characters.",
           CONTEXT_MATERIAL_RULE,
           CANON_BINDING_RULE,
-        ], { style }),
+        ], { style, language: language ?? "zh-CN" }),
         user: composeContext([
           ...worldBlocks(brief),
           contextBlock("Player input", playerText ?? "(not provided)"),
@@ -1096,6 +1107,7 @@ function createModelCharacterRunner(
   previewSink?: (event: ModelPreviewEvent) => void,
   brief?: WorldSceneBrief,
   style?: WorldStyle,
+  language?: string,
   characterSkillProvider?: CharacterSkillProvider,
   subjectContext?: DialogueSubjectContext,
   stageDeadlineMs?: number,
@@ -1171,7 +1183,7 @@ function createModelCharacterRunner(
               "Never stand in for another character, and do not write the character's spoken lines here.",
               CONTEXT_MATERIAL_RULE,
               CANON_BINDING_RULE,
-            ], { style }),
+            ], { style, language: language ?? "zh-CN" }),
           },
           {
             role: "user",
@@ -1265,7 +1277,7 @@ function createModelCharacterRunner(
             CONTEXT_MATERIAL_RULE,
             CANON_BINDING_RULE,
             NATURAL_VOICE_RULES,
-          ], { style }),
+          ], { style, language: language ?? "zh-CN" }),
           user: composeContext([
             ...worldBlocks(brief, { includeLore: true }),
             characterContextBlock(character),
@@ -1344,7 +1356,7 @@ function createModelCharacterRunner(
             CONTEXT_MATERIAL_RULE,
             CANON_BINDING_RULE,
             NATURAL_VOICE_RULES,
-          ], { style }),
+          ], { style, language: language ?? "zh-CN" }),
           user: composeContext([
             ...worldBlocks(brief, { includeLore: true }),
             characterContextBlock(character),
@@ -1407,7 +1419,7 @@ function createModelCharacterRunner(
           "Do not describe world outcomes on the Narrator's behalf.",
           CONTEXT_MATERIAL_RULE,
           CANON_BINDING_RULE,
-        ], { style }),
+        ], { style, language: language ?? "zh-CN" }),
         user: composeContext([
           ...worldBlocks(brief, { includeLore: true }),
           characterContextBlock(character),
@@ -1464,6 +1476,7 @@ function createModelNarrator(
   previewSink?: (event: ModelPreviewEvent) => void,
   brief?: WorldSceneBrief,
   style?: WorldStyle,
+  language?: string,
   recordKnowledge?: readonly string[],
   stageDeadlineMs?: number,
 ): Narrator {
@@ -1501,7 +1514,7 @@ function createModelNarrator(
             CONTEXT_MATERIAL_RULE,
             CANON_BINDING_RULE,
             NATURAL_VOICE_RULES,
-          ], { style }),
+          ], { style, language: language ?? "zh-CN" }),
           user: composeContext([
             ...worldBlocks(brief, { includeLore: true }),
             recordKnowledgeBlock(recordKnowledge),

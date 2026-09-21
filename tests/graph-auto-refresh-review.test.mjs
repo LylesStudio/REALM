@@ -11,7 +11,7 @@
  * 字符串禁用（注释/文档字样合法）。
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -105,18 +105,15 @@ test("graph read APIs stay cursor-free; the invalidation contract lives in the l
   assert.match(route, /Last-Event-ID/);
 });
 
-test("the T11-A2 spec keeps the ledger-first invariants", () => {
-  const doc = readFileSync(
-    join(projectRoot, "docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md"),
-    "utf8",
-  );
+test("the T11-A2 spec keeps the ledger-first invariants when the internal spec is present", () => {
+  const specPath = join(projectRoot, "docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md");
+  const reviewPath = join(projectRoot, "docs/development/T10-B22-A-GRAPH-AUTO-REFRESH-REVIEW.md");
+  if (!existsSync(specPath) || !existsSync(reviewPath)) return;
+  const doc = readFileSync(specPath, "utf8");
   assert.match(doc, /graph_invalidation_events/);
   assert.match(doc, /NOTIFY 只是低延迟唤醒|NOTIFY 仅作/);
   assert.match(doc, /事务回滚则失效记录同样\s*回滚/);
   // T10-B22-A 评审文档是历史记录（当时结论），不静默改写。
-  const review = readFileSync(
-    join(projectRoot, "docs/development/T10-B22-A-GRAPH-AUTO-REFRESH-REVIEW.md"),
-    "utf8",
-  );
+  const review = readFileSync(reviewPath, "utf8");
   assert.match(review, /维持手动刷新/);
 });

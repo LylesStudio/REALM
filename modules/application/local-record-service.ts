@@ -177,6 +177,7 @@ function demoRecordRuntimeScope(): RecordRuntimeScope {
     calendarId: "truce_calendar",
     displayTime: "停战纪元17年 · 雾月12日 · 入夜",
     style: "classical",
+    language: "zh-CN",
     worldStatus: "active",
     brief: {
       worldName: "烬海诸国",
@@ -1786,7 +1787,9 @@ export function createLocalRecordService(
             input.principalId,
           );
           const instruction = selfPlayInstruction(
-            before.projection.world.language ?? "zh-CN",
+            input.runtimeScope.brief.language
+              ?? before.projection.world.language
+              ?? "zh-CN",
           );
           const buildSelfPlayCommand = (
             expectedRecordVersion: number,
@@ -3586,12 +3589,14 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
       getGateway: () => modelSettings.gateway(),
       brief: scope.brief,
       style: scope.style,
+      language: scope.language,
     }),
     // 批次 T3：回合后在场门禁（fail-closed）+ 关系读写走 T2 既有接口。
     presenceAssessorFactory: (scope) => createModelPresenceAssessor({
       getGateway: () => modelSettings.gateway(),
       brief: scope.brief,
       style: scope.style,
+      language: scope.language,
     }),
     characterMemory: memory,
     orchestratorFactory: (scope) => createModelPoweredM2TurnOrchestrator({
@@ -3599,6 +3604,7 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
       getGateway: () => modelSettings.gateway(),
       brief: scope.brief,
       style: scope.style,
+      language: scope.language,
       // 对话主体上下文：当前 Record 可寻址名册（player/NPC 复用既有
       // participantId）+ 带主体信息的最近公开对话摘要（仅 public 事件，
       // 由 record-scope 的授权查询保证）。
@@ -3625,9 +3631,11 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
         dynamicDiscoveryGenerator: createModelDynamicDiscoveryGenerator({
           getGateway: () => modelSettings.gateway(),
           style: scope.style,
+          language: scope.language,
         }),
         dynamicDiscoveryContext: {
           ...scope.brief,
+          language: scope.language,
           canon: typeof scope.brief.canon === "string" ? scope.brief.canon : "",
           recentPublicEvents: scope.recentPublicEvents,
         },

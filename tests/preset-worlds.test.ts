@@ -4,6 +4,7 @@ import { normalizeGenesisDraft } from "../modules/application/world-genesis-cont
 import {
   PRESET_WORLD_KEYS,
   getPresetWorld,
+  getPresetWorldDraft,
   listPresetWorlds,
 } from "../modules/application/preset-worlds.ts";
 
@@ -14,6 +15,21 @@ test("listPresetWorlds exposes the three playable presets", () => {
     ["anime-hero", "dnd-tavern", "urban-cultivation"].sort(),
   );
 });
+
+test("each preset supplies a first playable draft in every supported language", () => {
+  for (const key of PRESET_WORLD_KEYS) {
+    for (const language of ["zh-CN", "en", "ja"] as const) {
+      const draft = getPresetWorldDraft(key, language);
+      assert.ok(draft, `${key}/${language} should resolve`);
+      assert.equal(draft.language, language);
+      assert.ok(draft.opening.length > 0, `${key}/${language} opening required`);
+      assert.ok(draft.scene.objective.length > 0, `${key}/${language} objective required`);
+    }
+  }
+  assert.match(getPresetWorldDraft("anime-hero", "en")!.opening, /bell|mountains/i);
+  assert.match(getPresetWorldDraft("anime-hero", "ja")!.opening, /鐘|山脈/);
+});
+
 
 test("each preset key resolves to a defined world", () => {
   for (const key of PRESET_WORLD_KEYS) {

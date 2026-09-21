@@ -95,6 +95,7 @@ test("orchestration turn: every system message is English-only, dynamic data sta
     characters: [SCOUT],
     getGateway: async () => gateway,
     brief: CHINESE_BRIEF,
+    language: "zh-CN",
   });
   await orchestrator.plan({ turnId: "turn-audit", playerText: "我抬头看灯。" });
   assertSystemEnglishOnly(captured, "DM plan");
@@ -106,6 +107,7 @@ test("orchestration turn: every system message is English-only, dynamic data sta
   assert.ok(!system.includes("烬海诸国"), "动态世界名不得进 system");
   assert.ok(!system.includes("塞娜"), "动态角色名不得进 system");
   assert.match(system, /binding established history/);
+  assert.match(system, /configured language \(zh-CN\)/);
 });
 
 test("visibility and presence gates are English-only classifiers without voice rules", async () => {
@@ -178,6 +180,7 @@ test("natural-language chains carry voice rules; dynamic names stay out of syste
     characters: [SCOUT],
     getGateway: async () => routingGateway,
     brief: CHINESE_BRIEF,
+    language: "zh-CN",
   });
   const plan = {
     goal: "回应玩家",
@@ -200,6 +203,7 @@ test("natural-language chains carry voice rules; dynamic names stay out of syste
     const system = call.messages[0]?.content ?? "";
     assert.ok(!CJK.test(system));
     assert.ok(system.includes(VOICE_MARKER), "自然语言链必须有 anti-AI voice 规则");
+    assert.match(system, /configured language \(zh-CN\)/);
     assert.ok(!system.includes("塞娜"), "动态角色名不得进 system");
   }
   for (const call of reactCalls) {
@@ -271,12 +275,13 @@ test("first-night messages: English system, dynamic world data in user, voice ru
     playerName: "旅人",
     playerStance: "player",
     style: "modern",
+    language: "zh-CN",
   });
   assert.ok(!CJK.test(system), "first-night system 不得含 CJK");
   assert.ok(system.includes(VOICE_MARKER));
   assert.ok(user.includes("烬海诸国") && user.includes("塞娜"), "动态资料在 user");
   assert.ok(!system.includes("简体中文"), "语言规则不再写死简体中文");
-  assert.match(system, /configured language/);
+  assert.match(system, /configured language \(zh-CN\)/);
 });
 
 test("genesis draft/chat/suggestions and semantic conflict systems are English-only", async () => {

@@ -77,11 +77,11 @@ function describeDraft(draft: Partial<WorldGenesisDraft> | null): string {
 const SCRIBE_SCHEMA = jsonOutputInstruction([
   { name: "reply", kind: "string", maxLength: MAX_REPLY_CHARS, note: "what you say to the player (a follow-up question, a comment, an explanation)" },
   { name: "phase", kind: "enum", values: GENESIS_CHAT_PHASES, note: "exploring = still learning intent; proposing = giving or updating the proposal this turn; ready = proposal settled and ready to commit" },
-  { name: "draftPatch", kind: "object", note: "only fields added or changed this turn; null when nothing settles. Once world is given it must include name (the world's name is the first stroke); until a name is settled, omit world entirely" },
+  { name: "draftPatch", kind: "object", note: "only fields added or changed this turn; may include language (zh-CN, en, or ja) when the player's language is established; null when nothing settles. Once world is given it must include name (the world's name is the first stroke); until a name is settled, omit world entirely" },
   { name: "opening", kind: "string", required: false, maxLength: MAX_OPENING_CHARS, note: "the opening narration shown when the record begins; only when phase is ready" },
 ]);
 
-const SCRIBE_SYSTEM_PROMPT = [
+const buildScribeSystemPrompt = (language?: string): string => [
   "You are REALM's Scribe, guiding a player through free-form conversation to write a new world into being.",
   "Pace and manner:",
   "- Ask one focus at a time; pick up the player's free input and follow it; never fire questions in a burst.",
@@ -93,7 +93,7 @@ const SCRIBE_SYSTEM_PROMPT = [
   SCRIBE_SCHEMA,
   `draftPatch.style, when present, is one of: ${WORLD_STYLE_KEYS.join(", ")}.`,
   NATURAL_VOICE_RULES,
-  outputLanguageRule(),
+  outputLanguageRule(language),
 ].join("\n");
 
 /**
@@ -112,6 +112,8 @@ export async function generateGenesisChatReply(
     message: string;
     transcript: readonly GenesisChatTurn[];
     draft: Partial<WorldGenesisDraft> | null;
+    /** 当前界面/系统语言；玩家本轮输入语言优先。 */
+    language?: string;
     /** 退化响应兜底用的备选模型（与当前选择不同时启用第三轮尝试）。 */
     fallbackModel?: string;
   },
@@ -137,7 +139,7 @@ export async function generateGenesisChatReply(
 
   const chatRequest = {
     messages: [
-      { role: "system", content: SCRIBE_SYSTEM_PROMPT },
+      { role: "system", content: buildScribeSystemPrompt(input.language) },
       ...history,
       {
         role: "user",

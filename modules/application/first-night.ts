@@ -1,3 +1,7 @@
+import {
+  normalizeGenesisLanguage,
+  type GenesisLanguage,
+} from "./world-genesis-contract.ts";
 import type { ModelGateway } from "../inference/public.ts";
 import {
   NATURAL_VOICE_RULES,
@@ -33,6 +37,8 @@ export const FIRST_NIGHT_MAX_ATTEMPTS = 3;
 export interface FirstNightContext {
   world: { name: string; era: string; summary: string };
   style: WorldStyle;
+  /** 初夜输出语言：由预设/账号系统语言确定，最新玩家输入可在回合链中覆盖。 */
+  language: GenesisLanguage;
   story: { title: string; premise: string };
   /** 人类玩家在本世界的角色定位。 */
   playerRole: string;
@@ -120,6 +126,7 @@ export function normalizeFirstNightContext(value: unknown): FirstNightContext | 
       summary: clampText(world.summary, 160),
     },
     style: normalizeWorldStyle(value.style),
+    language: normalizeGenesisLanguage(value.language) ?? "zh-CN",
     story: {
       title: clampText(story.title, 40),
       premise: clampText(story.premise, 200),
@@ -282,8 +289,7 @@ export function buildFirstNightMessages(
     NATURAL_VOICE_RULES,
     FIRST_NIGHT_SCHEMA,
     stylePromptBlock(context.style),
-    // 语言规则：跟随既有卷首旁白；空时用世界配置语言（fail-closed 不定死）。
-    "Write in the language of the existing opening narration. If there is no opening narration, use the world's configured language.",
+    `Write every natural-language field in the configured language (${context.language}) when there is no player-authored input. Do not infer a language from the anime/fantasy style or character names. Existing opening narration is source material and may use another language; adapt the generated output to the configured language.`,
   ].join("\n");
 
   const user = composeContext([
@@ -390,6 +396,7 @@ export function createFirstNightScheduler(options: {
 export const BLANK_FIRST_NIGHT_CONTEXT: FirstNightContext = {
   world: { name: "未命名世界", era: "", summary: "" },
   style: "modern",
+  language: "zh-CN",
   story: { title: "", premise: "" },
   playerRole: "",
   playerName: "",

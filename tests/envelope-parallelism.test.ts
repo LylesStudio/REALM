@@ -100,6 +100,7 @@ function stubScope(): RecordRuntimeScope {
     calendarId: "calendar_test",
     displayTime: "测试纪元 · 夜",
     style: "classical",
+    language: "zh-CN",
     worldStatus: "active",
     brief: {
       worldName: "信封世界",

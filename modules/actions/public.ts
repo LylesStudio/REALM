@@ -117,6 +117,8 @@ export function isInternalDiscoveryText(value: string): boolean {
 }
 
 export type DynamicDiscoveryContext = {
+  /** 世界内系统文本语言；缺省时 prompt kit 回落默认规则。 */
+  language?: string;
   worldName: string;
   era: string;
   summary: string;

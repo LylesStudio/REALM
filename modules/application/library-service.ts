@@ -17,8 +17,12 @@ import {
   composeDeterministicOpening,
   type FirstNightContext,
 } from "./first-night.ts";
-import { getPresetWorld } from "./preset-worlds.ts";
-import type { WorldGenesisDraft } from "./world-genesis.ts";
+import { getPresetWorld, getPresetWorldDraft } from "./preset-worlds.ts";
+import {
+  normalizeGenesisLanguage,
+  type GenesisLanguage,
+  type WorldGenesisDraft,
+} from "./world-genesis.ts";
 
 export interface LibraryScope {
   workspaceId: string;
@@ -117,7 +121,7 @@ export interface RecordBranchResult {
 
 export type LibraryCreateCommand =
   | { kind: "world"; name: string; era: string; summary: string }
-  | { kind: "preset-world"; presetKey: string }
+  | { kind: "preset-world"; presetKey: string; language?: string }
   | { kind: "story"; worldId: string; title: string; premise: string }
   | {
       kind: "record";
@@ -514,7 +518,13 @@ export function createPostgresLibraryService(
             if (!preset) {
               throw new LibraryServiceError("INVALID_COMMAND", "Unknown preset world key.");
             }
-            const ids = await this.createGenesis(scope, preset.draft);
+            const language = normalizeGenesisLanguage(command.language)
+              ?? await resolveAccountLanguage(client, scope);
+            const draft = getPresetWorldDraft(command.presetKey, language);
+            if (!draft) {
+              throw new LibraryServiceError("INVALID_COMMAND", "Preset world language is unavailable.");
+            }
+            const ids = await this.createGenesis(scope, draft);
             return { recordId: ids.recordId };
           }
 
@@ -893,6 +903,8 @@ export function createPostgresLibraryService(
         database,
         scope.workspaceId,
         async (client) => {
+          const contentLanguage = draft.language
+            ?? await resolveAccountLanguage(client, scope);
           const worldId = `world_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
           const worldlineId = `worldline_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
           const storyId = `story_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
@@ -910,6 +922,7 @@ export function createPostgresLibraryService(
               JSON.stringify({
                 era: draft.world.era,
                 style: draft.style,
+                language: contentLanguage,
                 weather: draft.scene.weather,
                 tension: draft.scene.tension,
               }),
@@ -1013,6 +1026,7 @@ export function createPostgresLibraryService(
               summary: draft.world.summary,
             },
             style: draft.style,
+            language: contentLanguage,
             story: { title: draft.story.title, premise: draft.story.premise },
             playerRole: draft.playerRole,
             playerName: (await resolvePlayerPersona(client, scope, worldId)).name,
@@ -1755,8 +1769,21 @@ interface PlayerPersona {
   role: string;
 }
 
+async function resolveAccountLanguage(
+  client: PoolClient,
+  scope: LibraryScope,
+): Promise<GenesisLanguage> {
+  const result = await client.query<{ ui_language: string }>(
+    `SELECT ui_language
+     FROM accounts
+     WHERE workspace_id = $1 AND principal_id = $2`,
+    [scope.workspaceId, scope.principalId],
+  );
+  return normalizeGenesisLanguage(result.rows[0]?.ui_language) ?? "zh-CN";
+}
+
 /**
- * 人类玩家名称解析：当前账号 displayName → 本世界种子人类定义 → 中性名。
+ * 人类玩家名称解析: 当前账号 displayName → 本世界种子人类定义 → 中性名。
  * 任何分支都不硬编码演示世界的角色名。
  */
 async function resolvePlayerPersona(

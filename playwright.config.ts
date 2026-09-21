@@ -30,6 +30,7 @@ export default defineConfig({
   reporter: [["list"]],
   outputDir: ".playwright/output",
   use: {
+    locale: "zh-CN",
     // 本机 dev server 的绑定地址由 systemd 服务管理；默认回环，
     // 服务绑定其他本机网卡时用 GUI_BASE_URL 指向实际地址。
     baseURL: process.env.GUI_BASE_URL ?? (process.env.HOST_BIND ? `http://${process.env.HOST_BIND}:9999` : "http://127.0.0.1:9999"),

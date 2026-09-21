@@ -244,8 +244,10 @@ const CAPABILITIES_SQL = `
       current_scene.location AS scene_location,
       COALESCE(world.settings->>'weather', '') AS scene_weather,
       COALESCE(world.settings->>'style', '') AS world_style,
-      COALESCE((
-        SELECT account.ui_language
+      COALESCE(
+        NULLIF(world.settings->>'language', ''),
+        (
+          SELECT account.ui_language
         FROM player_world_memberships AS owner_membership
         JOIN accounts AS account
           ON account.workspace_id = owner_membership.workspace_id

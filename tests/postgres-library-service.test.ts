@@ -146,11 +146,12 @@ test(
     const presetResult = await service.create(scope, {
       kind: "preset-world",
       presetKey: "dnd-tavern",
+      language: "en",
     });
     assert.ok(presetResult?.recordId, "preset-world should return a recordId");
     const afterPreset = await service.list(scope);
     const presetWorld = afterPreset.worlds.find(
-      (world) => world.name === "遗忘酒馆",
+      (world) => world.name === "The Forgotten Tavern",
     );
     assert.ok(presetWorld, "preset world should be listed");
     assert.equal(presetWorld?.style, "western_fantasy");
@@ -158,6 +159,13 @@ test(
     assert.equal(presetWorld?.stories[0]?.records.length, 1);
     assert.equal(presetWorld?.stories[0]?.records[0]?.id, presetResult.recordId);
     assert.equal(presetWorld?.characters.length, 3); // 玩家 + 2 名同伴
+    const presetSettings = await ownerPool.query<{ language: string }>(
+      `SELECT COALESCE(settings->>'language', '') AS language
+       FROM worlds
+       WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, presetWorld!.id],
+    );
+    assert.equal(presetSettings.rows[0]?.language, "en");
 
     const createdWorldAfterPreset = afterPreset.worlds.find(
       (world) => world.name === "白塔遗境",

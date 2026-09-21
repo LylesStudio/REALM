@@ -10,8 +10,20 @@ import { normalizeWorldStyle, type WorldStyle } from "../style/world-style.ts";
  * tests/frontend-record-contract.test.ts 的 client 依赖图围栏保证此边界。
  */
 
+export const GENESIS_LANGUAGES = ["zh-CN", "en", "ja"] as const;
+export type GenesisLanguage = (typeof GENESIS_LANGUAGES)[number];
+
+export function normalizeGenesisLanguage(value: unknown): GenesisLanguage | undefined {
+  return typeof value === "string"
+    && (GENESIS_LANGUAGES as readonly string[]).includes(value)
+    ? value as GenesisLanguage
+    : undefined;
+}
+
 export interface WorldGenesisDraft {
   world: { name: string; era: string; summary: string };
+  /** 初始运行内容语言；缺省时由当前账号的系统/界面语言补齐。 */
+  language?: GenesisLanguage;
   /** 世界文风；缺省 modern（未点选/留白跳过）。 */
   style: WorldStyle;
   story: { title: string; premise: string };
@@ -102,6 +114,9 @@ export function normalizeGenesisDraft(
     .slice(0, MAX_COMPANIONS);
 
   return {
+    ...(normalizeGenesisLanguage(source.language)
+      ? { language: normalizeGenesisLanguage(source.language) }
+      : {}),
     world: {
       name,
       era: clamp(world.era, GENESIS_LIMITS.era),

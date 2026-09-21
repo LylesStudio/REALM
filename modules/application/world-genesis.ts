@@ -8,6 +8,7 @@ import {
 } from "../inference/public.ts";
 import {
   GENESIS_LIMITS,
+  GENESIS_LANGUAGES,
   MAX_COMPANIONS,
   normalizeGenesisDraft,
   type WorldGenesisDraft,
@@ -25,9 +26,12 @@ import {
 // server API 与测试 import 路径兼容，不复制两份 normalizer 逻辑。
 export {
   fallbackGenesisDraft,
+  GENESIS_LANGUAGES,
+  normalizeGenesisLanguage,
   GENESIS_LIMITS,
   MAX_COMPANIONS,
   normalizeGenesisDraft,
+  type GenesisLanguage,
   type WorldGenesisDraft,
   type WorldGenesisSource,
 } from "./world-genesis-contract.ts";
@@ -40,6 +44,7 @@ export {
  * 变量化语言规则。
  */
 const GENESIS_SCHEMA = jsonOutputInstruction([
+  { name: "language", kind: "enum", values: GENESIS_LANGUAGES, note: "language used by the source inspiration; preserve it for the first playable output" },
   { name: "world", kind: "object", note: `{"name": <= ${GENESIS_LIMITS.worldName} chars, "era", "summary": <= ${GENESIS_LIMITS.summary} chars}` },
   { name: "story", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.storyTitle} chars, "premise": <= ${GENESIS_LIMITS.premise} chars}` },
   { name: "record", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.recordTitle} chars}` },

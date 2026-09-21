@@ -53,6 +53,7 @@ function fakeGateway(
 const FIRST_NIGHT_CONTEXT: FirstNightContext = {
   world: { name: "灯塔港", era: "潮声纪元", summary: "雾中灯塔。" },
   style: "modern",
+  language: "zh-CN",
   story: { title: "序章", premise: "守塔人失踪。" },
   playerRole: "守塔学徒",
   playerName: "",

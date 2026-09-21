@@ -122,6 +122,7 @@ function stubScope(recordId: string, workspaceId: string): RecordRuntimeScope {
     calendarId: "calendar_test",
     displayTime: "测试纪元 · 夜",
     style: "classical",
+    language: "zh-CN",
     worldStatus: "active",
     brief: {
       worldName: "单飞世界",

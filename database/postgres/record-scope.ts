@@ -23,6 +23,8 @@ export interface RecordRuntimeScope {
   displayTime: string;
   /** 世界文风（worlds.settings.style，缺省 modern）。 */
   style: WorldStyle;
+  /** 世界内系统文本语言（worlds.settings.language，缺省 zh-CN）。 */
+  language: string;
   /** 批次 T8：世界状态（worlds.status）——archived 世界只读，写路径拒绝。 */
   worldStatus: string;
   /** 世界/故事/场景快照：模型回合与设定结晶的设定依据。 */
@@ -155,6 +157,7 @@ export function createPostgresRecordRuntimeScopeRepository(
                world.calendar_id,
                COALESCE(world.settings->>'displayTime', '') AS display_time,
                COALESCE(world.settings->>'style', '') AS style,
+               COALESCE(world.settings->>'language', 'zh-CN') AS language,
                world.name AS world_name,
                world.status AS world_status,
                COALESCE(world.settings->>'era', '') AS era,
@@ -353,6 +356,7 @@ export function createPostgresRecordRuntimeScopeRepository(
                 ? ""
                 : recordRow.display_time,
             style: normalizeWorldStyle(recordRow.style),
+            language: recordRow.language || "zh-CN",
             brief: {
               worldName: recordRow.world_name,
               era: recordRow.era,

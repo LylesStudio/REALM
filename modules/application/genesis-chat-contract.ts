@@ -94,6 +94,9 @@ export function sanitizeDraftPatch(
   if (!isObject(patch)) return null;
   const result: Record<string, unknown> = {};
 
+  if (patch.language === "zh-CN" || patch.language === "en" || patch.language === "ja") {
+    result.language = patch.language;
+  }
   if (isObject(patch.world)) {
     const world: Record<string, string> = {};
     const name = clampText(patch.world.name, 40);

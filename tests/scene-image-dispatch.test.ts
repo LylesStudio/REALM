@@ -29,6 +29,7 @@ const SCOPE_FIXTURE: RecordRuntimeScope = {
   calendarId: "cal_test",
   displayTime: "纪元 17 年",
   style: "modern",
+  language: "zh-CN",
   worldStatus: "active",
   brief: {
     worldName: "WORLD_DISPATCH_XQ",

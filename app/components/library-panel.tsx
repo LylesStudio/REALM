@@ -83,7 +83,11 @@ export function LibraryPanel({
     if (busyPreset) return;
     setBusyPreset(preset.key);
     try {
-      await onCreate({ kind: "preset-world", presetKey: preset.key });
+      await onCreate({
+        kind: "preset-world",
+        presetKey: preset.key,
+        language: uiLanguage,
+      });
     } finally {
       setBusyPreset(null);
     }

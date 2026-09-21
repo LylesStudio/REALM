@@ -25,6 +25,10 @@ test.describe("A. 世界库", () => {
     await expect(
       world.locator(".library-record", { hasText: "第一幕 · 雾港来信" }),
     ).toBeVisible();
+    await expect(
+      page.locator(".library-preset-card"),
+    ).toHaveCount(3);
+    await expect(page.locator(".library-preset-card").first()).toBeVisible();
   });
 
   test("A2 创建世界：提交后出现在列表并自动获得原初世界线", async ({ page }) => {

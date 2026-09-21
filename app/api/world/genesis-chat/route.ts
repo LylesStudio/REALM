@@ -6,7 +6,10 @@ import {
   generateGenesisChatReply,
   truncateTranscript,
 } from "../../../../modules/application/genesis-chat.ts";
-import type { WorldGenesisDraft } from "../../../../modules/application/world-genesis.ts";
+import {
+  normalizeGenesisLanguage,
+  type WorldGenesisDraft,
+} from "../../../../modules/application/world-genesis.ts";
 import {
   resolveRequestPrincipal,
   unauthorizedResponse,
@@ -49,6 +52,7 @@ export async function POST(request: Request) {
     const message = typeof parsed.message === "string"
       ? parsed.message.trim().slice(0, MAX_MESSAGE_LENGTH)
       : "";
+    const language = normalizeGenesisLanguage(parsed.language);
     const transcript = truncateTranscript(parsed.transcript);
     const draft = isObject(parsed.draft)
       ? (parsed.draft as Partial<WorldGenesisDraft>)
@@ -68,6 +72,7 @@ export async function POST(request: Request) {
         message,
         transcript,
         draft,
+        language,
         fallbackModel,
       });
       if (!outcome) {

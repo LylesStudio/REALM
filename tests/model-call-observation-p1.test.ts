@@ -50,6 +50,7 @@ function captureObservations() {
 const FIRST_NIGHT_CONTEXT: FirstNightContext = {
   world: { name: "烬海诸国", era: "停战纪元 17 年", summary: "人魔停战后。" },
   style: "classical",
+  language: "zh-CN",
   story: { title: "无声钟的来客", premise: "密函上岸。" },
   playerRole: "人类使节",
   playerName: "洛川",

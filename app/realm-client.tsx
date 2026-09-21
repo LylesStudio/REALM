@@ -1287,7 +1287,11 @@ export function RealmClient() {
           onOpenLobby={() => setLobbyOpen(true)}
           onOpenRecord={openRecord}
           onCreatePreset={async (presetKey) =>
-            createLibraryItem({ kind: "preset-world", presetKey })
+            createLibraryItem({
+              kind: "preset-world",
+              presetKey,
+              language: uiLanguage,
+            })
           }
         />
         {renderCreationOverlay()}

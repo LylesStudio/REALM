@@ -3527,8 +3527,8 @@ button:disabled {
 
 .library-preset-grid {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
 }
 
 .library-preset-card {
@@ -3538,8 +3538,10 @@ button:disabled {
   color: var(--ink);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px;
+  gap: 8px;
+  min-width: 0;
+  min-height: 154px;
+  padding: 14px;
   text-align: left;
 }
 
@@ -3564,12 +3566,15 @@ button:disabled {
 .library-preset-card strong {
   font-family: var(--font-serif);
   font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .library-preset-card small {
   color: var(--ink-soft);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .library-preset-action {
@@ -3578,7 +3583,9 @@ button:disabled {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
-  margin-top: 4px;
+  margin-left: auto;
+  margin-top: auto;
+  padding-top: 6px;
 }
 
 .library-manual-toggle {
@@ -3849,8 +3856,8 @@ button:disabled {
 
 .onboarding-preset-grid {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
 }
 
 .onboarding-preset-card {
@@ -3860,8 +3867,10 @@ button:disabled {
   color: var(--ink);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 14px;
+  gap: 8px;
+  min-width: 0;
+  min-height: 158px;
+  padding: 16px;
   text-align: left;
 }
 
@@ -3886,12 +3895,15 @@ button:disabled {
 .onboarding-preset-card strong {
   font-family: var(--font-serif);
   font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .onboarding-preset-card small {
   color: var(--ink-soft);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .onboarding-preset-action {
@@ -3900,7 +3912,9 @@ button:disabled {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
-  margin-top: 4px;
+  margin-left: auto;
+  margin-top: auto;
+  padding-top: 6px;
 }
 
 .onboarding-worlds li small {
@@ -4305,6 +4319,22 @@ button:disabled {
     border-bottom: 1px solid var(--line-dark);
     border-right: 0;
     max-height: 240px;
+  }
+
+  .library-presets,
+  .onboarding-presets {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .library-preset-grid,
+  .onboarding-preset-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .library-preset-card,
+  .onboarding-preset-card {
+    min-height: 0;
   }
 }
 

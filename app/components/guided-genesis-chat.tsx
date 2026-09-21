@@ -68,6 +68,7 @@ export function GuidedGenesisChat({
         },
         body: JSON.stringify({
           message,
+          language: uiLanguage,
           transcript: turns,
           draft: draftRef.current,
         }),

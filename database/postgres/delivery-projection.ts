@@ -816,8 +816,10 @@ const META_SQL = `
       THEN COALESCE(world.settings->>'era', '') ELSE ''
     END AS era,
     COALESCE(world.settings->>'style', '') AS style,
-    COALESCE((
-      SELECT account.ui_language
+    COALESCE(
+      NULLIF(world.settings->>'language', ''),
+      (
+        SELECT account.ui_language
       FROM player_world_memberships AS owner_membership
       JOIN accounts AS account
         ON account.workspace_id = owner_membership.workspace_id

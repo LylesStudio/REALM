@@ -36,6 +36,7 @@ type LibraryRequest = {
   attachRecordId?: unknown;
   /** 批次 U：从预设世界模板一键创建。 */
   presetKey?: unknown;
+  language?: unknown;
   /** 批次 S：player-stance 命令——入局 / 观察者。 */
   stance?: unknown;
   /** 批次 T6：attach-character 命令——既有角色挂入既有记录。 */
@@ -109,6 +110,7 @@ function parseLibraryCommand(value: unknown): LibraryCreateCommand {
     return {
       kind,
       presetKey: requiredString(body.presetKey, "presetKey", 40),
+      language: optionalString(body.language, 10) || undefined,
     };
   }
   if (kind === "story") {
