@@ -15,6 +15,7 @@ import {
 } from "../../../../modules/application/world-genesis.ts";
 import { getSharedRuntimePool } from "../../world-scope.ts";
 import {
+  sessionProofFromRequest,
   resolveRequestPrincipal,
   unauthorizedResponse,
 } from "../../auth-context.ts";
@@ -60,7 +61,12 @@ export async function POST(request: Request) {
       }
       const service = await getLibraryService();
       const ids = await service.createGenesis(
-        { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId },
+        {
+          workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+          principalId,
+          // 0053：创世 owner 写入需 DB 可验证会话证明。
+          sessionProof: sessionProofFromRequest(request) ?? "",
+        },
         draft,
       );
       scheduleFirstNight(ids.recordId);

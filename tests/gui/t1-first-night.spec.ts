@@ -129,7 +129,7 @@ test.describe("T1. 世界初夜：落笔即有密度", () => {
     await card.locator(".scene-grid input").first().fill(sceneLocation);
 
     // 落笔入界：进入新记录（事务内确定性开场旁白已落库）。
-    await freshPage.getByRole("button", { name: "落笔入界" }).click();
+    await card.getByRole("button", { name: "创建世界" }).click();
     await waitForRecordReady(freshPage);
     await expect(freshPage.locator(".breadcrumb")).toContainText(editedName);
 
@@ -204,7 +204,7 @@ test.describe("T1. 世界初夜：落笔即有密度", () => {
     }
 
     // 落笔入界。
-    await freshPage.getByRole("button", { name: "落笔入界" }).click();
+    await card.getByRole("button", { name: "创建世界" }).click();
     await waitForRecordReady(freshPage);
     await expect(freshPage.locator(".breadcrumb")).toContainText(editedName);
 
@@ -265,7 +265,7 @@ test.describe("T1. 世界初夜：落笔即有密度", () => {
     }
 
     // 落笔入界 → 初夜完成（pending 状态条消失）。
-    await freshPage.getByRole("button", { name: "落笔入界" }).click();
+    await card.getByRole("button", { name: "创建世界" }).click();
     await waitForRecordReady(freshPage);
     await expect(freshPage.locator(".breadcrumb")).toContainText(editedName);
     await expect(freshPage.locator(".first-night-status")).toHaveCount(0, { timeout: 120_000 });

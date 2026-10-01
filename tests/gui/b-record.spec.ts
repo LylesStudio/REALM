@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { fallbackCompositeSemanticSegments } from "../../modules/presentation/semantic-segments.ts";
 import {
   createRecordViaApi,
   DEMO_RECORD_ID,
+  installPlayerEventProjectionFixture,
   openDemoRecord,
   openRecordViaLibrary,
   submitMessage,
-  submitMessageViaApi,
 } from "./helpers";
 
 const SEMANTIC_COLORS: Record<string, string> = {
@@ -35,10 +36,15 @@ test.describe("B. 记录页交互", () => {
     page,
     request,
   }) => {
-    // 造一条玩家事件覆盖动作/台词两类片段。
+    // 玩家段由确定性 projection fixture 提供；真实生成/落库由 B3/B4 和 PG 测试覆盖。
     const record = await createRecordViaApi(request);
-    const status = await submitMessageViaApi(request, record.id, "（环顾四周）这里好安静。");
-    expect(status).toBe(201);
+    const playerInput = "（环顾四周）这里好安静。";
+    await installPlayerEventProjectionFixture(
+      page,
+      record.id,
+      playerInput,
+      fallbackCompositeSemanticSegments(playerInput, "action"),
+    );
 
     // 演示记录的旁白事件覆盖环境/剧情/关键事实。
     await openDemoRecord(page);

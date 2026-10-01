@@ -99,7 +99,12 @@ test("Node-less wrappers offer explicit package-manager installation paths", () 
   assert.match(windows, /setup-web\.mjs/);
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(packageJson.scripts["db:postgres:bootstrap"], /db:postgres:provision/);
-  assert.equal(packageJson.scripts["db:postgres:provision"], "node scripts/local-provision-realm-transfer.mjs");
+  // owner/provision 凭据只从 .env.owner.local 读取（不进入 .env.local /
+  // Web 进程）。
+  assert.equal(
+    packageJson.scripts["db:postgres:provision"],
+    "node --env-file-if-exists=.env.owner.local scripts/local-provision-realm-transfer.mjs",
+  );
   assert.match(windowsLauncher, /ExecutionPolicy Bypass/);
   assert.match(macLauncher, /scripts\/setup-web\.sh/);
   assert.match(linuxLauncher, /scripts\/setup-web\.sh/);

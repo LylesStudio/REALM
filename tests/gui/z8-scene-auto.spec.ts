@@ -8,7 +8,7 @@ import { openDemoRecord } from "./helpers";
  * 选择模式即 PUT 持久化 + role=status 反馈；queued 请求显示状态徽标；
  * 手动生成按钮保留；pageerror 为零。
  */
-test("自动场景图：控制可见、默认不耗 GPU、模式切换持久化、队列状态可见", async ({ page }) => {
+test("自动场景图：控制可见、默认不耗 GPU、模式切换持久化、队列状态可见", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
@@ -18,6 +18,23 @@ test("自动场景图：控制可见、默认不耗 GPU、模式切换持久化�
     if (request.url().includes("/api/record/scene-image") && request.method() === "POST") {
       dispatchPosts.push(request.url());
     }
+  });
+
+  // 只固定 GET 投影中的 queued 状态；持久化/lease/worker 行为由 PostgreSQL 集成测试覆盖。
+  await page.route("**/api/record**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() !== "GET" || url.pathname !== "/api/record"
+      || url.searchParams.get("recordId") !== "record_first_watch") {
+      await route.fallback();
+      return;
+    }
+    const response = await route.fetch();
+    const envelope = await response.json() as Record<string, unknown>;
+    await route.fulfill({
+      response,
+      json: { ...envelope, sceneImageJob: { status: "queued", triggerKind: "every_turn" } },
+    });
   });
 
   await openDemoRecord(page);
@@ -62,15 +79,14 @@ test("自动场景图：控制可见、默认不耗 GPU、模式切换持久化�
   expect((await offResponse).ok()).toBeTruthy();
   await expect(toggle).toContainText(/关|Off|オフ/);
 
-  // queued 意图徽标（本 scratch 由 smoke 前预置 queued 行；无 worker 时保持 queued）。
-  // worker 心跳不可用（GUI scratch 不起 worker）时文案为「等待后台 Worker」，
-  // 与真正的「排队中」区分——两种都是安全可观测状态。
+  // queued 投影由本测试的 route fixture 固定；真实队列与 worker 由 PostgreSQL smoke 覆盖。
+  // worker 心跳不可用时 UI 应给出可观察的等待状态。
   const chip = page.locator('[data-testid="scene-image-job"]');
   await expect(chip).toBeVisible();
   await expect(chip).toContainText(/排队|queued|待ち|等待后台|waiting for background/i);
 
   // 加载全程零 dispatch POST（不自动耗 GPU）。
   expect(dispatchPosts, "加载/切换模式不得自动 dispatch").toEqual([]);
-  await page.screenshot({ path: "/tmp/realm-z8-scene-auto.png" });
+  await page.screenshot({ path: testInfo.outputPath("scene-auto.png") });
   expect(pageErrors, "pageerror 必须为零").toEqual([]);
 });

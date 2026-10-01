@@ -40,6 +40,12 @@ import type {
   M2TurnValidation,
   TurnVisibilityPlan,
 } from "../modules/orchestration/public.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -88,6 +94,7 @@ async function createMigratedDatabase(t: test.TestContext) {
     await ownerPool.query(await readFile(new URL(`../database/postgres/migrations/${filename}`, import.meta.url), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
   await ownerPool.query(
     `INSERT INTO accounts (workspace_id, principal_id, display_name)
      VALUES ($1, $2, $3)
@@ -157,6 +164,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
 
     await library.create(scope, {
@@ -272,6 +280,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
 
     // 创世一个带记录的世界（观察者姿态）。
@@ -353,6 +362,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
 
     // World 创建即带序章/开幕 Record，因此物理删除必须 fail-closed。

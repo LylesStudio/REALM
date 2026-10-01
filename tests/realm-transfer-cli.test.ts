@@ -192,6 +192,19 @@ test(
       [WS, WORLD],
     );
     assert.equal(imported.rows[0].c, 1);
+    // M5（0053 边界登记）：导入 bootstrap 产生的 owner membership 只能属于
+    // job operator（CLI 固定 LOCAL_RECORD_SCOPE principal），包内容不含/不得
+    // 驱动 membership（0042 明文禁止 pack 携带该表）。
+    const importedMemberships = await dstPool.query(
+      `SELECT principal_id, role FROM player_world_memberships
+       WHERE workspace_id = $1 AND world_id = $2`,
+      [WS, WORLD],
+    );
+    assert.deepEqual(
+      importedMemberships.rows.map((row) => ({ principal_id: row.principal_id, role: row.role })),
+      [{ principal_id: OWNER, role: "owner" }],
+      "导入世界的 owner 必须仅为 job operator",
+    );
 
     // 幂等重放（execute 同 jobId）。
     const replay = await runCli(importScript, ["--file", outPath, "--execute", dryBody.jobId]);

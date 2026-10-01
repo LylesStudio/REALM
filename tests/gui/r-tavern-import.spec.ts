@@ -90,6 +90,8 @@ test.describe("R. 酒馆格式导入", () => {
     await openLibrary(page);
 
     const worldSection = page.locator(".library-world", { hasText: world.name });
+    // 世界创建原子附带 starter 伙伴，坏文件不得增加角色。
+    const initialCharacterCount = await worldSection.locator(".library-character").count();
     await worldSection.locator('input[type="file"]').setInputFiles({
       name: "bad.json",
       mimeType: "application/json",
@@ -97,9 +99,7 @@ test.describe("R. 酒馆格式导入", () => {
     });
 
     await expect(worldSection.locator(".library-import-error")).toBeVisible();
-    // 不落库：角色列表没有新增。
-    await expect(
-      worldSection.locator(".library-character"),
-    ).toHaveCount(0);
+    // 不落库：角色列表保持导入前数量。
+    await expect(worldSection.locator(".library-character")).toHaveCount(initialCharacterCount);
   });
 });

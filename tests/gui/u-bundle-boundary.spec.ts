@@ -11,11 +11,16 @@ test("home page loads without pageerror (client bundle boundary)", async ({ page
   await page.goto("/");
   // 登录墙或应用壳任一出现都算加载成功；关键是零 pageerror。
   await expect(page.locator("body")).toBeVisible();
-  await page.waitForLoadState("networkidle");
+  // 注：networkidle 在本页不可靠——设置页对 /api/settings/comfyui 的 403
+  //（M7 operator 门禁的预期 fail-closed）在 dev 模式下会让请求挂起，
+  // networkidle 永不安定；本用例只关心 client bundle 边界 pageerror，
+  // 用 load + 短安定窗即可。
+  await page.waitForLoadState("load");
+  await page.waitForTimeout(1_000);
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
   // 设置页同样走模型设置 UI（model settings service 的 server 边界）。
   await page.goto("/settings");
   await expect(page.locator("body")).toBeVisible();
-  await page.waitForLoadState("networkidle");
+  await page.waitForLoadState("load");
   expect(pageErrors, pageErrors.join("\n")).toEqual([]);
 });

@@ -118,11 +118,13 @@ export async function listAuthorizedExposures(
         options.campaignId ?? null,
       ];
       // 控制面：owner 显式审阅，不按 audience 过滤（路由层已校验 owner）。
-      // 角色视角：public 或 audience 命中（当前 Record 控制的 continuity）。
+      // 角色视角：revision 为 public 或 audience 命中（当前 Record 控制的
+      // continuity）。security class 以同 scope 真实 CanonRevision 为准
+      // （T11-F §二/F4）；NULL/悬空/跨 scope/错配在下方 JOIN 处过滤。
       const classFilter = options.controlPlane
         ? ""
         : `AND (
-             campaign.security_class = 'public'
+             revision.security_class = 'public'
              OR EXISTS (
                SELECT 1
                FROM canon_revision_audiences AS audience
@@ -153,13 +155,21 @@ export async function listAuthorizedExposures(
            exposure.arrival_tick,
            exposure.fidelity,
            exposure.algorithm_version,
-           campaign.security_class
+           revision.security_class
          FROM propagation_exposures AS exposure
          JOIN information_campaigns AS campaign
            ON campaign.workspace_id = exposure.workspace_id
           AND campaign.world_id = exposure.world_id
           AND campaign.worldline_id = exposure.worldline_id
           AND campaign.id = exposure.campaign_id
+         -- F4：每条 exposure 必须解析到同 scope 真实 revision（NULL/悬空/
+         -- 跨 scope 一律过滤）；快照与 revision 的 class 必须一致（错配过滤）。
+         JOIN canon_revisions AS revision
+           ON revision.workspace_id = campaign.workspace_id
+          AND revision.world_id = campaign.world_id
+          AND revision.worldline_id = campaign.worldline_id
+          AND revision.id = campaign.canon_revision_id
+          AND revision.security_class = campaign.security_class
          WHERE exposure.workspace_id = $1
            AND exposure.world_id = $2
            AND exposure.worldline_id = $3

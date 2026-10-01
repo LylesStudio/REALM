@@ -35,6 +35,7 @@ import type {
 } from "../modules/application/genesis-suggestions.ts";
 import { GuidedGenesis } from "./components/guided-genesis";
 import { GuidedGenesisChat } from "./components/guided-genesis-chat";
+import type { GenesisChatFallback } from "./components/guided-genesis-chat";
 import { WorldOnboarding } from "./components/world-onboarding";
 import { normalizeWorldStyle } from "../modules/style/world-style.ts";
 import {
@@ -161,7 +162,14 @@ export function RealmClient() {
   const [creationOverlay, setCreationOverlay] = useState<{
     kind: "chat" | "guided";
     source: "onboarding" | "library";
+    /** 对谈失败改用分步引导时移交的对谈上下文（turns/未发送文本/草案）。 */
+    fallback?: GenesisChatFallback;
   } | null>(null);
+  const creationDialogRef = useRef<HTMLDivElement | null>(null);
+  const creationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const creationReturnFocusKeyRef = useRef<string | null>(null);
+  const creationRestoreFocusPending = useRef(false);
+  const [creationFailed, setCreationFailed] = useState(false);
   /** 游戏大厅 overlay（LAN 约局；与创世 overlay 互斥——打开大厅即收创世）。 */
   const [lobbyOpen, setLobbyOpen] = useState(false);
   /** 邀请深链目标房间（?lobby=<roomId>）；只作导航提示，不作授权依据。 */
@@ -578,6 +586,7 @@ export function RealmClient() {
   async function confirmWorldGenesis(
     draft: WorldGenesisDraft,
   ): Promise<string | null> {
+    setCreationFailed(false);
     try {
       const response = await fetch("/api/world/generate", {
         method: "POST",
@@ -589,30 +598,48 @@ export function RealmClient() {
       });
       const payload = await readJson(response);
       if (!response.ok) {
-        setNotice(errorMessage(payload, "创建失败，请重试。"));
+        await loadLibrary();
+        setCreationFailed(true);
+        return null;
+      }
+      const recordId = (payload as { recordId?: unknown } | null)?.recordId;
+      if (typeof recordId !== "string" || !recordId) {
+        await loadLibrary();
+        setCreationFailed(true);
         return null;
       }
       await loadLibrary();
-      const recordId = (payload as { recordId?: unknown } | null)?.recordId;
-      return typeof recordId === "string" && recordId ? recordId : null;
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "创建失败，请重试。");
+      return recordId;
+    } catch {
+      await loadLibrary();
+      setCreationFailed(true);
       return null;
     }
   }
 
   /** 打开创世 overlay；library 来源先收起世界库（避免双 overlay）。 */
   function openCreation(kind: "chat" | "guided", source: "onboarding" | "library") {
+    const activeElement = document.activeElement;
+    creationReturnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
+    creationReturnFocusKeyRef.current = creationReturnFocusRef.current?.dataset.creationFocusReturn ?? null;
+    creationRestoreFocusPending.current = false;
+    setCreationFailed(false);
     if (source === "library") setLibraryOpen(false);
     setCreationOverlay({ kind, source });
   }
 
   /** 退出创世 overlay：回到来源上下文（library 来源重回世界库）。 */
-  function closeCreation() {
+  const closeCreation = useCallback(() => {
     const source = creationOverlay?.source;
+    creationRestoreFocusPending.current = true;
     setCreationOverlay(null);
-    if (source === "library") openLibrary();
-  }
+    setCreationFailed(false);
+    if (source === "library") {
+      setLobbyOpen(false);
+      setLobbyInvite(null);
+      setLibraryOpen(true);
+    }
+  }, [creationOverlay]);
 
   /** 创建成功统一收尾：关闭 overlay；新 record 由组件经 onOpenRecord 打开。 */
   async function confirmCreation(draft: WorldGenesisDraft): Promise<string | null> {
@@ -661,6 +688,37 @@ export function RealmClient() {
     );
   }
 
+  const handleCreationDialogKeyDown = useCallback((event: KeyboardEvent) => {
+    const dialog = creationDialogRef.current;
+    if (!dialog) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCreation();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const candidates = Array.from(dialog.querySelectorAll<HTMLElement>(
+      "a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    )).filter((element) => element.getClientRects().length > 0);
+    const first = candidates[0];
+    const last = candidates.at(-1);
+    if (!first || !last) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, [closeCreation]);
+
   /** 两种来源共用的创世 overlay 渲染（chat 主入口 / guided 次入口）。 */
   function renderCreationOverlay() {
     if (!creationOverlay) return null;
@@ -670,15 +728,22 @@ export function RealmClient() {
           aria-label={uiText("ui.genesisChat.title", uiLanguage)}
           aria-modal="true"
           className="guided-overlay"
+          ref={creationDialogRef}
           role="dialog"
+          tabIndex={-1}
         >
           <GuidedGenesisChat
             uiLanguage={uiLanguage}
             playerName={playerDisplayName || "旅人"}
+            creationError={creationFailed ? uiText("ui.world.createFailed", uiLanguage) : null}
             onConfirm={confirmCreation}
             onOpenRecord={openRecord}
-            onFallback={() =>
-              setCreationOverlay({ kind: "guided", source: creationOverlay.source })}
+            onFallback={(payload) =>
+              setCreationOverlay({
+                kind: "guided",
+                source: creationOverlay.source,
+                fallback: payload,
+              })}
             onExit={closeCreation}
           />
         </div>
@@ -689,10 +754,14 @@ export function RealmClient() {
         aria-label={uiText("ui.guided.eyebrow", uiLanguage)}
         aria-modal="true"
         className="guided-overlay"
+        ref={creationDialogRef}
         role="dialog"
+        tabIndex={-1}
       >
         <GuidedGenesis
           uiLanguage={uiLanguage}
+          creationError={creationFailed ? uiText("ui.world.createFailed", uiLanguage) : null}
+          fallback={creationOverlay.fallback ?? null}
           onConfirm={confirmCreation}
           onExit={closeCreation}
           onOpenRecord={openRecord}
@@ -796,6 +865,50 @@ export function RealmClient() {
 
   // 语言切换同步：header 菜单 / 设置页 / 登录页写同一存储并广播事件。
   useEffect(() => subscribeUiLanguage(() => setUiLanguage(readUiLanguage())), []);
+
+  // 创世模态：进入时聚焦首个可编辑字段；关闭时回到原入口或对应重挂载入口。
+  useEffect(() => {
+    if (creationOverlay) {
+      const frame = window.requestAnimationFrame(() => {
+        const dialog = creationDialogRef.current;
+        if (!dialog) return;
+        const visible = (element: HTMLElement) =>
+          element.getClientRects().length > 0
+          && element.closest('[aria-hidden="true"]') === null;
+        const firstField = creationOverlay.kind === "guided"
+          ? Array.from(dialog.querySelectorAll<HTMLElement>(
+            "input:not([disabled]), textarea:not([disabled]), select:not([disabled])",
+          )).find(visible)
+          : undefined;
+        const firstTabbable = Array.from(dialog.querySelectorAll<HTMLElement>(
+          "a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        )).find(visible);
+        (firstField ?? firstTabbable ?? dialog).focus();
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    if (!creationRestoreFocusPending.current) return;
+
+    const original = creationReturnFocusRef.current;
+    const key = creationReturnFocusKeyRef.current;
+    const remounted = key
+      ? document.querySelector<HTMLElement>(`[data-creation-focus-return="${key}"]`)
+      : null;
+    const libraryButton = document.querySelector<HTMLElement>(
+      '[data-creation-focus-return="library"]',
+    );
+    const target = original?.isConnected ? original : remounted ?? libraryButton;
+    target?.focus();
+    creationRestoreFocusPending.current = false;
+    creationReturnFocusRef.current = null;
+    creationReturnFocusKeyRef.current = null;
+  }, [creationOverlay]);
+
+  useEffect(() => {
+    if (!creationOverlay) return;
+    document.addEventListener("keydown", handleCreationDialogKeyDown);
+    return () => document.removeEventListener("keydown", handleCreationDialogKeyDown);
+  }, [creationOverlay, handleCreationDialogKeyDown]);
 
   useEffect(() => {
     envelopeRef.current = envelope;
@@ -1386,6 +1499,7 @@ export function RealmClient() {
           <button
             aria-haspopup="dialog"
             className="header-settings-link"
+            data-creation-focus-return="library"
             onClick={openLibrary}
             type="button"
           >

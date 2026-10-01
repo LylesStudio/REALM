@@ -25,6 +25,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { normalizeAdvertisedOrigin } from "./advertised-origin.mjs";
+import { webChildEnv } from "../scripts/web-child-env.mjs";
 import {
   createWriteStream,
   existsSync,
@@ -197,12 +198,15 @@ export function validateLanBind(value) {
  * 仅供宿主进程注入子进程 env（如 scene image worker）；绝不写进
  * service-host 协议帧或日志。
  */
-export function launcherPgUrl(user, pgPort) {
-  return `postgresql://${user}@127.0.0.1:${pgPort}/realm_dev`;
+export function launcherPgUrl(user, pgPort, database = "realm_dev") {
+  return `postgresql://${user}@127.0.0.1:${pgPort}/${database}`;
 }
 
 export function buildChildEnv(input) {
-  const pgUrl = (user) => launcherPgUrl(user, input.pgPort);
+  // 数据库名单一来源：local-postgres 建库（REALM_POSTGRES_DB）与全部
+  // 连接串（DATABASE_URL/runtime/transfer）必须一致，不靠默认值巧合。
+  const pgDatabase = input.pgDatabase ?? "realm_dev";
+  const pgUrl = (user) => launcherPgUrl(user, input.pgPort, pgDatabase);
   const platform = input.platform ?? process.platform;
   const bundledPgLibrary = input.pgLibraryPath
     ?? ((platform === "darwin" || platform === "linux") && input.pgBin
@@ -232,6 +236,7 @@ export function buildChildEnv(input) {
       }
       : {}),
     REALM_POSTGRES_PORT: String(input.pgPort),
+    REALM_POSTGRES_DB: pgDatabase,
     REALM_POSTGRES_SOCKET_DIR: resolve(input.dataHome, "postgres", "socket"),
     DATABASE_URL: pgUrl("postgres"),
     REALM_RUNTIME_DATABASE_URL: pgUrl("realm_runtime"),
@@ -286,6 +291,9 @@ const SAFE_PARENT_ENV_KEYS = new Set([
   "LD_LIBRARY_PATH",
   // 显式 LAN advertised origin（非敏感；校验在 advertised-origin.ts）。
   "REALM_ADVERTISED_ORIGIN",
+  // 全局 operator principal 白名单（非敏感配置；不含凭据）。不透传会让
+  // 打包 Web 子进程丢失 ComfyUI 等 operator 能力的授权配置。
+  "REALM_OPERATOR_PRINCIPALS",
 ]);
 
 export function safeParentEnv(environment) {
@@ -383,10 +391,19 @@ export function resolvePgBin(
   return environment.REALM_POSTGRES_BIN ?? "";
 }
 
+/**
+ * startRealm 的 dataHome 解析：显式 options.dataHome > options.environment
+ * 的 REALM_DATA_HOME > 平台默认。downstream（secure key/PG 路径/child env）
+ * 全部使用同一结果。
+ */
+export function resolveStartRealmDataHome(options = {}) {
+  return options.dataHome ?? resolveDataHome(options.environment ?? process.env);
+}
+
 export async function startRealm(options = {}) {
   const home = options.home ?? realmHome();
-  const dataHome = options.dataHome ?? resolveDataHome();
   const parentEnvironment = options.environment ?? process.env;
+  const dataHome = resolveStartRealmDataHome(options);
   // LAN 模式校验必须早于任何副作用（日志流/实例锁/子进程）：非法 bind
   // 即 fail-closed，不留文件、不持锁。账户登录后 LAN 不再需要访问令牌。
   let hostBind = "127.0.0.1";
@@ -514,11 +531,23 @@ export async function startRealm(options = {}) {
       nodeArgs: ["--experimental-strip-types"],
     });
 
-    log("step: app server start");
-    step("server");
-    appServer = spawn(nodeExe, [resolve(appScriptDir, "dev-server.mjs"), "start"], {
+    // 不新增 step 帧名（Tauri 协议序列有契约钉住）：记日志即可。
+    log("step: capability session provisioning");
+    // 0053：会话密钥副本入库（membership capability 的信任锚）；
+    // 读取与 app 相同的 env/0600 文件解析，值绝不进日志。
+    runStep(nodeExe, resolve(appScriptDir, "local-provision-capability-session.mjs"), {
       cwd: appDir,
       env: childEnv,
+      nodeArgs: ["--experimental-strip-types"],
+    });
+
+    log("step: app server start");
+    step("server");
+    // Web 子进程用剥离 owner/provision 凭据的 env（bootstrap 步骤仍用
+    // childEnv——它们需要 DATABASE_URL；Web 进程只需要 runtime/transfer）。
+    appServer = spawn(nodeExe, [resolve(appScriptDir, "dev-server.mjs"), "start"], {
+      cwd: appDir,
+      env: webChildEnv(childEnv),
       stdio: ["ignore", "pipe", "pipe"],
     });
     appServer.stdout?.on("data", (chunk) => logStream.write(chunk));

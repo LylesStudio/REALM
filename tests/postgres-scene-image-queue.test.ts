@@ -172,7 +172,7 @@ test(
       [WS, worldId, RECORD, sceneId],
     );
     await queue.complete(
-      { workspaceId: WS, id: claim1!.id },
+      { workspaceId: WS, id: claim1!.id, leaseRevision: claim1!.leaseRevision },
       "sceneimg_test_ready",
     );
     // complete 按 id 直查（findLatestForRecord 取 created_at 最新行，语义在
@@ -189,7 +189,7 @@ test(
     const claim3 = await queue.claim({ workspaceId: WS }, { leaseMs: 60_000 });
     assert.ok(claim3);
     assert.equal(claim3!.id, otherTrigger.request.id);
-    await queue.retry({ workspaceId: WS, id: claim3!.id });
+    await queue.retry({ workspaceId: WS, id: claim3!.id, leaseRevision: claim3!.leaseRevision });
     const claim4 = await queue.claim({ workspaceId: WS }, { leaseMs: 1 });
     assert.equal(claim4!.attempts, 1, "retry 后 attempts 递增");
     // lease 1ms 立即过期 → stale 恢复回 queued。
@@ -198,9 +198,42 @@ test(
     assert.equal(recovered, 1);
     const claim5 = await queue.claim({ workspaceId: WS }, { leaseMs: 60_000 });
     assert.ok(claim5);
-    await queue.fail({ workspaceId: WS, id: claim5!.id }, "COMFYUI_UNREACHABLE");
+    await queue.fail(
+      { workspaceId: WS, id: claim5!.id, leaseRevision: claim5!.leaseRevision },
+      "COMFYUI_UNREACHABLE",
+    );
     const failedRow = await queue.findLatestForRecord({ workspaceId: WS, recordId: RECORD });
     assert.equal(failedRow?.status, "failed");
+
+    // A stale worker finishing after recovery/new claim cannot settle the newer lease.
+    const late = await queue.enqueue({
+      ...base,
+      triggerKind: "every_turn",
+      sourceEventId: "turn-late-stale-worker",
+    });
+    const oldClaim = await queue.claim({ workspaceId: WS }, { leaseMs: 1 });
+    assert.ok(oldClaim);
+    assert.equal(oldClaim!.leaseRevision, 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(await queue.recoverStale({ workspaceId: WS }), 1);
+    const newClaim = await queue.claim({ workspaceId: WS }, { leaseMs: 60_000 });
+    assert.ok(newClaim);
+    assert.equal(newClaim!.id, late.request.id);
+    assert.equal(newClaim!.leaseRevision, 2);
+    const staleScope = { workspaceId: WS, id: oldClaim!.id, leaseRevision: oldClaim!.leaseRevision };
+    await queue.complete(staleScope, "sceneimg_test_ready");
+    await queue.fail(staleScope, "STALE_WORKER_FINISHED");
+    await queue.retry(staleScope);
+    const afterStaleComplete = await ownerPool.query(
+      `SELECT status, lease_revision FROM scene_image_requests WHERE workspace_id = $1 AND id = $2`,
+      [WS, newClaim!.id],
+    );
+    assert.equal(afterStaleComplete.rows[0]?.status, "leased");
+    assert.equal(Number(afterStaleComplete.rows[0]?.lease_revision), 2);
+    await queue.fail(
+      { workspaceId: WS, id: newClaim!.id, leaseRevision: newClaim!.leaseRevision },
+      "NEW_WORKER_FINISHED",
+    );
 
     // RLS：另一 workspace 不可见。
     await ownerPool.query(

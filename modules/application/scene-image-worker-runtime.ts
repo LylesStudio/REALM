@@ -18,6 +18,7 @@ import {
   createPostgresSceneImageStore,
 } from "../../database/postgres/public.ts";
 import { createSceneImageService } from "./scene-image-service.ts";
+import { SceneImageFenceError } from "../../database/postgres/scene-image-store.ts";
 import { writeSceneImageWorkerHeartbeat } from "./scene-image-status.ts";
 import {
   ComfyUiError,
@@ -89,6 +90,7 @@ export function createSceneImageWorkerRuntime(options: {
     scopeRepository,
     comfyUiStore: createComfyUiSettingsStore(),
     sceneImageStore,
+    sceneImageQueue: queue,
     ...(options.createComfyUiClient
       ? { createComfyUiClient: options.createComfyUiClient }
       : {}),
@@ -125,44 +127,60 @@ export function createSceneImageWorkerRuntime(options: {
     const request = await queue.claim({ workspaceId }, { leaseMs });
     if (!request) return false;
     try {
-      const result = await service.dispatchAndStoreSceneImage({
-        workspaceId,
-        principalId: request.principalId,
-        recordId: request.recordId,
-      });
-      if (result.status === "ready" && result.generationId) {
-        await queue.complete({ workspaceId, id: request.id }, result.generationId);
+      // M8：fence 贯穿 worker → service → store；终态（generation/文件/
+      // request）在 service 内原子结算，worker 不再单独 settle。
+      const fence = { requestId: request.id, leaseRevision: request.leaseRevision };
+      const result = await service.dispatchAndStoreSceneImage(
+        {
+          workspaceId,
+          principalId: request.principalId,
+          recordId: request.recordId,
+        },
+        {},
+        { fence },
+      );
+      if (result.status === "ready") {
         log(`request completed for record ${request.recordId} (${request.triggerKind})`);
       } else if (result.status === "failed") {
-        await queue.fail({ workspaceId, id: request.id }, result.errorCode ?? "GENERATION_FAILED");
         log(`request failed for record ${request.recordId}: ${result.errorCode ?? "GENERATION_FAILED"}`);
       } else {
         // running（有界等待超时）：生成仍在 provider 侧进行。达到总尝试
-        // 上限时同时收口请求与 0048 generation，避免 active 永久占位；
+        // 上限时原子收口 generation+request，避免 active 永久占位；
         // 否则回 queued，由下次 claim 复用同一 active generation。
         if (request.attempts + 1 >= maxAttempts) {
           if (result.generationId) {
-            await sceneImageStore.failGeneration(
+            await sceneImageStore.failGenerationAndSettle(
               { workspaceId, id: result.generationId },
               "COMFYUI_TIMEOUT",
+              fence,
             );
+          } else {
+            await queue.fail({ workspaceId, id: request.id, leaseRevision: request.leaseRevision }, "COMFYUI_TIMEOUT");
           }
-          await queue.fail({ workspaceId, id: request.id }, "COMFYUI_TIMEOUT");
           log(`request failed permanently: COMFYUI_TIMEOUT`);
         } else {
-          await queue.retry({ workspaceId, id: request.id });
+          await queue.retry({ workspaceId, id: request.id, leaseRevision: request.leaseRevision });
           log(`request still running for record ${request.recordId}; re-queued`);
         }
       }
     } catch (error) {
+      if (error instanceof SceneImageFenceError) {
+        // authority 已失：本请求由当前持有者负责；旧 worker 静默退出（
+        // 不重试、不失败、不写任何状态）。
+        log(`stale lease for request ${request.id}; left for the current holder`);
+        return true;
+      }
       const safeCode = error instanceof ComfyUiError || error instanceof SceneWorkflowError
         ? error.code
         : "GENERATION_FAILED";
       if (request.attempts + 1 < maxAttempts && isTransientSceneImageError(error)) {
-        await queue.retry({ workspaceId, id: request.id });
+        await queue.retry({ workspaceId, id: request.id, leaseRevision: request.leaseRevision });
         log(`request re-queued after transient failure (${safeCode})`);
       } else {
-        await queue.fail({ workspaceId, id: request.id }, safeCode);
+        await queue.fail(
+          { workspaceId, id: request.id, leaseRevision: request.leaseRevision },
+          safeCode,
+        );
         log(`request failed permanently: ${safeCode}`);
       }
     }

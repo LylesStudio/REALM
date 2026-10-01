@@ -57,6 +57,12 @@ import type {
   TurnVisibilityPlan,
 } from "../modules/orchestration/public.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
@@ -105,6 +111,7 @@ const MIGRATIONS = [
   "0038_remove_base_skill_hidden_clue.sql",
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0053_membership_capability.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -169,6 +176,7 @@ async function createMigratedDatabase(t: test.TestContext) {
     await ownerPool.query(sql);
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
   await ownerPool.query(
     `INSERT INTO accounts (workspace_id, principal_id, display_name)
      VALUES ($1, $2, $3)
@@ -379,6 +387,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
     await library.create(scope, {
       kind: "world",
@@ -507,6 +516,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
     await library.create(scope, {
       kind: "world",

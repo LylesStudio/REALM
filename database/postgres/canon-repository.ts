@@ -1,9 +1,10 @@
 import type { Pool } from "pg";
-import type {
-  CanonProposal,
-  CanonProposalStatus,
-  CanonRepository,
-  CanonRevision,
+import {
+  CanonError,
+  type CanonProposal,
+  type CanonProposalStatus,
+  type CanonRepository,
+  type CanonRevision,
 } from "../../modules/worldline/canon.ts";
 import { withWorkspaceTransaction } from "./workspace-transaction.ts";
 import { appendGraphInvalidation } from "./graph-invalidation.ts";
@@ -72,6 +73,31 @@ export function createPostgresCanonRepository(pool: Pool): CanonRepository {
           workspaceId: scope.workspaceId,
           worldId: scope.worldId,
         });
+        if (input.revision.securityClass === "restricted" || input.revision.securityClass === "secret") {
+          // Revalidate the server-supplied actor inside the write transaction.
+          // 0053：runtime 对 membership 无 UPDATE 权限，行锁改由窄 definer
+          // 取得（FOR UPDATE 在函数内，锁持有到本事务提交，与并发 stance
+          // 角色变更互斥）；非 owner / 非当前 workspace 一律拒绝。
+          // Source: https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS
+          try {
+            await client.query(
+              `SELECT membership_assert_world_owner($1, $2, $3)`,
+              [scope.workspaceId, scope.worldId, input.decidedBy],
+            );
+          } catch (error) {
+            if (
+              error instanceof Error
+              && (error.message.includes("PROPAGATION_SECURITY_UNAVAILABLE")
+                || error.message.includes("CAPABILITY_SCOPE_REQUIRED"))
+            ) {
+              throw new CanonError(
+                "PROPAGATION_SECURITY_UNAVAILABLE",
+                "Restricted or secret Canon merge requires a current world owner.",
+              );
+            }
+            throw error;
+          }
+        }
         const decided = await client.query(
           `UPDATE canon_proposals
            SET status = 'merged', decided_by = $5, decided_at = CURRENT_TIMESTAMP

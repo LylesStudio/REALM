@@ -41,15 +41,19 @@ function latestRecordOf(world: LibraryWorld): LibraryRecord | null {
 export function WorldOnboarding(props: WorldOnboardingProps) {
   const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenLobby, onOpenRecord, onCreatePreset } = props;
   const [busyPreset, setBusyPreset] = useState<string | null>(null);
+  const [presetError, setPresetError] = useState(false);
   const entries: WorldEntry[] = library.worlds
     .map((world) => ({ world, latestRecord: latestRecordOf(world) }))
     .filter((entry): entry is WorldEntry => entry.world.id.trim().length > 0);
 
   async function handlePreset(preset: PresetWorld) {
     if (busyPreset) return;
+    setPresetError(false);
     setBusyPreset(preset.key);
     try {
-      await onCreatePreset(preset.key);
+      if (!await onCreatePreset(preset.key)) setPresetError(true);
+    } catch {
+      setPresetError(true);
     } finally {
       setBusyPreset(null);
     }
@@ -67,6 +71,7 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
       <div className="onboarding-entries">
         <button
           className="guided-entry onboarding-entry is-primary"
+          data-creation-focus-return="create-chat"
           onClick={onOpenChat}
           type="button"
         >
@@ -80,6 +85,7 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
         </button>
         <button
           className="guided-entry onboarding-entry"
+          data-creation-focus-return="create-guided"
           onClick={onOpenGuided}
           type="button"
         >
@@ -129,6 +135,11 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
             </button>
           ))}
         </div>
+        {presetError ? (
+          <p className="onboarding-create-error" role="alert">
+            {uiText("ui.world.createFailed", uiLanguage)}
+          </p>
+        ) : null}
       </section>
 
       {entries.length > 0 ? (

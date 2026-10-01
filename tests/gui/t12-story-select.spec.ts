@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { openDemoRecord, uniqueName } from "./helpers";
+import { promoteDemoMembershipToOwner } from "../helpers/membership-fixture.mjs";
 
 /**
  * 批次 T12 验收修正：多故事页面级选择 + 归档隐藏（隔离临时库/专属端口运行，
@@ -86,6 +87,11 @@ test.describe("T12 story selection", () => {
     expect(new URL(page.url()).searchParams.get("view")).toBeNull();
 
     // 归档其中一条记录后：故事视图/世界视图/左侧导航/计数均不出现。
+    // delete-record 是 owner-only（T8/T10 门禁）：登录默认 player 席位，
+    // 须由 fixture 显式提升为 owner（scratch admin，隔离护栏见 helper）。
+    const me = await request.get("/api/auth/me");
+    const { principalId } = await me.json();
+    await promoteDemoMembershipToOwner(process.env.DATABASE_URL, principalId);
     const deleteResponse = await request.post("/api/library", {
       data: { kind: "delete-record", worldId: DEMO_WORLD_ID, recordId: archivedRecordId },
     });

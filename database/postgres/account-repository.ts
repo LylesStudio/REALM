@@ -14,6 +14,7 @@ import {
 } from "../../modules/identity/password.ts";
 import { principalIdForDisplayName } from "../../modules/identity/auth.ts";
 import { POSTGRES_DEMO_IDS } from "./demo-seed.ts";
+import { grantMembershipWithCapability } from "./membership-capability.ts";
 import { withWorkspaceTransaction } from "./workspace-transaction.ts";
 
 export type AccountRecord = {
@@ -65,11 +66,14 @@ export interface AccountRepository {
   ): Promise<void>;
   /**
    * 登录即加入默认世界（demo seed 常量引用，不硬编码字符串）：
-   * 查无则创建 owner membership，已有则不动（幂等）。
+   * 查无则创建 player membership（0053：仅 join_player，永不产生/覆盖
+   * owner），已有则不动（幂等）。sessionProof = 当前会话 cookie 原值，
+   * DB 独立验证并从证明推导 actor；缺失/伪造 fail-closed。
    */
   ensureDefaultWorldMembership(
     workspaceId: string,
     principalId: string,
+    sessionProof: string,
   ): Promise<void>;
   /**
    * 批次 S：读取账号级「最近打开」记忆；无记忆（NULL）返回 null。
@@ -205,16 +209,19 @@ export function createPostgresAccountRepository(pool: Pool): AccountRepository {
       });
     },
 
-    async ensureDefaultWorldMembership(workspaceId, principalId) {
+    async ensureDefaultWorldMembership(workspaceId, principalId, sessionProof) {
       return withWorkspaceTransaction(pool, workspaceId, async (client) => {
-        await client.query(
-          `INSERT INTO player_world_memberships (
-             workspace_id, world_id, principal_id, role,
-             omniscient_player_character, can_view_dynamic_knowledge
-           ) VALUES ($1, $2, $3, 'owner', true, true)
-           ON CONFLICT (workspace_id, world_id, principal_id) DO NOTHING`,
-          [workspaceId, POSTGRES_DEMO_IDS.world, principalId],
-        );
+        // 0053：写入只能走 capability 窄通道（join_player 恒 player，
+        // insert-if-absent，ON CONFLICT 不改写既有 owner）；actor 由
+        // 会话证明在 DB 侧推导，与会话证明缺失/不符即 fail-closed。
+        await grantMembershipWithCapability(client, {
+          sessionProof: sessionProof ?? "",
+          op: "join_player",
+          workspaceId,
+          worldId: POSTGRES_DEMO_IDS.world,
+          principalId,
+          role: "player",
+        });
       });
     },
 
@@ -268,17 +275,41 @@ export function createPostgresAccountRepository(pool: Pool): AccountRepository {
         if (!row) {
           // 新账户：首次创建可写密码（空密码 = 无密码账户）。
           const passwordHash = password ? hashAccountPassword(password) : null;
-          await client.query(
+          const inserted = await client.query(
             `INSERT INTO accounts (workspace_id, principal_id, display_name, password_hash)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (workspace_id, principal_id) DO NOTHING`,
             [workspaceId, principalId, name, passwordHash],
           );
+          // 同名首次登录可能并发。只有实际完成 INSERT 的请求能够依据
+          // 自己提交的密码继续；冲突方必须读回 winner 凭证并按正常账户规则校验。
+          const winner = await client.query(
+            `SELECT principal_id, display_name, created_at::text, ui_language, password_hash
+             FROM accounts
+             WHERE workspace_id = $1 AND principal_id = $2`,
+            [workspaceId, principalId],
+          );
+          const winnerRow = winner.rows[0];
+          if (!winnerRow) throw new AccountAuthError();
+          const winnerHash = typeof winnerRow.password_hash === "string"
+            ? winnerRow.password_hash
+            : null;
+          if (winnerHash === null ? Boolean(password) : !verifyAccountPassword(password, winnerHash)) {
+            throw new AccountAuthError();
+          }
+          if ((inserted.rowCount ?? 0) > 0) {
+            return {
+              principalId,
+              displayName: winnerRow.display_name as string,
+              createdAt: winnerRow.created_at as string,
+              uiLanguage: normalizeUiLanguage(winnerRow.ui_language),
+            };
+          }
           return {
-            principalId,
-            displayName: name,
-            createdAt: new Date().toISOString(),
-            uiLanguage: normalizeUiLanguage(undefined),
+            principalId: winnerRow.principal_id as string,
+            displayName: winnerRow.display_name as string,
+            createdAt: winnerRow.created_at as string,
+            uiLanguage: normalizeUiLanguage(winnerRow.ui_language),
           };
         }
         const storedHash = typeof row.password_hash === "string" ? row.password_hash : null;

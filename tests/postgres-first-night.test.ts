@@ -37,6 +37,12 @@ import type {
   M2TurnPlan,
   M2TurnValidation,
 } from "../modules/orchestration/public.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -111,6 +117,7 @@ async function createMigratedDatabase(t: test.TestContext) {
     await ownerPool.query(await readFile(new URL(`../database/postgres/migrations/${filename}`, import.meta.url), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
   await ownerPool.query(
     `INSERT INTO accounts (workspace_id, principal_id, display_name)
      VALUES ($1, $2, $3)
@@ -132,6 +139,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
 
     // ===== 落笔入界：确定性开场旁白 + pending 状态行 =====
@@ -257,6 +265,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
     const draft = { ...GENESIS_DRAFT, opening: "雾夜，一艘无籍船悄悄靠岸。" };
     const genesis = await library.createGenesis(scope, draft);
@@ -374,6 +383,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
     const genesis = await library.createGenesis(scope, GENESIS_DRAFT);
 

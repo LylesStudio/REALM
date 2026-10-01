@@ -7,7 +7,7 @@
  *   （绝不写共享 realm_dev 或任何长期实例）；
  * - host-network + 动态 loopback 端口——真实 runner 的 inet_server_addr
  *   检查通过（不用 published-port）；
- * - realm_dev 在集群内新建、应用 0001–0044 全链、seed demo；
+ * - realm_dev 在集群内新建、应用完整 PostgreSQL migration chain、seed demo；
  * - 结束时销毁容器（含全部临时库），零残留。
  *
  * 用法：node scripts/test-postgres-runtime-with-scratch.mjs
@@ -16,6 +16,7 @@
  */
 import { spawn, spawnSync as spawnSync0 } from "node:child_process";
 import { createRequire } from "node:module";
+import { randomBytes } from "node:crypto";
 import {
   dockerAvailable,
   startScratchPgCluster,
@@ -24,13 +25,14 @@ import {
 const require0 = createRequire(import.meta.url);
 const pg = require0("pg");
 
-const TEST_FILES = [
+const DEFAULT_TEST_FILES = [
   "tests/postgres-runtime-migration-hardening.test.ts",
   "tests/postgres-runtime-repository.test.ts",
   "tests/postgres-runtime-repository-failures.test.ts",
   "tests/postgres-delivery-projection.test.ts",
   "tests/postgres-local-record-application.test.ts",
   "tests/postgres-library-service.test.ts",
+  "tests/postgres-library-permissions.test.ts",
   "tests/postgres-m3-memory.test.ts",
   "tests/postgres-memory-pipeline.test.ts",
   "tests/postgres-m4-interjection.test.ts",
@@ -40,6 +42,7 @@ const TEST_FILES = [
   "tests/postgres-scene-crystallization.test.ts",
   "tests/postgres-world-growth.test.ts",
   "tests/postgres-first-night.test.ts",
+  "tests/postgres-retrospection-origin.test.ts",
   "tests/postgres-tavern-import.test.ts",
   "tests/postgres-presence.test.ts",
   "tests/postgres-rule-realization.test.ts",
@@ -55,20 +58,28 @@ const TEST_FILES = [
   "tests/postgres-scene-image-store.test.ts",
   "tests/postgres-scene-image-flow.test.ts",
   "tests/postgres-scene-image-queue.test.ts",
+  "tests/postgres-scene-image-fencing.test.ts",
+  "tests/postgres-scene-image-route-auth.test.ts",
   "tests/scene-image-worker-runtime.test.ts",
   "tests/postgres-account-password.test.ts",
   "tests/postgres-preview-authorization.test.ts",
   "tests/postgres-conflict-route.test.ts",
   "tests/postgres-memory-snapshot-route.test.ts",
   "tests/postgres-library-runtime-grants.test.ts",
+  "tests/postgres-capability-boundary.test.ts",
+  "tests/postgres-capability-actor-proof.test.ts",
+  "tests/postgres-capability-session-provisioning.test.ts",
+  "tests/postgres-canon-revision-fence.test.ts",
   "tests/postgres-runtime-read-routes.test.ts",
   "tests/postgres-canon-security-propagation.test.ts",
   "tests/postgres-propagation-exposures-route.test.ts",
   "tests/postgres-propagation-worker.test.ts",
+  "tests/postgres-propagation-node-audiences-governance.test.ts",
   "tests/postgres-propagation-worker-runtime-acceptance.test.ts",
   "tests/postgres-graph-invalidation.test.ts",
   "tests/postgres-canon-propagation.test.ts",
   "tests/postgres-semantic-review-route.test.ts",
+  "tests/postgres-semantic-review-context.test.ts",
   "tests/postgres-canon-qualification.test.ts",
   "tests/postgres-propagation-worker-nonpublic-acceptance.test.ts",
   "tests/postgres-turn-efficiency.test.ts",
@@ -118,6 +129,12 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
+// 0053：会话密钥（一次性随机值，不打印）——provision 与测试子进程同值。
+const sessionSecretToken = randomBytes(32).toString("hex");
+
+const requestedFiles = process.argv.slice(2).filter((value) => !value.startsWith("--"));
+const TEST_FILES = requestedFiles.length > 0 ? requestedFiles : DEFAULT_TEST_FILES;
+
 const withDb = (base, database) =>
   `${base.replace(/\/postgres$/, "")}/${database}`;
 
@@ -138,19 +155,26 @@ async function runNode(scriptArgs, envExtra = {}) {
 
 let exitCode = 0;
 try {
-  // realm_dev：建库 → 全链迁移（0001–0044）→ seed demo。
+  // realm_dev：建库 → 全链迁移 → seed demo。
   const adminClient = new pg.Client({ connectionString: cluster.adminUrl });
   await adminClient.connect();
   await adminClient.query("CREATE DATABASE realm_dev");
   await adminClient.end();
 
   const adminDbUrl = withDb(cluster.adminUrl, "realm_dev");
-  console.error("[scratch] applying migrations 0001–0044 to realm_dev …");
+  console.error("[scratch] applying full PostgreSQL migration chain to realm_dev …");
   await runNode(["scripts/postgres-migrate.mjs"], { DATABASE_URL: adminDbUrl });
   console.error("[scratch] seeding demo world …");
   await runNode(
     ["--experimental-strip-types", "scripts/postgres-seed-demo.mjs"],
     { DATABASE_URL: adminDbUrl },
+  );
+
+  // 0053：seed 后 provision capability 会话密钥（realm_dev；与测试进程
+  // 的 REALM_SESSION_SECRET 同值——缺省沿用宿主 env/0600 文件解析）。
+  await runNode(
+    ["--experimental-strip-types", "scripts/local-provision-capability-session.mjs"],
+    { DATABASE_URL: adminDbUrl, REALM_SESSION_SECRET: sessionSecretToken },
   );
 
   console.error(`[scratch] running ${TEST_FILES.length} postgres-runtime files …`);
@@ -165,6 +189,7 @@ try {
       DATABASE_URL: adminDbUrl,
       REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, "realm_dev"),
       REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, "realm_dev"),
+      REALM_SESSION_SECRET: sessionSecretToken,
     },
   );
 } catch (error) {

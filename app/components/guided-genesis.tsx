@@ -25,11 +25,20 @@ import {
   stepSavedValue,
   type GuidedStepId as StepId,
 } from "./guided-genesis-steps.ts";
+import type { GenesisChatFallback } from "./guided-genesis-chat.tsx";
 
 interface GuidedGenesisProps {
   playerName: string;
+  /** 创建结果无法确认时显示安全提示，不透传服务端原始错误。 */
+  creationError?: string | null;
   /** 界面语言（缺省 zh-CN）。 */
   uiLanguage?: UiLanguage;
+  /**
+   * 对谈失败改用分步引导时移交的上下文：草案从该 draft 初始化（而非
+   * EMPTY_DRAFT），对谈历史与未发送文本在侧栏恢复面板中可见、可编辑；
+   * 未发送文本独立于表单，绝不伪装成历史 turn，也不随创建提交。
+   */
+  fallback?: GenesisChatFallback | null;
   /**
    * AI 代写：suggestions 为 null 时 errorMessage 给出安全提示
    * （绝不含 key/URL/prompt/玩家内容）；手动填写随时可继续。
@@ -49,39 +58,51 @@ interface GuidedGenesisProps {
 
 interface StepDef {
   id: StepId;
-  title: string;
   /** 是否允许跳过（不填写）。 */
   skippable: boolean;
   /** 对应 AI 代笔端点步骤；null 表示本步不支持代笔。 */
   suggestStep: GuidedGenesisStep | null;
 }
 
+const STEP_TITLE_KEYS: Record<StepId, string> = {
+  "world-name": "ui.guided.step.worldName",
+  era: "ui.guided.step.era",
+  style: "ui.guided.step.style",
+  summary: "ui.guided.step.summary",
+  story: "ui.guided.step.story",
+  "player-role": "ui.guided.step.playerRole",
+  stance: "ui.guided.step.stance",
+  companions: "ui.guided.step.companions",
+  scene: "ui.guided.step.scene",
+  review: "ui.guided.step.review",
+};
+
 const STEPS: readonly StepDef[] = [
-  { id: "world-name", title: "世界名称", skippable: false, suggestStep: "world-name" },
-  { id: "era", title: "时代背景", skippable: true, suggestStep: "era" },
+  { id: "world-name", skippable: false, suggestStep: "world-name" },
+  { id: "era", skippable: true, suggestStep: "era" },
   // 文风步置于时代之后、概述之前：先时空、后笔调。
-  { id: "style", title: "文风", skippable: true, suggestStep: null },
-  { id: "summary", title: "世界概述", skippable: true, suggestStep: "summary" },
-  { id: "story", title: "开场故事", skippable: true, suggestStep: "story" },
-  { id: "player-role", title: "你的角色", skippable: true, suggestStep: "player-role" },
+  { id: "style", skippable: true, suggestStep: null },
+  { id: "summary", skippable: true, suggestStep: "summary" },
+  { id: "story", skippable: true, suggestStep: "story" },
+  { id: "player-role", skippable: true, suggestStep: "player-role" },
   // 批次 S：参与方式（扮演角色 / 观察者）——决定落库席位形态。
-  { id: "stance", title: "参与方式", skippable: true, suggestStep: null },
-  { id: "companions", title: "同伴", skippable: true, suggestStep: "companions" },
-  { id: "scene", title: "开场场景", skippable: true, suggestStep: "scene" },
-  { id: "review", title: "确认信息", skippable: false, suggestStep: null },
+  { id: "stance", skippable: true, suggestStep: null },
+  { id: "companions", skippable: true, suggestStep: "companions" },
+  { id: "scene", skippable: true, suggestStep: "scene" },
+  { id: "review", skippable: false, suggestStep: null },
 ];
 
-const STEP_QUESTION_KEYS: Record<StepId, string> = {
-  "world-name": "ui.guided.question.worldName",
-  era: "ui.guided.question.era",
-  style: "ui.guided.question.style",
-  summary: "ui.guided.question.summary",
-  story: "ui.guided.question.story",
-  "player-role": "ui.guided.question.playerRole",
-  stance: "ui.guided.question.stance",
-  companions: "ui.guided.question.companions",
-  scene: "ui.guided.question.scene",
-  review: "ui.guided.question.review",
+const STEP_QUESTION_TEMPLATE_KEYS: Record<StepId, string> = {
+  "world-name": "guided.step.world-name.question",
+  era: "guided.step.era.question",
+  style: "guided.step.style.question",
+  summary: "guided.step.summary.question",
+  story: "guided.step.story.question",
+  "player-role": "guided.step.player-role.question",
+  stance: "guided.step.stance.question",
+  companions: "guided.step.companions.question",
+  scene: "guided.step.scene.question",
+  review: "guided.step.review.question",
 };
 
 interface ScrollEntry {
@@ -95,26 +116,46 @@ function scrollEntries(
   uiLanguage: UiLanguage = "zh-CN",
 ): ScrollEntry[] {
   const entries: ScrollEntry[] = [];
-  if (draft.world.name) entries.push({ key: "world-name", label: "世界名称", value: draft.world.name });
-  if (draft.world.era) entries.push({ key: "era", label: "时代背景", value: draft.world.era });
+  if (draft.world.name) {
+    entries.push({
+      key: "world-name",
+      label: uiText(STEP_TITLE_KEYS["world-name"], uiLanguage),
+      value: draft.world.name,
+    });
+  }
+  if (draft.world.era) {
+    entries.push({ key: "era", label: uiText(STEP_TITLE_KEYS.era, uiLanguage), value: draft.world.era });
+  }
   if (draft.style !== "modern") {
-   entries.push({
-     key: "style",
-     label: "文风",
-     value: worldStyleText(`guided.style.${draft.style}`, draft.style, undefined, uiLanguage),
-   });
- }
-  if (draft.world.summary) entries.push({ key: "summary", label: "世界概述", value: draft.world.summary });
+    entries.push({
+      key: "style",
+      label: uiText(STEP_TITLE_KEYS.style, uiLanguage),
+      value: worldStyleText(`guided.style.${draft.style}`, draft.style, undefined, uiLanguage),
+    });
+  }
+  if (draft.world.summary) {
+    entries.push({
+      key: "summary",
+      label: uiText(STEP_TITLE_KEYS.summary, uiLanguage),
+      value: draft.world.summary,
+    });
+  }
   if (draft.story.title) {
     entries.push({
       key: "story",
-      label: "开场故事",
+      label: uiText(STEP_TITLE_KEYS.story, uiLanguage),
       value: draft.story.premise
         ? `${draft.story.title}——${draft.story.premise}`
         : draft.story.title,
     });
   }
-  if (draft.playerRole) entries.push({ key: "player-role", label: "你的角色", value: draft.playerRole });
+  if (draft.playerRole) {
+    entries.push({
+      key: "player-role",
+      label: uiText(STEP_TITLE_KEYS["player-role"], uiLanguage),
+      value: draft.playerRole,
+    });
+  }
   if (draft.playerStance === "observer") {
     entries.push({
       key: "stance",
@@ -126,7 +167,7 @@ function scrollEntries(
     if (companion.name) {
       entries.push({
         key: `companion-${index}`,
-        label: "同伴",
+        label: uiText(STEP_TITLE_KEYS.companions, uiLanguage),
         value: companion.role ? `${companion.name} · ${companion.role}` : companion.name,
       });
     }
@@ -137,7 +178,13 @@ function scrollEntries(
     draft.scene.tension,
     draft.scene.objective,
   ].filter((part) => part.length > 0);
-  if (scene.length > 0) entries.push({ key: "scene", label: "开场场景", value: scene.join(" · ") });
+  if (scene.length > 0) {
+    entries.push({
+      key: "scene",
+      label: uiText(STEP_TITLE_KEYS.scene, uiLanguage),
+      value: scene.join(" · "),
+    });
+  }
   return entries;
 }
 
@@ -155,23 +202,30 @@ const EMPTY_DRAFT: WorldGenesisDraft = {
 
 export function GuidedGenesis({
   playerName,
+  creationError = null,
   uiLanguage = "zh-CN",
+  fallback = null,
   onSuggest,
   onConfirm,
   onOpenRecord,
   onExit,
 }: GuidedGenesisProps) {
+  // 对谈 fallback：草案与首步字段都从移交的 draft 初始化（可改、可继续）；
+  // 无 fallback 时维持 EMPTY_DRAFT 的既有「重开从头」语义。
+  const initialDraft = fallback?.draft ?? EMPTY_DRAFT;
+  const initialStepValues = stepSavedValue(STEPS[0]!.id, initialDraft);
   const [stepIndex, setStepIndex] = useState(0);
-  const [draft, setDraft] = useState<WorldGenesisDraft>(EMPTY_DRAFT);
-  const [text, setText] = useState("");
-  const [storyTitle, setStoryTitle] = useState("");
-  const [storyPremise, setStoryPremise] = useState("");
+  const [draft, setDraft] = useState<WorldGenesisDraft>(initialDraft);
+  const [text, setText] = useState(initialStepValues.text);
+  const [storyTitle, setStoryTitle] = useState(initialStepValues.storyTitle);
+  const [storyPremise, setStoryPremise] = useState(initialStepValues.storyPremise);
   const [suggestions, setSuggestions] = useState<GenesisSuggestions | null>(null);
   const [suggestError, setSuggestError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
   const step = STEPS[stepIndex]!;
+  const stepTitle = uiText(STEP_TITLE_KEYS[step.id], uiLanguage);
   const entries = scrollEntries(draft, uiLanguage);
 
   function resetStepState(stepId: StepId, sourceDraft: WorldGenesisDraft) {
@@ -214,10 +268,10 @@ export function GuidedGenesis({
       advance({
         ...draft,
         story: {
-          title: draft.story.title || "序章",
+          title: draft.story.title || uiText("ui.guided.defaultStoryTitle", uiLanguage),
           premise: draft.story.premise,
         },
-        record: draft.record.title ? draft.record : { title: "第一章" },
+        record: draft.record.title ? draft.record : { title: uiText("ui.guided.defaultRecordTitle", uiLanguage) },
       });
       return;
     }
@@ -294,11 +348,11 @@ export function GuidedGenesis({
   }
 
   return (
-    <div className="guided-genesis" role="dialog" aria-label="AI 引导创建">
+    <div className="guided-genesis">
       <header className="guided-heading">
         <div>
           <p className="eyebrow">{uiText("ui.guided.eyebrow", uiLanguage)}</p>
-          <h2>{step.title}</h2>
+          <h2>{stepTitle}</h2>
         </div>
         <div className="guided-heading-actions">
           {stepIndex > 0 ? (
@@ -320,8 +374,14 @@ export function GuidedGenesis({
         <main className="guided-dialogue">
           <div className="guided-question">
             <span className="guided-seal" aria-hidden="true">AI</span>
-            <p>{uiText(STEP_QUESTION_KEYS[step.id], uiLanguage)}</p>
+            <p>{worldStyleText(STEP_QUESTION_TEMPLATE_KEYS[step.id], draft.style, undefined, uiLanguage)}</p>
           </div>
+
+          {creationError ? (
+            <div className="guided-suggest-error guided-create-error" role="alert">
+              <p>{creationError}</p>
+            </div>
+          ) : null}
 
           {suggestError ? (
             <div className="guided-suggest-error" role="alert">
@@ -341,7 +401,7 @@ export function GuidedGenesis({
           {step.id === "style" ? (
             <div className="guided-input-area">
               <p className="guided-note">{uiText("ui.guided.styleNote", uiLanguage)}</p>
-              <div className="guided-style-options" role="group" aria-label="文风选项">
+              <div className="guided-style-options" role="group" aria-label={uiText(STEP_TITLE_KEYS.style, uiLanguage)}>
                 {WORLD_STYLE_KEYS.map((key) => (
                   <button
                     className={draft.style === key ? "guided-style-option is-active" : "guided-style-option"}
@@ -409,7 +469,7 @@ export function GuidedGenesis({
                 </p>
               ) : null}
               <textarea
-                aria-label={`${step.title}输入`}
+                aria-label={`${stepTitle}${uiText("ui.guided.inputSuffix", uiLanguage)}`}
                 className="guided-input"
                 onChange={(event) => {
                   if (step.id === "story") setStoryTitle(event.target.value);
@@ -425,7 +485,7 @@ export function GuidedGenesis({
               />
               {step.id === "story" ? (
                 <textarea
-                  aria-label="故事简介输入"
+                  aria-label={uiText("ui.guided.storyPremiseLabel", uiLanguage)}
                   className="guided-input"
                   onChange={(event) => setStoryPremise(event.target.value)}
                   placeholder={uiText("ui.guided.storyPremisePlaceholder", uiLanguage)}
@@ -447,7 +507,7 @@ export function GuidedGenesis({
             <div className="guided-input-area">
               <p className="guided-note">{uiText("ui.guided.companionNote", uiLanguage)}</p>
               <textarea
-                aria-label="同伴意向输入"
+                aria-label={uiText("ui.guided.companionIntentLabel", uiLanguage)}
                 className="guided-input"
                 onChange={(event) => setText(event.target.value)}
                 placeholder={uiText("ui.guided.companionPlaceholder", uiLanguage)}
@@ -488,7 +548,7 @@ export function GuidedGenesis({
           ) : null}
 
           {suggestions && step.id !== "companions" && step.id !== "scene" ? (
-            <ul className="guided-suggestions" aria-label="AI 代写候选">
+            <ul className="guided-suggestions" aria-label={uiText("ui.guided.textSuggestionsLabel", uiLanguage)}>
               {(suggestions as string[]).map((item) => (
                 <li key={item}>
                   <button onClick={() => pickTextSuggestion(item)} type="button">
@@ -500,7 +560,7 @@ export function GuidedGenesis({
           ) : null}
 
           {suggestions && step.id === "companions" ? (
-            <ul className="guided-suggestions" aria-label="同伴候选">
+            <ul className="guided-suggestions" aria-label={uiText("ui.guided.companionSuggestionsLabel", uiLanguage)}>
               {(suggestions as CompanionSuggestion[]).map((companion) => (
                 <li key={companion.name}>
                   <button onClick={() => inviteCompanion(companion)} type="button">
@@ -514,14 +574,11 @@ export function GuidedGenesis({
           ) : null}
 
           {suggestions && step.id === "scene" ? (
-            <div className="guided-suggestions guided-scene-suggestions" aria-label="场景建议">
+            <div className="guided-suggestions guided-scene-suggestions" aria-label={uiText("ui.guided.sceneSuggestionsLabel", uiLanguage)}>
               {(["location", "weather", "tension", "objective"] as const).map((field) => {
                 const sceneSuggestions = (suggestions as SceneSuggestions)[field];
                 if (!sceneSuggestions || sceneSuggestions.length === 0) return null;
-                const label = field === "location" ? "地点"
-                  : field === "weather" ? "天气"
-                  : field === "tension" ? "局势"
-                  : "当前目标";
+                const label = uiText(`ui.guided.scene.${field}`, uiLanguage);
                 return (
                   <div className="guided-scene-field" key={field}>
                     <p className="eyebrow">{label}</p>
@@ -567,7 +624,7 @@ export function GuidedGenesis({
           ) : null}
         </main>
 
-        <aside className="guided-scroll" aria-label="已填写内容">
+        <aside className="guided-scroll" aria-label={uiText("ui.guided.scroll", uiLanguage)}>
           <p className="eyebrow">{uiText("ui.guided.scroll", uiLanguage)}</p>
           {entries.map((entry) => (
             <div className="scroll-entry" key={entry.key}>
@@ -578,6 +635,37 @@ export function GuidedGenesis({
               </div>
             </div>
           ))}
+          {fallback ? (
+            // 对谈恢复面板：置于首步可编辑字段之后（DOM 次序），切换后的
+            // 首焦点仍落在创世字段，不被本面板 textarea 抢焦。
+            <div
+              aria-label={uiText("ui.guided.fallbackRecoveryLabel", uiLanguage)}
+              className="guided-fallback-recovery"
+            >
+              <p className="eyebrow">{uiText("ui.guided.fallbackRecoveryLabel", uiLanguage)}</p>
+              {fallback.turns.length > 0 ? (
+                <ol className="guided-fallback-turns">
+                  {fallback.turns.map((turn, index) => (
+                    <li className={turn.role === "user" ? "is-user" : "is-scribe"} key={index}>
+                      <small>{turn.role === "user" ? playerName : uiText("ui.genesisChat.scribe", uiLanguage)}</small>
+                      <p>{turn.content}</p>
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+              {fallback.input.trim() ? (
+                <label className="guided-fallback-unsent">
+                  <small>{uiText("ui.guided.fallbackUnsentLabel", uiLanguage)}</small>
+                  <textarea
+                    aria-label={uiText("ui.guided.fallbackUnsentLabel", uiLanguage)}
+                    className="guided-input"
+                    defaultValue={fallback.input}
+                    rows={2}
+                  />
+                </label>
+              ) : null}
+            </div>
+          ) : null}
         </aside>
       </div>
     </div>

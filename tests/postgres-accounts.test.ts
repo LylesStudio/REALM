@@ -4,6 +4,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
 import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
+import {
   createPostgresAccountRepository,
   seedPostgresDemo,
 } from "../database/postgres/public.ts";
@@ -58,6 +64,9 @@ test(
       "0018_account_last_opened_fk_set_null.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+      // 0053 依赖 0041 的 pgcrypto；membership 写入走 capability 窄通道。
+      "0041_article_qualification_and_import_entries.sql",
+      "0053_membership_capability.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -66,6 +75,7 @@ test(
       await owner.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, "ws_demo");
 
     const accounts = createPostgresAccountRepository(ownerPool);
     const first = await accounts.findOrCreate("ws_demo", "守夜人甲");
@@ -115,8 +125,8 @@ test(
     assert.equal(afterRuntime?.uiLanguage, "ja");
 
     // 登录即加入默认世界：membership 自动创建且幂等。
-    await accounts.ensureDefaultWorldMembership("ws_demo", first.principalId);
-    await accounts.ensureDefaultWorldMembership("ws_demo", first.principalId);
+    await accounts.ensureDefaultWorldMembership("ws_demo", first.principalId, sessionProofFor(first.principalId));
+    await accounts.ensureDefaultWorldMembership("ws_demo", first.principalId, sessionProofFor(first.principalId));
     const memberships = await ownerPool.query(
       `SELECT role, omniscient_player_character, can_view_dynamic_knowledge
        FROM player_world_memberships
@@ -126,7 +136,9 @@ test(
       [first.principalId],
     );
     assert.equal(memberships.rows.length, 1);
-    assert.equal(memberships.rows[0].role, "owner");
+    // S 批次契约：登录加入默认世界只能是 player（owner 只来自创世）；
+    // 0053 起该写入经 capability 通道。
+    assert.equal(memberships.rows[0].role, "player");
     assert.equal(memberships.rows[0].omniscient_player_character, true);
     assert.equal(memberships.rows[0].can_view_dynamic_knowledge, true);
     const columns = await ownerPool.query(
@@ -180,6 +192,7 @@ test(
     await runtimeAccounts.ensureDefaultWorldMembership(
       "ws_demo",
       runtimeAccount.principalId,
+      sessionProofFor(runtimeAccount.principalId),
     );
     const runtimeMembership = await ownerPool.query(
       `SELECT count(*)::int AS count

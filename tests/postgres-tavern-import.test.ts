@@ -35,6 +35,7 @@ const MIGRATIONS = [
       "0024_graph_invalidation_events.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0053_membership_capability.sql",
 ];
 
 function buildPngWithCard(card: unknown): Buffer {

@@ -143,6 +143,7 @@ function stubScope(recordId: string, workspaceId: string): RecordRuntimeScope {
       displayName: "测试者",
       profileSummary: "单飞测试角色。",
     },
+    viewerCharacterInstanceId: "char_inst_player",
     // 与 demo scope 一致的在场角色：默认本地编排器/DM 校验依赖它们。
     aiCharacters: [
       {
@@ -344,6 +345,13 @@ function createFixture(options: {
     ...(multiRecord
       ? {
         runtimeScopeProvider: {
+          async resolveViewerCharacterInstanceId({ recordId }: { recordId: string }) {
+            return stubScope(
+              recordId,
+              options.workspaceIds?.get(recordId)
+                ?? LOCAL_RECORD_SCOPE.workspaceId,
+            ).viewerCharacterInstanceId;
+          },
           async resolve({ recordId }: { recordId: string }) {
             return stubScope(
               recordId,

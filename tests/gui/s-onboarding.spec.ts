@@ -38,7 +38,7 @@ function chatPostFor(message: string) {
 
 /** 静默条「再试一次」：等待可见并点击，返回重发请求的应答体。 */
 async function clickSilentRetry(page: Page, message: string): Promise<ChatResponseBody> {
-  const retry = page.locator(".genesis-chat-silent").getByRole("button", { name: "再试一次" });
+  const retry = page.locator(".genesis-chat-silent").getByRole("button", { name: "重试" });
   await expect(retry).toBeVisible({ timeout: 60_000 });
   const retryPromise = page.waitForResponse(chatPostFor(message), { timeout: TURN_TIMEOUT });
   await retry.click();
@@ -73,8 +73,8 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await freshPage.goto("/");
     await expect(freshPage.locator(".world-onboarding")).toBeVisible({ timeout: 60_000 });
     // 引导屏入口：司卷对谈（主）与逐步引导（次）。
-    await expect(freshPage.locator(".onboarding-entry.is-primary")).toContainText("与司卷对谈");
-    await expect(freshPage.locator(".onboarding-entry")).toHaveCount(2);
+    await expect(freshPage.locator(".onboarding-entry.is-primary")).toContainText("与 AI 助手对话");
+    await expect(freshPage.locator(".onboarding-entry")).toHaveCount(3);
     // 不出现演示记录时间线。
     await expect(freshPage.locator(".record-main")).toHaveCount(0);
     await expect(freshPage.locator(".event-card")).toHaveCount(0);
@@ -84,6 +84,109 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
       freshPage.locator(".onboarding-worlds li button").first(),
     ).toBeVisible();
 
+    await fresh!.context.close();
+  });
+
+  test("S1b 预设世界创建失败：明确告知且可重试", async ({ request, browser }) => {
+    const fresh = await createNewUserContext(browser, request);
+    test.skip(!fresh, "访问门禁未启用，无法创建新用户。");
+    const freshPage = await fresh!.context.newPage();
+    let attempts = 0;
+    await freshPage.route("**/api/library", async (route) => {
+      if (route.request().method() === "POST") {
+        attempts += 1;
+        await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await freshPage.goto("/");
+    await expect(freshPage.locator(".world-onboarding")).toBeVisible({ timeout: 60_000 });
+    const preset = freshPage.locator(".onboarding-preset-card").first();
+    await preset.click();
+    await expect(freshPage.locator(".onboarding-create-error[role=alert]")).toHaveText(
+      "创建状态未能确认。请先检查世界库；确认未出现后，再重试，避免重复创建。",
+    );
+    await expect(preset).toBeEnabled();
+
+    await preset.click();
+    await expect.poll(() => attempts).toBe(2);
+    await expect(freshPage.locator(".onboarding-create-error[role=alert]")).toBeVisible();
+    await fresh!.context.close();
+  });
+
+  test("S1c 对谈提案落笔失败：保留草案并允许重试", async ({ request, browser }) => {
+    const fresh = await createNewUserContext(browser, request);
+    test.skip(!fresh, "访问门禁未启用，无法创建新用户。");
+    const freshPage = await fresh!.context.newPage();
+    const worldName = uniqueName("对谈待重试");
+
+    await freshPage.route("**/api/world/genesis-chat", async (route) => {
+      const requestBody = route.request().postDataJSON() as { message?: unknown };
+      const hasMessage = typeof requestBody.message === "string"
+        && requestBody.message.trim().length > 0;
+      const response = hasMessage
+        ? {
+            ok: true,
+            reply: "我先整理一份提案供你确认。",
+            draftPatch: { world: { name: worldName } },
+            phase: "ready",
+            opening: "",
+          }
+        : {
+            ok: true,
+            reply: "说说你想要的世界。",
+            draftPatch: null,
+            phase: "exploring",
+            opening: "",
+          };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(response),
+      });
+    });
+
+    await freshPage.goto("/");
+    await expect(freshPage.locator(".world-onboarding")).toBeVisible({ timeout: 60_000 });
+    await freshPage.locator(".onboarding-entry.is-primary").click();
+    await expect(freshPage.locator(".guided-genesis-chat")).toBeVisible();
+    await expect(freshPage.locator(".chat-turn.is-scribe").first()).toBeVisible();
+    await freshPage.locator(".genesis-chat-form input").fill("给我一份完整世界草案");
+    await freshPage.locator(".genesis-chat-form button[type=submit]").click();
+
+    const proposal = freshPage.locator(".genesis-proposal-card");
+    await expect(proposal).toBeVisible();
+    await expect(proposal.locator("input").first()).toHaveValue(worldName);
+
+    let attempts = 0;
+    await freshPage.route("**/api/world/generate", async (route) => {
+      if (route.request().method() === "POST") {
+        attempts += 1;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { message: "server detail hidden" } }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    const submit = proposal.getByRole("button", { name: "创建世界" });
+    await submit.click();
+    const alert = proposal.locator(".guided-create-error[role=alert]");
+    await expect(alert).toHaveText(
+      "创建状态未能确认。请先检查世界库；确认未出现后，再重试，避免重复创建。",
+    );
+    await expect(alert).not.toContainText("server detail hidden");
+    await expect(proposal.locator("input").first()).toHaveValue(worldName);
+    await expect(submit).toBeEnabled();
+
+    await submit.click();
+    await expect.poll(() => attempts).toBe(2);
+    await expect(alert).toBeVisible();
     await fresh!.context.close();
   });
 
@@ -148,7 +251,7 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     expect(proposedName.length).toBeGreaterThan(0);
     // 姿态选择可见，默认入局。
     await expect(card.locator(".stance-option")).toHaveCount(2);
-    await expect(card.locator(".stance-option.is-active")).toContainText("入局");
+    await expect(card.locator(".stance-option.is-active")).toContainText("扮演角色");
 
     // 就地编辑世界名，落笔以定稿为准。
     const editedName = `${proposedName}定`.slice(0, 40);
@@ -156,7 +259,7 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await expect(nameInput).toHaveValue(editedName);
 
     // 落笔入界：进入新记录（玩家席位绑定登录昵称）。
-    await freshPage.getByRole("button", { name: "落笔入界" }).click();
+    await card.getByRole("button", { name: "创建世界" }).click();
     await waitForRecordReady(freshPage);
     await expect(freshPage.locator(".breadcrumb")).toContainText(editedName);
     await expect(freshPage.locator(".cast-list")).toContainText(displayName);
@@ -225,7 +328,7 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     const openingText = "灯塔点亮之前，云海先吞没过一艘船。";
     await card.locator("textarea[rows='3']").fill(openingText);
 
-    await freshPage.getByRole("button", { name: "落笔入界" }).click();
+    await card.getByRole("button", { name: "创建世界" }).click();
     await waitForRecordReady(freshPage);
     await expect(freshPage.locator(".breadcrumb")).toContainText(proposedName);
     // header 执笔者徽标；阵容不含「你」的角色席位（观察者在阵容外）。
@@ -237,35 +340,6 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     });
     await expect(openingCard).toBeVisible({ timeout: 30_000 });
     await expect(openingCard.locator("h3")).toHaveText("旁白");
-
-    // —— 步骤 4：世界库为该世界添一名角色 → 当前记录阵容立即可见。
-    await freshPage.getByRole("button", { name: "世界库" }).click();
-    await expect(freshPage.locator(".library-panel")).toBeVisible();
-    const worldCard = freshPage.locator(".library-world", { hasText: proposedName });
-    const charName = uniqueName("S角");
-    await worldCard.locator(".library-add-character input[aria-label='名字']").fill(charName);
-    await worldCard.locator(".library-add-character input[aria-label='定位']").fill("守灯学徒");
-    const attachResponse = freshPage.waitForResponse(
-      (response) =>
-        response.url().includes("/api/library")
-        && response.request().method() === "POST",
-      { timeout: 60_000 },
-    );
-    await worldCard.locator(".library-add-character button[type=submit]").click();
-    await attachResponse;
-    // 附带入阵提示，世界卡角色列表标注「在阵容」。
-    await expect(worldCard.locator(".library-add-character-note")).toBeVisible({
-      timeout: 30_000,
-    });
-    await expect(
-      worldCard.locator(".library-character", { hasText: charName }),
-    ).toContainText("在阵容");
-    // 收起面板：新角色立即出现在右侧阵容。
-    await freshPage.locator(".library-panel-heading button").click();
-    await expect(freshPage.locator(".library-panel")).toBeHidden();
-    await expect(freshPage.locator(".cast-list")).toContainText(charName, {
-      timeout: 30_000,
-    });
 
     // —— 步骤 5：以执笔者身份提交一条真实回合，AI 角色响应入时间线。
     const beforeCount = await freshPage.locator(".event-card.is-committed").count();
@@ -297,16 +371,39 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await freshPage.getByRole("button", { name: "世界库" }).click();
     const stanceCard = freshPage.locator(".library-world", { hasText: proposedName });
     await stanceCard
-      .locator(".library-stance-toggle button", { hasText: "入局" })
+      .locator(".library-stance-toggle button", { hasText: "扮演角色" })
       .click();
     await expect(
       stanceCard.locator(".library-stance-toggle button.is-active"),
-    ).toHaveText("入局", { timeout: 60_000 });
-    await freshPage.locator(".library-panel-heading button").click();
+    ).toHaveText("扮演角色", { timeout: 60_000 });
+
+    // —— 步骤 4（按 T10-B6 契约重排）：observer 只读，先经姿态切换入局
+    //（player 席位）再添角色；附带入阵提示 + 角色列表标注「在阵容」。
+    const charName = uniqueName("S角");
+    await stanceCard.locator(".library-add-character input[aria-label='名字']").fill(charName);
+    await stanceCard.locator(".library-add-character input[aria-label='定位']").fill("守灯学徒");
+    const attachResponse = freshPage.waitForResponse(
+      (response) =>
+        response.url().includes("/api/library")
+        && response.request().method() === "POST",
+      { timeout: 60_000 },
+    );
+    await stanceCard.locator(".library-add-character button[type=submit]").click();
+    await attachResponse;
+    await expect(stanceCard.locator(".library-add-character-note")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(
+      stanceCard.locator(".library-character", { hasText: charName }),
+    ).toContainText("在阵容");
+    await freshPage.getByRole("button", { name: "关闭世界库" }).click();
     await expect(freshPage.locator(".library-panel")).toBeHidden();
-    // 转入局：阵容出现本人席位「你」，执笔者徽标消失。
+    // 转入局：阵容出现本人席位「你」，执笔者徽标消失；新角色已在阵容。
     await expect(freshPage.locator(".cast-you")).toBeVisible({ timeout: 60_000 });
     await expect(freshPage.locator(".view-mode.is-narrator")).toHaveCount(0);
+    await expect(freshPage.locator(".cast-list")).toContainText(charName, {
+      timeout: 30_000,
+    });
 
     await freshPage.getByRole("button", { name: "世界库" }).click();
     await stanceCard
@@ -315,7 +412,7 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await expect(
       stanceCard.locator(".library-stance-toggle button.is-active"),
     ).toContainText("观察者", { timeout: 60_000 });
-    await freshPage.locator(".library-panel-heading button").click();
+    await freshPage.getByRole("button", { name: "关闭世界库" }).click();
     await expect(freshPage.locator(".library-panel")).toBeHidden();
     // 切回观察者：「你」席位退出阵容显示，徽标回归。
     await expect(freshPage.locator(".cast-you")).toHaveCount(0, { timeout: 60_000 });
@@ -343,16 +440,16 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await freshPage.locator(".onboarding-entry.is-primary").click();
     await expect(freshPage.locator(".guided-genesis-chat")).toBeVisible();
 
-    // fail-closed：不弹报错，只显示「司卷暂时沉默」与降级出口。
+    // fail-closed：不弹通用异常页，提供明确重试与分步引导出口。
     const silent = freshPage.locator(".genesis-chat-silent");
     await expect(silent).toBeVisible({ timeout: 60_000 });
-    await expect(silent).toContainText("司卷暂时沉默");
+    await expect(silent).toContainText("AI 助手暂时不可用");
 
     // 转旧表单并完成创建。
-    await silent.getByRole("button", { name: "改用逐步引导" }).click();
+    await silent.getByRole("button", { name: "改用分步引导" }).click();
     await expect(freshPage.locator(".guided-genesis")).toBeVisible();
     const worldName = uniqueName("GUI默路");
-    await freshPage.getByRole("textbox", { name: "世界之名输入" }).fill(worldName);
+    await freshPage.getByRole("textbox", { name: "世界名称输入" }).fill(worldName);
     await freshPage.locator(".guided-confirm").click();
     for (let step = 0; step < 8; step += 1) {
       await freshPage.locator(".guided-skip").click();

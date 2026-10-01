@@ -245,7 +245,7 @@ test("preview hub drops chunks after abort and always delivers end", () => {
   const events: LocalPreviewEvent[] = [];
   hub.subscribe("record", (event) => events.push(event));
   const controller = new AbortController();
-  hub.begin("record", "p1", controller.signal);
+  hub.begin("record", "p1", controller.signal, { kind: "public" });
   hub.publishChunk("record", "塞娜", "第一句");
   controller.abort();
   hub.publishChunk("record", "塞娜", "被打断的半句");

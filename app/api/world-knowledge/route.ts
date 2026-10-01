@@ -76,15 +76,9 @@ const ENTITY_KINDS = new Set([
   "other",
 ]);
 const CLAIM_SCOPES = new Set(["record", "story", "world"]);
-const TRUTH_STATUSES = new Set([
+const INITIAL_CLAIM_TRUTH_STATUSES = new Set([
   "mentioned",
   "record_confirmed",
-  "story_canon",
-  "world_canon",
-  "rumor",
-  "hypothesis",
-  "disputed",
-  "deprecated",
 ]);
 
 function knowledgeService() {
@@ -211,7 +205,7 @@ export async function POST(request: Request) {
         || !predicate
         || !objectValue
         || !CLAIM_SCOPES.has(claimScope)
-        || !TRUTH_STATUSES.has(truthStatus)
+        || !INITIAL_CLAIM_TRUTH_STATUSES.has(truthStatus)
       ) {
         return invalid("Claim 主体、谓词、值、scope 或真值状态不合法。");
       }

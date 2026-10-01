@@ -1,4 +1,5 @@
 import type { RecordProjection, ProjectionEvent } from "./legacy-record-projection-types.ts";
+import type { Pool } from "pg";
 import { createHash } from "node:crypto";
 import {
   POSTGRES_DEMO_IDS,
@@ -194,6 +195,7 @@ function demoRecordRuntimeScope(): RecordRuntimeScope {
       worldLore: "",
     },
     playerActor: LOCAL_PLAYER_ACTOR,
+    viewerCharacterInstanceId: LOCAL_PLAYER_ACTOR.characterInstanceId,
     aiCharacters: LOCAL_AI_CHARACTERS,
     observerCharacterInstanceIds: [
       POSTGRES_DEMO_IDS.playerInstance,
@@ -431,9 +433,13 @@ export interface LocalRecordService {
    * 的只读窄检查——无副作用（不写 account last-opened、不签发 writeToken、
    * 不订阅、不返回 envelope）。未知 Record / 非成员 / 无 viewer projection
    * 统一 NOT_FOUND（安全 404，不泄漏存在性）；runtime 未初始化保持
-   * LOCAL_RUNTIME_NOT_INITIALIZED（503 形态）。
+   * LOCAL_RUNTIME_NOT_INITIALIZED（503 形态）。返回值仅是明确绑定到该 principal
+   * 的 viewer character id；legacy fallback seat 没有此身份，返回 undefined。
    */
-  authorizeRecordViewer(recordId: string, principalId?: string): Promise<void>;
+  authorizeRecordViewer(
+    recordId: string,
+    principalId?: string,
+  ): Promise<string | undefined>;
   /**
    * 批次 S：打开账号「上次打开的记录」；无记忆或记忆失效时返回
    * onboarding 信号（不抛错、不落演示记录）。
@@ -461,6 +467,7 @@ export interface LocalRecordService {
   subscribePreviews(
     recordId: string,
     listener: (event: LocalPreviewEvent) => void,
+    viewerCharacterInstanceId?: string,
   ): () => void;
 }
 
@@ -469,62 +476,111 @@ export type LocalPreviewEvent =
   | { kind: "end"; previewId: string; outcome: "committed" | "aborted" };
 
 export interface LocalPreviewHub {
-  begin(recordId: string, previewId: string, signal?: AbortSignal): void;
+  begin(
+    recordId: string,
+    previewId: string,
+    signal: AbortSignal | undefined,
+    visibility: TurnVisibilityPlan,
+  ): void;
   publishChunk(recordId: string, speaker: string, content: string): void;
   end(recordId: string, outcome: "committed" | "aborted"): void;
   subscribe(
     recordId: string,
     listener: (event: LocalPreviewEvent) => void,
+    viewerCharacterInstanceId?: string,
   ): () => void;
 }
 
 /**
- * In-memory preview广播枢纽。每个 Record 同一时间只有一个活动 Preview
- * 会话；会话由 PreviewSession 状态机守护：aborted 会话不再接受 chunk，
- * 其部分内容不可读取、不可提交。
+ * In-memory preview 广播枢纽。public Turn 面向所有已授权 viewer；restricted
+ * Turn 在服务端按 principal 绑定的 characterInstanceId 过滤，chunk 与 end
+ * 元数据同样受 audience 约束。身份缺失时只允许 public Preview。
  */
-export function createLocalPreviewHub(): LocalPreviewHub {
-  const listeners = new Map<string, Set<(event: LocalPreviewEvent) => void>>();
-  const sessions = new Map<string, PreviewSession>();
+type LocalPreviewSubscriber = {
+  listener: (event: LocalPreviewEvent) => void;
+  viewerCharacterInstanceId?: string;
+};
+type ActiveLocalPreview = {
+  session: PreviewSession;
+  visibility: TurnVisibilityPlan;
+};
 
-  function emit(recordId: string, event: LocalPreviewEvent) {
-    for (const listener of listeners.get(recordId) ?? []) listener(event);
+function canViewPreview(
+  visibility: TurnVisibilityPlan,
+  viewerCharacterInstanceId?: string,
+): boolean {
+  if (visibility.kind === "public") return true;
+  if (
+    visibility.kind !== "restricted"
+    || !Array.isArray(visibility.audienceCharacterInstanceIds)
+    || typeof viewerCharacterInstanceId !== "string"
+    || viewerCharacterInstanceId.length === 0
+  ) {
+    return false;
+  }
+  return visibility.audienceCharacterInstanceIds.includes(viewerCharacterInstanceId);
+}
+
+export function createLocalPreviewHub(): LocalPreviewHub {
+  const listeners = new Map<string, Set<LocalPreviewSubscriber>>();
+  const sessions = new Map<string, ActiveLocalPreview>();
+
+  function emit(
+    recordId: string,
+    event: LocalPreviewEvent,
+    visibility: TurnVisibilityPlan,
+  ) {
+    for (const subscriber of listeners.get(recordId) ?? []) {
+      if (canViewPreview(visibility, subscriber.viewerCharacterInstanceId)) {
+        subscriber.listener(event);
+      }
+    }
   }
 
   return {
-    begin(recordId, previewId, signal) {
-      sessions.set(recordId, createPreviewSession({ id: previewId, signal }));
-    },
-    publishChunk(recordId, speaker, content) {
-      const session = sessions.get(recordId);
-      if (!session || session.state !== "streaming" || !content) return;
-      session.push(content);
-      emit(recordId, {
-        kind: "chunk",
-        previewId: session.id,
-        speaker,
-        content,
+    begin(recordId, previewId, signal, visibility) {
+      sessions.set(recordId, {
+        session: createPreviewSession({ id: previewId, signal }),
+        visibility,
       });
     },
+    publishChunk(recordId, speaker, content) {
+      const active = sessions.get(recordId);
+      if (!active || active.session.state !== "streaming" || !content) return;
+      active.session.push(content);
+      emit(recordId, {
+        kind: "chunk",
+        previewId: active.session.id,
+        speaker,
+        content,
+      }, active.visibility);
+    },
     end(recordId, outcome) {
-      const session = sessions.get(recordId);
-      if (!session) return;
+      const active = sessions.get(recordId);
+      if (!active) return;
       sessions.delete(recordId);
       // Batch 2D：已 aborted 的会话绝不因迟到的 success cleanup 发出
       // committed end；partial 已被会话状态机清空且不可读取。
-      const effectiveOutcome = session.state === "aborted" ? "aborted" : outcome;
-      if (session.state === "streaming") {
-        if (effectiveOutcome === "committed") session.complete();
-        else session.abort(effectiveOutcome);
+      const effectiveOutcome = active.session.state === "aborted"
+        ? "aborted"
+        : outcome;
+      if (active.session.state === "streaming") {
+        if (effectiveOutcome === "committed") active.session.complete();
+        else active.session.abort(effectiveOutcome);
       }
-      emit(recordId, { kind: "end", previewId: session.id, outcome: effectiveOutcome });
+      emit(recordId, {
+        kind: "end",
+        previewId: active.session.id,
+        outcome: effectiveOutcome,
+      }, active.visibility);
     },
-    subscribe(recordId, listener) {
-      const set = listeners.get(recordId) ?? new Set();
-      set.add(listener);
+    subscribe(recordId, listener, viewerCharacterInstanceId) {
+      const set = listeners.get(recordId) ?? new Set<LocalPreviewSubscriber>();
+      const subscriber = { listener, viewerCharacterInstanceId };
+      set.add(subscriber);
       listeners.set(recordId, set);
       return () => {
-        set.delete(listener);
+        set.delete(subscriber);
         if (set.size === 0) listeners.delete(recordId);
       };
     },
@@ -585,6 +641,20 @@ export interface LocalVisibilityAssessor {
   assess(input: {
     playerText: string;
   }): Promise<TurnVisibilityAssessment>;
+}
+
+type ActiveTurnSignal = { recordId: string; controller: AbortController };
+
+/** A cancellation key is insufficient authority without its Record scope. */
+export function cancelActiveTurn(
+  signals: Map<string, ActiveTurnSignal>,
+  recordId: string,
+  idempotencyKey: string,
+): boolean {
+  const active = signals.get(idempotencyKey);
+  if (!active || active.recordId !== recordId) return false;
+  active.controller.abort();
+  return true;
 }
 
 interface VisibilityProposalEntry extends WriteScope {
@@ -943,7 +1013,7 @@ export function createLocalRecordService(
         ? () => dependencies.presenceAssessor!
         : null;
   const previewHub = dependencies.previewHub ?? createLocalPreviewHub();
-  const turnSignals = new Map<string, AbortController>();
+  const turnSignals = new Map<string, ActiveTurnSignal>();
   // 批次 T7：自演单飞守卫（进程内按 recordId 去重；DB 部分唯一索引兜底）。
   const selfPlayInFlight = new Set<string>();
   const actionCatalog = dependencies.actionCatalog ?? {
@@ -997,7 +1067,7 @@ export function createLocalRecordService(
           const before = await loadConsistentSnapshot(dependencies, input.recordId, input.principalId);
           const key = `interjection-${dependencies.idFactory?.() ?? crypto.randomUUID()}`;
           const controller = new AbortController();
-          turnSignals.set(key, controller);
+          turnSignals.set(key, { recordId: input.recordId, controller });
           // Batch 2D：独立 controller 的 signal 贯通插话模型链；
           // 其取消与玩家回合互不影响。
           const interjectionDependencies = { ...runtimeDependencies, signal: controller.signal };
@@ -1177,7 +1247,7 @@ export function createLocalRecordService(
         });
         let activeKey = `presence-${dependencies.idFactory?.() ?? crypto.randomUUID()}`;
         const presenceController = new AbortController();
-        turnSignals.set(activeKey, presenceController);
+        turnSignals.set(activeKey, { recordId: input.recordId, controller: presenceController });
         // Batch 2D：独立 controller 的 signal 贯通 presence 模型链；
         // 其取消与玩家回合互不影响。
         const presenceDependencies = { ...runtimeDependencies, signal: presenceController.signal };
@@ -1206,7 +1276,7 @@ export function createLocalRecordService(
             );
             activeKey = `presence-${dependencies.idFactory?.() ?? crypto.randomUUID()}`;
             const retryController = new AbortController();
-            turnSignals.set(activeKey, retryController);
+            turnSignals.set(activeKey, { recordId: input.recordId, controller: retryController });
             const retryDependencies = { ...runtimeDependencies, signal: retryController.signal };
             run = await executeTurn(
               buildPresenceCommand(refreshed.canonicalVersion, activeKey),
@@ -1809,7 +1879,7 @@ export function createLocalRecordService(
           });
           let activeKey = `selfplay-${input.sessionId}-${beat}`;
           const selfPlayController = new AbortController();
-          turnSignals.set(activeKey, selfPlayController);
+          turnSignals.set(activeKey, { recordId: input.recordId, controller: selfPlayController });
           // Batch 2D：独立 controller 的 signal 贯通 self-play 模型链。
           const selfPlayDependencies = { ...runtimeDependencies, signal: selfPlayController.signal };
           let run: LocalTurnRun;
@@ -1838,7 +1908,7 @@ export function createLocalRecordService(
               );
               activeKey = `selfplay-${input.sessionId}-${beat}-retry`;
               const retryController = new AbortController();
-              turnSignals.set(activeKey, retryController);
+              turnSignals.set(activeKey, { recordId: input.recordId, controller: retryController });
               const retryDependencies = { ...runtimeDependencies, signal: retryController.signal };
               run = await executeTurn(
                 buildSelfPlayCommand(refreshed.canonicalVersion, activeKey),
@@ -1929,24 +1999,41 @@ export function createLocalRecordService(
     },
 
     async authorizeRecordViewer(recordId, principalId) {
-      // 与读取路径同源的三步窄授权（只读，零副作用）：
-      // ① Record scope——未知 Record / 无可用席位 → NOT_FOUND（404）；
-      await resolveRuntimeScope(dependencies, recordId, principalId);
-      // ② world membership + viewer 可见性——与 delivery META 同一道
-      //    membership JOIN/归档过滤（META-only，不扫描 EVENTS）；
-      //    非成员 / 无 viewer projection 返回 false → 安全 404（与未知
-      //    Record 同形，不泄漏存在性）。
+      // 未装配 DB scope provider 时只允许本地 demo Record；不要依赖
+      // projection stub/客户端参数推断本地 Record 的存在性。
+      if (!dependencies.runtimeScopeProvider && recordId !== LOCAL_RECORD_SCOPE.recordId) {
+        throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
+      }
+      // ① 先用 delivery META 验证 Record + membership（只读、无副作用）；
+      // 非成员 / 不存在的 Record 同形为安全 404。
+      const identity = principalId ?? LOCAL_RECORD_SCOPE.principalId;
       const authorized = await dependencies.projection.hasViewerProjection({
         ...LOCAL_RECORD_SCOPE,
         recordId,
-        principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
+        principalId: identity,
       });
       if (!authorized) {
         throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
       }
+
+      // ② 只解析 principal 绑定的 viewer character，不装载完整 turn scope、
+      // recent events、Canon 或 Lore。缺少绑定不拒绝 public SSE，但 restricted
+      // preview hub 会 fail-closed 丢弃该 viewer 的 chunk/end。
+      const viewerCharacterInstanceId = dependencies.runtimeScopeProvider
+        ? await dependencies.runtimeScopeProvider.resolveViewerCharacterInstanceId({
+            workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+            principalId: identity,
+            recordId,
+          })
+        : recordId === LOCAL_RECORD_SCOPE.recordId
+          && identity === LOCAL_RECORD_SCOPE.principalId
+          ? demoRecordRuntimeScope().viewerCharacterInstanceId
+          : null;
+
       // ③ runtime 未初始化（record head 缺失）保持既有 503 形态。
       const head = await dependencies.repository.loadRecordHead(recordId);
       if (!head) throw notInitialized();
+      return viewerCharacterInstanceId || undefined;
     },
 
     async openDefaultRecord(principalId) {
@@ -2078,7 +2165,7 @@ export function createLocalRecordService(
       // Batch 2D：Turn controller 在任何模型调用（prefetch/可见性裁决）之前
       // 注册，使 cancelMessage 能命中整条主链路；所有出口统一 finally 清理。
       const turnController = new AbortController();
-      turnSignals.set(input.idempotencyKey, turnController);
+      turnSignals.set(input.idempotencyKey, { recordId: input.recordId, controller: turnController });
       try {
         const visibility = authorization.replay
           ? { plan: { kind: "public" as const }, proposalId: null }
@@ -2093,7 +2180,12 @@ export function createLocalRecordService(
               signal: turnController.signal,
             });
         let run: LocalTurnRun;
-        previewHub.begin(input.recordId, input.idempotencyKey, turnController.signal);
+        previewHub.begin(
+          input.recordId,
+          input.idempotencyKey,
+          turnController.signal,
+          visibility.plan,
+        );
         const turnDependencies = { ...runtimeDependencies, signal: turnController.signal };
         try {
           run = await executeTurn(
@@ -2271,17 +2363,14 @@ export function createLocalRecordService(
         if (prefetchHandle) dependencies.memoryPrefetch?.end(prefetchHandle);
         // Batch 2D：早注册的 Turn controller 统一清理（幂等；presence/插话
         // 的独立 key 不受本回合影响）。
-        if (turnSignals.get(input.idempotencyKey) === turnController) {
+        if (turnSignals.get(input.idempotencyKey)?.controller === turnController) {
           turnSignals.delete(input.idempotencyKey);
         }
       }
     },
 
     cancelMessage(recordId, idempotencyKey) {
-      const controller = turnSignals.get(idempotencyKey);
-      if (!controller) return false;
-      controller.abort();
-      return true;
+      return cancelActiveTurn(turnSignals, recordId, idempotencyKey);
     },
 
     async startSelfPlay(recordId, principalId) {
@@ -2328,8 +2417,12 @@ export function createLocalRecordService(
       return stopped ?? store.findLatest(recordId);
     },
 
-    subscribePreviews(recordId, listener) {
-      return previewHub.subscribe(recordId, listener);
+    subscribePreviews(recordId, listener, viewerCharacterInstanceId) {
+      return previewHub.subscribe(
+        recordId,
+        listener,
+        viewerCharacterInstanceId,
+      );
     },
 
     async listCommittedEvents(recordId, afterOrdinal, principalId) {
@@ -2458,7 +2551,7 @@ function createLocalTurnDependencies(
   clock: () => Date,
   idFactory?: () => string,
   orchestration?: M2TurnOrchestrator | ((scope: RecordRuntimeScope) => M2TurnOrchestrator),
-  turnSignals?: ReadonlyMap<string, AbortController>,
+  turnSignals?: ReadonlyMap<string, ActiveTurnSignal>,
   actionCatalog?: ActionAffordanceCatalog,
 ): TurnRuntimeDependencies<
   PlayerUtterancePayload,
@@ -2476,7 +2569,7 @@ function createLocalTurnDependencies(
   }
   function assertNotCancelled(idempotencyKey: string) {
     // M4：打断在阶段边界生效；被取消的 Turn 不得提交任何正式事件。
-    if (turnSignals?.get(idempotencyKey)?.signal.aborted) {
+    if (turnSignals?.get(idempotencyKey)?.controller.signal.aborted) {
       throw new FatalTurnError(
         "TURN_CANCELLED",
         "The Turn was interrupted by the player.",
@@ -3466,6 +3559,7 @@ function translateRuntimeError(error: unknown): Error {
 }
 
 let defaultService: Promise<LocalRecordService> | undefined;
+let defaultServicePool: Pool | undefined;
 
 export function getLocalRecordService(): Promise<LocalRecordService> {
   defaultService ??= createDefaultLocalRecordService().catch((error) => {
@@ -3473,6 +3567,14 @@ export function getLocalRecordService(): Promise<LocalRecordService> {
     throw error;
   });
   return defaultService;
+}
+
+/** 关停/测试路径：释放默认服务持有的连接池（幂等；与 endSharedRuntimePools 同义）。 */
+export async function closeDefaultLocalRecordService(): Promise<void> {
+  defaultService = undefined;
+  const pool = defaultServicePool;
+  defaultServicePool = undefined;
+  await pool?.end().catch(() => undefined);
 }
 
 async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
@@ -3486,6 +3588,7 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
     );
   }
   const pool = createLocalPostgresPool(connectionString);
+  defaultServicePool = pool;
   const modelSettings = getModelSettingsService();
   const memoryRepository = createPostgresCharacterMemoryRepository(pool);
   const memory = createCharacterMemoryService({

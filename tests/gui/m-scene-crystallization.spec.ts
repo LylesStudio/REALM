@@ -3,6 +3,7 @@ import {
   createRecordInStory,
   createStoryViaApi,
   createWorldViaApi,
+  expectCommittedEvent,
   openDemoRecord,
   openRecordViaLibrary,
   submitMessage,
@@ -10,12 +11,13 @@ import {
 } from "./helpers";
 
 /**
- * M 组：设定结晶与逻辑一致性裁决（真实模型，两段式管线异步执行）。
- * 提取 + 裁决各一次模型调用，thinking 启用下单次可达一分钟以上，
- * 轮询窗口与用例超时都按此放宽。全部用例在隔离的 GUI 世界中进行，
- * 不污染演示世界的共享设定。
+ * M 组：设定结晶与逻辑一致性裁决（两段式异步管线）。离线 GUI 回归使用
+ * 确定性 fake fixture 与短观察窗；显式真实 provider smoke 保留较长模型预算。
+ * 全部用例在隔离的 GUI 世界中进行，不污染演示世界的共享设定。
  */
-const CRYSTALLIZATION_POLL_TIMEOUT = 300_000;
+const FAKE_PROVIDER = process.env.REALM_DETERMINISTIC_FAKE_PROVIDER === "1";
+const CRYSTALLIZATION_POLL_TIMEOUT = FAKE_PROVIDER ? 30_000 : 300_000;
+const M2_REJECTION_OBSERVATION_WINDOW = FAKE_PROVIDER ? 15_000 : 150_000;
 
 interface SceneState {
   location: string;
@@ -42,7 +44,7 @@ test.describe("M. 设定结晶与逻辑一致性裁决", () => {
     page,
     request,
   }) => {
-    test.setTimeout(600_000);
+    test.setTimeout(FAKE_PROVIDER ? 60_000 : 600_000);
     const world = await createWorldViaApi(request);
     const story = await createStoryViaApi(request, world.id);
     const record = await createRecordInStory(request, story.id);
@@ -77,7 +79,7 @@ test.describe("M. 设定结晶与逻辑一致性裁决", () => {
     page,
     request,
   }) => {
-    test.setTimeout(720_000);
+    test.setTimeout(FAKE_PROVIDER ? 90_000 : 720_000);
     const world = await createWorldViaApi(request);
     const story = await createStoryViaApi(request, world.id);
     const record = await createRecordInStory(request, story.id);
@@ -98,13 +100,35 @@ test.describe("M. 设定结晶与逻辑一致性裁决", () => {
     // 第二回合：矛盾的时间倒退宣称，裁决应拒绝。
     const contradiction = "时间倒流回新历40年3月1日的清晨，太阳重新升起来了。";
     const second = await submitMessage(page, contradiction);
-    expect([201, 428]).toContain(second.response.status());
+    let accepted = second.response;
+    // M2 is specifically a stale-envelope recovery journey. Do not let the
+    // test silently pass through the non-conflict path if crystallization no
+    // longer advances the revision before the player's next submission.
+    expect(accepted.status()).toBe(409);
+    const body = await accepted.json().catch(() => ({}));
+    expect(body?.error?.code).toBe("WRITE_CONFLICT");
+    await expect(page.locator(".notice-bar")).toContainText("记录刚刚发生了变化");
+    await expect(page.locator("#realm-message")).toHaveValue(contradiction);
 
-    // 观察窗口覆盖提取+裁决两次模型调用；任何 fail-closed 分支
-    // （提取为空、裁决拒绝、写回失败）都表现为世界时间不变。
+    // 产品语义是先刷新 canonical envelope，再由玩家确认重发；
+    // 使用原草稿直接再次点击，而不是测试 helper 重新填入文本。
+    const retryResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes("/api/record/messages")
+        && response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "送出" }).click();
+    accepted = await retryResponse;
+    expect(accepted.status()).toBe(201);
+    await expectCommittedEvent(page, contradiction, { timeoutMs: 30_000 });
+    await expect(
+      page.locator(".event-card.is-committed").filter({ hasText: contradiction }),
+    ).toHaveCount(1);
+
+    // 观察窗口覆盖提取+裁决两次模型调用；裁决拒绝后世界时间保持不变。
     const startedAt = Date.now();
     let latest = await readScene(page, record.id);
-    while (Date.now() - startedAt < 150_000) {
+    while (Date.now() - startedAt < M2_REJECTION_OBSERVATION_WINDOW) {
       await page.waitForTimeout(5_000);
       latest = await readScene(page, record.id);
     }

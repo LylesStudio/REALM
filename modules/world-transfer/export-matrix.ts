@@ -277,6 +277,9 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("realm_import_bootstrap", "excluded", null),
   row("realm_import_content_log", "excluded", null),
   row("realm_import_pack_tables", "excluded", null),
+  // 0053：capability 密钥/nonce 台账是控制面内部表，永不导出。
+  row("realm_capability_keys", "excluded", null),
+  row("realm_capability_nonces", "excluded", null),
 ];
 
 /** 派生表（行生成型触发器覆盖；不进包/digest/INSERT——Z44/Z46）。 */

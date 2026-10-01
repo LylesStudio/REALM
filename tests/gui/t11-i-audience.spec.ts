@@ -1,9 +1,16 @@
 import { expect, test } from "@playwright/test";
 import { openDemoRecord, openLibrary } from "./helpers";
+import { promoteDemoMembershipToOwner } from "../helpers/membership-fixture.mjs";
 
 /** T11-I-B：真实浏览器点击验收 owner audience mapping 面。 */
 test.describe("T11-I audience mapping operator surface", () => {
-  test("owner can append a mapping and duplicate append stays idempotent", async ({ page }) => {
+  test("owner can append a mapping and duplicate append stays idempotent", async ({ page, request }) => {
+    // T10 后登录默认 player 席位；owner 操作面验收须由 fixture 显式建立
+    // owner membership（scratch admin 连接，REALM_GUI_SCRATCH + loopback 护栏）。
+    const me = await request.get("/api/auth/me");
+    const { principalId } = await me.json();
+    await promoteDemoMembershipToOwner(process.env.DATABASE_URL, principalId);
+
     await openDemoRecord(page);
     await openLibrary(page);
     await page

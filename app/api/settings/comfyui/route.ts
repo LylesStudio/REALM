@@ -9,6 +9,7 @@ import {
   resolveRequestPrincipal,
   unauthorizedResponse,
 } from "../../auth-context.ts";
+import { isOperatorPrincipal } from "../../../../modules/identity/operator.ts";
 
 export const runtime = "nodejs";
 
@@ -17,9 +18,27 @@ function service() {
   return createComfyUiSettingsService({ store: createComfyUiSettingsStore() });
 }
 
-export async function GET(request: Request) {
+/**
+ * 全局 operator 门禁（M7 收口）：ComfyUI 设置是服务级配置（endpoint +
+ * shared key），只允许 REALM_OPERATOR_PRINCIPALS 精确列出的 principal；
+ * 空缺/空白 = 无 operator = 全部 403 fail-closed。403 在任何设置读取/
+ * 网络请求之前返回，响应不回显设置、URL 或 key。
+ */
+function requireOperator(request: Request): string | Response {
   const principalId = resolveRequestPrincipal(request, "principal_demo_player");
   if (!principalId) return unauthorizedResponse();
+  if (!isOperatorPrincipal(principalId)) {
+    return Response.json(
+      { ok: false as const, error: { code: "OPERATOR_REQUIRED", message: "图像生成设置仅本机 operator 可管理。" } },
+      { status: 403 },
+    );
+  }
+  return principalId;
+}
+
+export async function GET(request: Request) {
+  const gated = requireOperator(request);
+  if (gated instanceof Response) return gated;
   try {
     return Response.json(
       { ok: true as const, settings: await service().get() },
@@ -31,8 +50,8 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const principalId = resolveRequestPrincipal(request, "principal_demo_player");
-  if (!principalId) return unauthorizedResponse();
+  const gated = requireOperator(request);
+  if (gated instanceof Response) return gated;
   try {
     return Response.json(
       { ok: true as const, settings: await service().save(await readBody(request)) },
@@ -44,8 +63,8 @@ export async function PUT(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const principalId = resolveRequestPrincipal(request, "principal_demo_player");
-  if (!principalId) return unauthorizedResponse();
+  const gated = requireOperator(request);
+  if (gated instanceof Response) return gated;
   try {
     const body = await readBody(request);
     if ((body as { action?: unknown }).action !== "test") {

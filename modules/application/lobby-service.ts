@@ -18,6 +18,7 @@ import {
   withWorkspaceTransaction,
   type WorkspaceDatabase,
 } from "../../database/postgres/workspace-transaction.ts";
+import { grantMembershipWithCapability } from "../../database/postgres/membership-capability.ts";
 
 /** 最小可查询接口：PoolClient / pg Client（LISTEN 连接）均满足。 */
 interface Queryable {
@@ -49,6 +50,8 @@ export const LOBBY_CHANGED_CHANNEL = "lobby_changed";
 export interface LobbyScope {
   workspaceId: string;
   principalId: string;
+  /** 0053：membership 写入路径要求 DB 可验证会话证明（cookie 原值）。 */
+  sessionProof?: string;
 }
 
 export interface LobbyRoomSummary {
@@ -465,15 +468,16 @@ export function createLobbyService(
       );
       // 房间绑定了共享世界：加入房间 = 同事务获得该世界的 player 成员
       // 关系（房主建房时已显式分享；幂等）。v1 不在退房时回收——见计划。
+      // 0053：经 capability 窄通道（join_player 恒 player，不改写既有角色）。
       if (row.world_id) {
-        await client.query(
-          `INSERT INTO player_world_memberships (
-             workspace_id, world_id, principal_id, role,
-             omniscient_player_character, can_view_dynamic_knowledge
-           ) VALUES ($1, $2, $3, 'player', true, true)
-           ON CONFLICT (workspace_id, world_id, principal_id) DO NOTHING`,
-          [scope.workspaceId, row.world_id, scope.principalId],
-        );
+        await grantMembershipWithCapability(client, {
+          sessionProof: scope.sessionProof ?? "",
+          op: "join_player",
+          workspaceId: scope.workspaceId,
+          worldId: row.world_id,
+          principalId: scope.principalId,
+          role: "player",
+        });
       }
       await notifyLobbyChanged(client, scope.workspaceId);
       return { roomId };

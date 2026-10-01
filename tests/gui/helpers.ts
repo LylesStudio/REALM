@@ -5,6 +5,10 @@ import {
   type BrowserContext,
   type Page,
 } from "@playwright/test";
+import {
+  fallbackSemanticSegments,
+  type SemanticSegment,
+} from "../../modules/presentation/semantic-segments.ts";
 
 export const DEMO_RECORD_ID = "record_first_watch";
 export const DEMO_STORY_ID = "story_silent_bell";
@@ -13,7 +17,7 @@ export const DEMO_STORY_ID = "story_silent_bell";
 export const GUI_BASE_URL = process.env.GUI_BASE_URL ?? (process.env.HOST_BIND ? `http://${process.env.HOST_BIND}:9999` : "http://127.0.0.1:9999");
 
 /** 全局登录产物（tests/gui/global-setup.ts 写入）。 */
-export const GUI_AUTH_STATE = ".playwright/auth-state.json";
+export const GUI_AUTH_STATE = process.env.GUI_AUTH_STATE_PATH ?? ".playwright/auth-state.json";
 
 /** 真实模型回合可能需要数十秒，提交类断言统一使用较长超时。 */
 export const TURN_TIMEOUT = 180_000;
@@ -31,6 +35,82 @@ export async function waitForRecordReady(page: Page) {
 }
 
 /**
+ * Deterministic read-projection fixture for player-authored timeline text.
+ * It changes only one disposable GUI GET response; PG persistence is tested separately.
+ */
+export async function installPlayerEventProjectionFixture(
+  page: Page,
+  recordId: string,
+  content: string,
+  segments: readonly SemanticSegment[] = fallbackSemanticSegments(
+    content,
+    "dialogue",
+    "gui-player-dialogue",
+  ),
+): Promise<void> {
+  await page.route("**/api/record**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() !== "GET"
+      || url.pathname !== "/api/record"
+      || url.searchParams.get("recordId") !== recordId) {
+      await route.fallback();
+      return;
+    }
+
+    const response = await route.fetch();
+    if (!response.ok()) {
+      await route.fulfill({ response });
+      return;
+    }
+    const envelope = await response.json() as {
+      record?: Record<string, unknown>;
+    };
+    const record = envelope.record;
+    if (!record || !Array.isArray(record.events)) {
+      await route.fulfill({ response });
+      return;
+    }
+    const events = record.events as Record<string, unknown>[];
+    const previous = events.at(-1);
+    const fixtureEvent = {
+      ...(previous ?? {}),
+      id: `gui-player-event-${recordId}`,
+      ordinal: typeof previous?.ordinal === "number" ? previous.ordinal + 1 : events.length + 1,
+      type: "player_input",
+      speaker: "测试玩家",
+      role: "player",
+      content,
+      segments,
+      status: "committed",
+      visibility: "public",
+    };
+    await route.fulfill({
+      response,
+      json: { ...envelope, record: { ...record, events: [...events, fixtureEvent] } },
+    });
+  });
+}
+
+/** 浏览器剪贴板权限适配：Chromium 使用真实授权，WebKit 用页内 clipboard shim。 */
+export async function prepareClipboardForTest(page: Page, browserName: string): Promise<void> {
+  if (browserName === "webkit") {
+    await page.addInitScript(() => {
+      let copiedText = "";
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          readText: async () => copiedText,
+          writeText: async (text: string) => { copiedText = text; },
+        },
+      });
+    });
+    return;
+  }
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+}
+
+/**
  * 打开演示记录 record_first_watch。
  * 批次 S 起默认入口按账号「最近打开」记忆解析，无记忆会进引导屏；
  * 测试一律走深链 ?recordId=，语义与旧版硬编码默认记录一致。
@@ -42,8 +122,10 @@ export async function openDemoRecord(page: Page) {
 
 /** 打开世界库面板。 */
 export async function openLibrary(page: Page) {
-  await page.getByRole("button", { name: "世界库" }).click();
-  await expect(page.locator(".library-panel")).toBeVisible();
+  const panel = page.locator(".library-panel");
+  if (await panel.isVisible()) return;
+  await page.getByRole("button", { name: "世界库", exact: true }).click();
+  await expect(panel).toBeVisible();
 }
 
 /** 打开世界库并展开「工笔细琢」手动录入抽屉。 */
@@ -179,7 +261,9 @@ export async function submitMessage(
   options: { timeoutMs?: number; retries?: number } = {},
 ) {
   const timeoutMs = options.timeoutMs ?? TURN_TIMEOUT;
-  const retries = options.retries ?? 4;
+  // 默认零重试：确定性（fake provider）用例的失败必须显性暴露；真实
+  // provider smoke 由调用方显式传 retries。
+  const retries = options.retries ?? 0;
   const input = page.locator("#realm-message");
   let response: import("@playwright/test").Response | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -219,9 +303,11 @@ export async function submitMessageViaApi(
   request: APIRequestContext,
   recordId: string,
   content: string,
+  options: { retries?: number } = {},
 ): Promise<number> {
-  // 真实模型偶发失败不算 UI bug：最多重试 3 次。
-  for (let attempt = 0; attempt <= 4; attempt += 1) {
+  // 默认零重试（确定性环境必须显性失败）；真实 provider 场景显式传 retries。
+  const retries = options.retries ?? 0;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
     const recordResponse = await request.get(`/api/record?recordId=${recordId}`);
     expect(recordResponse.ok()).toBeTruthy();
     const envelope = (await recordResponse.json()) as { writeToken?: string };

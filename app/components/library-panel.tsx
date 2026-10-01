@@ -349,6 +349,7 @@ export function LibraryPanel({
               手稿」路径已收口移除。 */}
           <button
             className="guided-entry is-primary"
+            data-creation-focus-return="create-chat"
             onClick={onOpenChat}
             type="button"
           >
@@ -361,6 +362,7 @@ export function LibraryPanel({
           </button>
           <button
             className="guided-entry"
+            data-creation-focus-return="create-guided"
             onClick={onOpenGuided}
             type="button"
           >

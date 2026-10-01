@@ -10,6 +10,12 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 import { seedPostgresDemo } from "../database/postgres/public.ts";
 import {
   createLobbyService,
@@ -60,6 +66,7 @@ test(
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
     // 两个玩家身份（昵称即身份）。
     for (const [principal, name] of [
       [HOST, "大厅房主"],
@@ -74,9 +81,9 @@ test(
     }
 
     const lobby = createLobbyService(ownerPool);
-    const asHost = { workspaceId: WS, principalId: HOST };
-    const asGuest = { workspaceId: WS, principalId: GUEST };
-    const asThird = { workspaceId: WS, principalId: THIRD };
+    const asHost = { workspaceId: WS, principalId: HOST, sessionProof: sessionProofFor(HOST) };
+    const asGuest = { workspaceId: WS, principalId: GUEST, sessionProof: sessionProofFor(GUEST) };
+    const asThird = { workspaceId: WS, principalId: THIRD, sessionProof: sessionProofFor(THIRD) };
 
     // ---- 创建：公开房 + 密码房；创建者即房主 ----
     const open = await lobby.createRoom(asHost, { name: "周五夜桌", capacity: 3 });
@@ -242,6 +249,7 @@ test(
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
     for (const [principal, name] of [
       [HOST, "大厅房主"],
       [GUEST, "大厅客人"],
@@ -253,8 +261,8 @@ test(
       );
     }
     const lobby = createLobbyService(ownerPool);
-    const asHost = { workspaceId: WS, principalId: HOST };
-    const asGuest = { workspaceId: WS, principalId: GUEST };
+    const asHost = { workspaceId: WS, principalId: HOST, sessionProof: sessionProofFor(HOST) };
+    const asGuest = { workspaceId: WS, principalId: GUEST, sessionProof: sessionProofFor(GUEST) };
 
     // 房主自己的世界（创建者即 owner）。
     const library = createPostgresLibraryService(ownerPool);
@@ -348,8 +356,9 @@ test(
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
     const lobby = createLobbyService(ownerPool);
-    const asHost = { workspaceId: WS, principalId: HOST };
+    const asHost = { workspaceId: WS, principalId: HOST, sessionProof: sessionProofFor(HOST) };
     await ownerPool.query(
       `INSERT INTO accounts (workspace_id, principal_id, display_name)
        VALUES ($1, $2, '大厅房主') ON CONFLICT DO NOTHING`,
@@ -429,6 +438,7 @@ test(
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
     for (const [principal, name] of [
       [HOST, "大厅房主"],
       [GUEST, "大厅客人"],
@@ -441,8 +451,8 @@ test(
     }
     // 短租约服务实例（确定性测试，不靠长 sleep；过期用 SQL 回拨）。
     const lobby = createLobbyService(ownerPool, { leaseTtlMs: 1500 });
-    const asHost = { workspaceId: WS, principalId: HOST };
-    const asGuest = { workspaceId: WS, principalId: GUEST };
+    const asHost = { workspaceId: WS, principalId: HOST, sessionProof: sessionProofFor(HOST) };
+    const asGuest = { workspaceId: WS, principalId: GUEST, sessionProof: sessionProofFor(GUEST) };
     const leaseOf = async (roomId: string) => {
       const row = await ownerPool.query<{ lease: Date | null }>(
         `SELECT lease_expires_at AS lease FROM lobby_rooms

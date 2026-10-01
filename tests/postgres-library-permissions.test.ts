@@ -10,6 +10,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 import pg from "pg";
 import { seedPostgresDemo } from "../database/postgres/public.ts";
 import {
@@ -47,8 +53,15 @@ const MIGRATIONS = [
   "0020_record_self_play_sessions.sql",
   "0021_world_admin.sql",
   "0022_worldline_merge_grants.sql",
-    "0039_scene_weather_snapshot.sql",
-      "0040_scene_display_time_snapshot.sql",
+  "0023_library_runtime_grants.sql",
+  "0029_record_scene_tension.sql",
+  "0037_record_archive_grant.sql",
+  "0039_scene_weather_snapshot.sql",
+  "0040_scene_display_time_snapshot.sql",
+  "0044_record_branch_timeline_kind.sql",
+  // 0053 依赖 0041 的 pgcrypto；world/创世写入经 capability 通道。
+  "0041_article_qualification_and_import_entries.sql",
+  "0053_membership_capability.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -104,6 +117,7 @@ test(
       await ownerPool.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, "ws_demo");
 
     // 角色席位：player/observer 加入 demo 世界（owner 由种子自带）。
     for (const [principal, role] of [
@@ -123,6 +137,7 @@ test(
     const scoped = (principalId: string) => ({
       workspaceId: "ws_demo",
       principalId,
+      sessionProof: sessionProofFor(principalId),
     });
 
     // ---- list：成员可见、非成员不见、role 如实投影 ----
@@ -288,15 +303,18 @@ test(
       label: "受限角色分支",
       sourceRecordId: playerStarterRecord.id,
     });
-    // owner 例外在 runtime 池上物理不可写（证明分池不是装饰）。
-    await assert.rejects(
-      runtimeOnly.create(scoped(PLAYER), {
-        kind: "world",
-        name: "不应建成",
-        era: "x",
-        summary: "x",
-      }),
-      /permission denied/,
+    // T10-B7 已将 world 创建下沉到 runtime 最小授权面；验证写入后可见。
+    await runtimeOnly.create(scoped(PLAYER), {
+      kind: "world",
+      name: "runtime 创建的世界",
+      era: "权限矩阵验证",
+      summary: "只存在于 disposable PG。",
+    });
+    assert.ok(
+      (await runtimeOnly.list(scoped(PLAYER))).worlds.some(
+        (world) => world.name === "runtime 创建的世界",
+      ),
+      "runtime pool can create and read back a world under T10-B7 grants",
     );
 
     // ---- 路由层：runtime URL 缺失 → 503 ----

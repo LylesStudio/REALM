@@ -55,6 +55,12 @@ import {
 import {
   TavernImportError,
 } from "../modules/import/tavern-parser.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 const adminConnectionString = process.env.DATABASE_URL;
 
@@ -96,6 +102,7 @@ async function createTempDatabase(t: test.TestContext, label: string) {
     await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
   return { ownerPool };
 }
 
@@ -463,7 +470,7 @@ test(
       }));
 
     // library-service C 面分支。
-    const libraryScope = { workspaceId: WS, principalId: OWNER };
+    const libraryScope = { workspaceId: WS, principalId: OWNER, sessionProof: sessionProofFor(OWNER) };
     const libraryCommands = [
       { kind: "story", worldId: WORLD, title: "t", premise: "p" },
       { kind: "branch", worldId: WORLD, label: "l", sourceRecordId: RECORD },
@@ -875,7 +882,7 @@ test(
 
     // record-archive（K 面）正常执行。
     await library.create(
-      { workspaceId: WS, principalId: OWNER },
+      { workspaceId: WS, principalId: OWNER, sessionProof: sessionProofFor(OWNER) },
       { kind: "delete-record", worldId: WORLD, recordId: RECORD },
     );
 

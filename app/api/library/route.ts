@@ -10,6 +10,7 @@ import {
 
 import { getSharedRuntimePool } from "../world-scope.ts";
 import {
+  sessionProofFromRequest,
   resolveRequestPrincipal,
   unauthorizedResponse,
 } from "../auth-context.ts";
@@ -82,6 +83,8 @@ export async function POST(request: Request) {
     const result = await service.create({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId,
+      // 0053：membership 写入（创世/姿态）需 DB 可验证会话证明。
+      sessionProof: sessionProofFromRequest(request) ?? "",
     }, command);
     return Response.json(
       { ok: true as const, ...(result ?? {}) },

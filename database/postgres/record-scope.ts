@@ -29,6 +29,8 @@ export interface RecordRuntimeScope {
   worldStatus: string;
   /** 世界/故事/场景快照：模型回合与设定结晶的设定依据。 */
   brief: WorldSceneBrief;
+  /** 明确绑定到当前 principal 的角色身份；未绑定时为空串。 */
+  viewerCharacterInstanceId: string;
   playerActor: RuntimeActor;
   aiCharacters: readonly RuntimeActor[];
   observerCharacterInstanceIds: readonly string[];
@@ -130,6 +132,12 @@ export interface RecordRuntimeScopeRepository {
     principalId: string;
     recordId: string;
   }): Promise<RecordRuntimeScope | null>;
+  /** Resolve only an explicitly principal-bound viewer identity; no turn context. */
+  resolveViewerCharacterInstanceId(scope: {
+    workspaceId: string;
+    principalId: string;
+    recordId: string;
+  }): Promise<string | null>;
 }
 
 export function createPostgresRecordRuntimeScopeRepository(
@@ -310,18 +318,22 @@ export function createPostgresRecordRuntimeScopeRepository(
             && actor.principal_id === principalId
             && actor.controller_mode === "human"
           );
-          const characterSeat = actors.rows.find((actor) =>
+          const principalCharacterSeat = actors.rows.find((actor) =>
             actor.participant_kind === "character"
             && actor.principal_id === principalId
             && actor.controller_mode === "human"
-          ) ?? actors.rows.find((actor) =>
+          );
+          const fallbackCharacterSeat = actors.rows.find((actor) =>
             actor.participant_kind === "character"
             && actor.controller_mode === "human"
           ) ?? actors.rows.find((actor) =>
             actor.participant_id.startsWith("participant_player")
           );
+          const characterSeat = principalCharacterSeat ?? fallbackCharacterSeat;
           const playerActorRow = narratorSeat ?? characterSeat;
           if (!playerActorRow) return null;
+          const principalViewerCharacterInstanceId =
+            (narratorSeat ?? principalCharacterSeat)?.character_instance_id;
 
           const playerActor = await toPlayerActor(
             client,
@@ -381,6 +393,11 @@ export function createPostgresRecordRuntimeScopeRepository(
               worldLore: "",
             },
             playerActor,
+            viewerCharacterInstanceId:
+              typeof principalViewerCharacterInstanceId === "string"
+                && principalViewerCharacterInstanceId.length > 0
+                ? principalViewerCharacterInstanceId
+                : "",
             aiCharacters: aiCharacters.map((actor) =>
               toActor(actor, effectiveTick)
             ),
@@ -419,6 +436,41 @@ export function createPostgresRecordRuntimeScopeRepository(
       scope.brief.worldLore = worldLore;
       scope.recordKnowledge = recordKnowledge;
       return scope;
+    },
+    async resolveViewerCharacterInstanceId({ workspaceId, principalId, recordId }) {
+      return withWorkspaceTransaction(
+        database,
+        workspaceId,
+        async (client) => {
+          const result = await client.query<{ character_instance_id: string | null }>(
+            `SELECT instance.id AS character_instance_id
+             FROM participants AS participant
+             LEFT JOIN character_instances AS instance
+               ON instance.workspace_id = participant.workspace_id
+              AND instance.id = participant.character_instance_id
+             WHERE participant.workspace_id = $1
+               AND participant.record_id = $2
+               AND participant.principal_id = $3
+               AND participant.participant_kind IN ('character', 'narrator')
+               AND participant.controller_mode = 'human'
+               AND participant.is_active = true
+               AND (
+                 participant.participant_kind <> 'character'
+                 OR instance.status NOT IN ('gone', 'retired')
+               )
+             ORDER BY CASE
+                        WHEN participant.participant_kind = 'narrator' THEN 0
+                        ELSE 1
+                      END,
+                      participant.speaking_order ASC,
+                      participant.id ASC
+             LIMIT 1`,
+            [workspaceId, recordId, principalId],
+          );
+          return result.rows[0]?.character_instance_id ?? null;
+        },
+        { readOnly: true },
+      );
     },
   };
 }
@@ -500,17 +552,26 @@ const CANON_ELIGIBILITY_WHERE = `
       AND newer.valid_from_tick <= $4::bigint
       AND (newer.valid_to_tick IS NULL OR newer.valid_to_tick > $4::bigint)
   )
+  -- F4（T11-F §二）：security class 以同 scope 真实 CanonRevision 为准——
+  -- campaign 快照必须与 revision 匹配；NULL/悬空/跨 scope revision、
+  -- class 错配一律按非 public 处理（绝不 fallback public）。
   AND NOT EXISTS (
     SELECT 1
     FROM information_campaigns AS campaign
-    JOIN canon_revisions AS revision
-      ON revision.workspace_id = campaign.workspace_id
-     AND revision.id = campaign.canon_revision_id
     WHERE campaign.workspace_id = claim.workspace_id
       AND campaign.world_id = claim.world_id
       AND campaign.worldline_id = claim.worldline_id
       AND claim.id = ANY(campaign.root_claim_ids)
-      AND revision.security_class <> 'public'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM canon_revisions AS revision
+        WHERE revision.workspace_id = campaign.workspace_id
+          AND revision.world_id = campaign.world_id
+          AND revision.worldline_id = campaign.worldline_id
+          AND revision.id = campaign.canon_revision_id
+          AND revision.security_class = 'public'
+          AND revision.security_class = campaign.security_class
+      )
   )
 `;
 

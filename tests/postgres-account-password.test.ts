@@ -10,8 +10,15 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
 import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
+import {
   AccountAuthError,
   createPostgresAccountRepository,
+  seedPostgresDemo,
 } from "../database/postgres/public.ts";
 import { principalIdForDisplayName } from "../modules/identity/auth.ts";
 
@@ -57,7 +64,8 @@ test(
       if (!filename.endsWith(".sql")) continue;
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
-    await ownerPool.query(`INSERT INTO workspaces (id, name) VALUES ($1, 'demo')`, [WS]);
+    await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
 
     // 迁移后既有账号 password_hash 默认 NULL（零改写）。
     await ownerPool.query(
@@ -72,6 +80,57 @@ test(
     assert.equal(legacy.rows[0]!.password_hash, null, "既有账号必须 NULL（无密码）");
 
     const accounts = createPostgresAccountRepository(runtimePool);
+    const raceSelects = { count: 0 };
+    let releaseRace!: () => void;
+    const raceBarrier = new Promise<void>((resolve) => { releaseRace = resolve; });
+    const racePool = new Proxy(runtimePool, {
+      get(target, property) {
+        if (property !== "connect") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async () => {
+          const client = await target.connect();
+          return new Proxy(client, {
+            get(clientTarget, clientProperty) {
+              if (clientProperty !== "query") {
+                const value = Reflect.get(clientTarget, clientProperty, clientTarget);
+                return typeof value === "function" ? value.bind(clientTarget) : value;
+              }
+              return async (sql: string, values?: unknown[]) => {
+                const result = await clientTarget.query(sql, values as never);
+                const normalizedSql = sql.toLowerCase().replaceAll(/\s+/g, " ");
+                if (
+                  normalizedSql.includes("from accounts")
+                  && normalizedSql.includes("where workspace_id = $1 and principal_id = $2")
+                  && result.rowCount === 0
+                  && values?.[1] === principalIdForDisplayName("同名并发首登")
+                ) {
+                  raceSelects.count += 1;
+                  if (raceSelects.count === 2) releaseRace();
+                  await raceBarrier;
+                }
+                return result;
+              };
+            },
+          });
+        };
+      },
+    }) as typeof runtimePool;
+    const racedAccounts = createPostgresAccountRepository(racePool);
+    const raceResults = await Promise.allSettled([
+      racedAccounts.loginWithCredentials(WS, "同名并发首登", "首个密码A"),
+      racedAccounts.loginWithCredentials(WS, "同名并发首登", "首个密码B"),
+    ]);
+    assert.equal(raceSelects.count, 2, "both requests must observe the account as absent first");
+    assert.equal(raceResults.filter((result) => result.status === "fulfilled").length, 1);
+    const raceWinnerPassword = raceResults[0]?.status === "fulfilled" ? "首个密码A" : "首个密码B";
+    const raceLoserPassword = raceWinnerPassword === "首个密码A" ? "首个密码B" : "首个密码A";
+    await racedAccounts.loginWithCredentials(WS, "同名并发首登", raceWinnerPassword);
+    await assert.rejects(
+      racedAccounts.loginWithCredentials(WS, "同名并发首登", raceLoserPassword),
+      AccountAuthError,
+    );
 
     // 无密码账户：空密码通过；非空密码拒绝（绝不静默设置）。
     const legacyLogin = await accounts.loginWithCredentials(WS, "老账户", "");
@@ -92,7 +151,21 @@ test(
     assert.equal(after.rows[0]!.password_hash, null);
 
     // 新账户首次创建：空密码 → NULL；带密码 → hash 落库且格式合规。
-    await accounts.loginWithCredentials(WS, "新账户甲", "");
+    const firstLogin = await accounts.loginWithCredentials(WS, "新账户甲", "");
+    await accounts.ensureDefaultWorldMembership(WS, firstLogin.principalId, sessionProofFor(firstLogin.principalId));
+    const defaultMembership = await ownerPool.query(
+      `SELECT role FROM player_world_memberships
+       WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+      [WS, "world_ember_coast", firstLogin.principalId],
+    );
+    assert.equal(defaultMembership.rows[0]?.role, "player", "首次登录不能自动获得默认世界 owner 权限");
+    await accounts.ensureDefaultWorldMembership(WS, "principal_demo_player", sessionProofFor("principal_demo_player"));
+    const existingOwnerMembership = await ownerPool.query(
+      `SELECT role FROM player_world_memberships
+       WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+      [WS, "world_ember_coast", "principal_demo_player"],
+    );
+    assert.equal(existingOwnerMembership.rows[0]?.role, "owner", "幂等登录不得改写已存在的 owner 决策");
     await accounts.loginWithCredentials(WS, "新账户乙", "灯塔口令");
     const rows = await ownerPool.query(
       `SELECT principal_id, password_hash FROM accounts

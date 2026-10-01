@@ -15,12 +15,24 @@ import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 export interface GuidedGenesisChatProps {
   uiLanguage: UiLanguage;
   playerName: string;
+  /** 创建结果无法确认时显示安全提示，不透传服务端原始错误。 */
+  creationError?: string | null;
   /** 创建世界：走既有 POST /api/world/generate draft 分支（单事务原子）。 */
   onConfirm: (draft: WorldGenesisDraft) => Promise<string | null>;
   onOpenRecord: (recordId: string) => void;
-  /** fail-closed 降级：转旧八步表单。 */
-  onFallback: () => void;
+  /** fail-closed 降级：转旧八步表单（携带对谈上下文，见 GenesisChatFallback）。 */
+  onFallback: (payload: GenesisChatFallback) => void;
   onExit: () => void;
+}
+
+/**
+ * 改用分步引导时随 overlay 移交的对谈上下文：已提交 turns（次序）、
+ * 输入框中未发送文本（独立、不伪装成历史 turn）、当前完整草案。
+ */
+export interface GenesisChatFallback {
+  turns: GenesisChatTurn[];
+  input: string;
+  draft: WorldGenesisDraft | null;
 }
 
 const EMPTY_COMPANION = { name: "", role: "", summary: "" };
@@ -34,6 +46,7 @@ const EMPTY_COMPANION = { name: "", role: "", summary: "" };
 export function GuidedGenesisChat({
   uiLanguage,
   playerName,
+  creationError = null,
   onConfirm,
   onOpenRecord,
   onFallback,
@@ -187,7 +200,7 @@ export function GuidedGenesisChat({
                   <button onClick={() => void send(pendingMessage.current)} type="button">
                     {uiText("ui.genesisChat.retry", uiLanguage)}
                   </button>
-                  <button onClick={onFallback} type="button">
+                  <button onClick={() => onFallback({ turns, input, draft })} type="button">
                     {uiText("ui.genesisChat.fallback", uiLanguage)}
                   </button>
                 </div>
@@ -202,6 +215,7 @@ export function GuidedGenesisChat({
             }}
           >
             <input
+              aria-label={uiText("ui.genesisChat.inputLabel", uiLanguage)}
               onChange={(event) => setInput(event.target.value)}
               disabled={busy || confirming}
               maxLength={500}
@@ -467,6 +481,11 @@ export function GuidedGenesisChat({
             </div>
 
             <p className="genesis-proposal-hint">{uiText("ui.genesisChat.editHint", uiLanguage)}</p>
+            {creationError ? (
+              <div className="guided-suggest-error guided-create-error" role="alert">
+                <p>{creationError}</p>
+              </div>
+            ) : null}
             <button
               className="genesis-proposal-confirm"
               disabled={confirming || !draft.world.name.trim()}

@@ -72,8 +72,11 @@ test.describe("C. 行动面板", () => {
 
     await expect(page.locator(".selected-affordance")).toHaveCount(0);
     // 演示记录中同一行动可能已提交过多次，断言最新一条。
+    // 当前 PG 目录的技能预填/落库文本为「我施展「细致观察」」形态
+    // （database/postgres/action-state.ts 的 suggestedText），不再匹配旧的
+    // 自由句式常量。
     await expect(
-      page.locator(".event-card.is-committed", { hasText: "仔细观察蜡封边缘" }).last(),
+      page.locator(".event-card.is-committed", { hasText: "我施展「细致观察」" }).last(),
     ).toBeVisible({ timeout: 180_000 });
   });
 

@@ -4,6 +4,7 @@ import {
   withWorkspaceTransaction,
   type WorkspaceDatabase,
 } from "../../database/postgres/workspace-transaction.ts";
+import { grantMembershipWithCapability } from "../../database/postgres/membership-capability.ts";
 import { normalizeWorldStyle } from "../style/world-style.ts";
 import {
   BASE_AI_ASSET_QUANTITY,
@@ -27,6 +28,8 @@ import {
 export interface LibraryScope {
   workspaceId: string;
   principalId: string;
+  /** 0053：membership 写入路径要求 DB 可验证会话证明（cookie 原值）。 */
+  sessionProof?: string;
 }
 
 export interface LibraryRecord {
@@ -495,14 +498,17 @@ export function createPostgresLibraryService(
                ) VALUES ($1, $2, $3, '原初世界线', 'active', 0, 0)`,
               [scope.workspaceId, worldId, worldlineId],
             );
-            await client.query(
-              `INSERT INTO player_world_memberships (
-                 workspace_id, world_id, principal_id, role,
-                 omniscient_player_character, can_view_dynamic_knowledge
-               ) VALUES ($1, $2, $3, 'owner', true, true)
-               ON CONFLICT (workspace_id, world_id, principal_id) DO NOTHING`,
-              [scope.workspaceId, worldId, scope.principalId],
-            );
+            // 0053：creator owner 只能走 capability 窄通道（新世界零既有
+            // membership 才放行；直接 DML 已撤销）。
+            await grantMembershipWithCapability(client, {
+              sessionProof: scope.sessionProof ?? "",
+              op: "genesis_creator",
+              workspaceId: scope.workspaceId,
+              worldId,
+              worldlineId,
+              principalId: scope.principalId,
+              role: "owner",
+            });
             const starter = await createStarterStoryAndRecord(
               client,
               scope,
@@ -935,16 +941,17 @@ export function createPostgresLibraryService(
             [scope.workspaceId, worldId, worldlineId],
           );
           // 批次 S：观察者姿态 → membership role='observer'（omniscient 仍 true，
-          // 其不可变约束不受影响）；入局仍为 owner。
+          // 其不可变约束不受影响）；入局仍为 owner。0053：经 capability 窄通道。
           const observer = draft.playerStance === "observer";
-          await client.query(
-            `INSERT INTO player_world_memberships (
-               workspace_id, world_id, principal_id, role,
-               omniscient_player_character, can_view_dynamic_knowledge
-             ) VALUES ($1, $2, $3, $4, true, true)
-             ON CONFLICT (workspace_id, world_id, principal_id) DO NOTHING`,
-            [scope.workspaceId, worldId, scope.principalId, observer ? "observer" : "owner"],
-          );
+          await grantMembershipWithCapability(client, {
+            sessionProof: scope.sessionProof ?? "",
+            op: "genesis_creator",
+            workspaceId: scope.workspaceId,
+            worldId,
+            worldlineId,
+            principalId: scope.principalId,
+            role: observer ? "observer" : "owner",
+          });
           const companions = draft.companions.slice(0, 2).map((companion) => ({
             id: `char_def_${randomUUID().replaceAll("-", "").slice(0, 18)}`,
             name: companion.name,
@@ -2386,16 +2393,37 @@ async function assertNoActiveRecordSelfPlay(
   }
 }
 
+/**
+ * 活动 Turn 的 stale 阈值：回合是同步 HTTP 链路，updated_at 随状态迁移
+ * 持续推进；停止推进超过该值只可能是进程崩溃/强杀遗留（resumeTurn 无
+ * 生产调用方，五态没有恢复路径）。取值远高于最坏正常回合时长
+ * （多阶段 × per-call 超时 × 就地重试 ≈ 数分钟），绝不误伤在途回合。
+ */
+const STALE_ACTIVE_TURN_MS = 15 * 60_000;
+
 async function assertNoActiveRecordTurn(
   client: PoolClient,
   workspaceId: string,
   recordId: string,
 ): Promise<void> {
+  // 崩溃遗留的 stale 活动行先就地收口为 failed（可审计、不删除、
+  // append-only 语义不变）；仍在推进的回合不受影响。
+  // retryable 是暂停态：resumeTurn 明确不会自动重启，只有显式 retryTurn
+  // 才会再次进入 provider。它不是仍在运行的回合，不能阻塞 Record 删除。
+  await client.query(
+    `UPDATE turn_runs
+     SET state = 'failed', last_error_code = 'TURN_STALE_SWEPT',
+         updated_at = CURRENT_TIMESTAMP
+     WHERE workspace_id = $1 AND record_id = $2
+       AND state IN ('accepted', 'planning', 'drafting', 'validating', 'releasing')
+       AND updated_at < CURRENT_TIMESTAMP - ($3::text || ' milliseconds')::interval`,
+    [workspaceId, recordId, String(STALE_ACTIVE_TURN_MS)],
+  );
   const active = await client.query<{ count: number }>(
     `SELECT count(*)::int AS count
      FROM turn_runs
      WHERE workspace_id = $1 AND record_id = $2
-       AND state IN ('accepted', 'planning', 'drafting', 'validating', 'releasing', 'retryable')`,
+       AND state IN ('accepted', 'planning', 'drafting', 'validating', 'releasing')`,
     [workspaceId, recordId],
   );
   if ((active.rows[0]?.count ?? 0) > 0) {
@@ -2623,14 +2651,23 @@ async function applyPlayerStance(
   stance: "player" | "observer",
 ): Promise<void> {
   const membership = await client.query(
-    `UPDATE player_world_memberships
-     SET role = $4
+    `SELECT 1 FROM player_world_memberships
      WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
-    [scope.workspaceId, worldId, scope.principalId, stance],
+    [scope.workspaceId, worldId, scope.principalId],
   );
-  if (membership.rowCount !== 1) {
+  if ((membership.rowCount ?? 0) !== 1) {
     throw new LibraryServiceError("WORLD_NOT_FOUND", "World not found.");
   }
+  // 0053：stance 切换只能经 capability 窄通道（actor=本人，role 仅
+  // player↔observer，目标行内容 hash 绑定，mint/apply 间并发变更被拒）。
+  await grantMembershipWithCapability(client, {
+    sessionProof: scope.sessionProof ?? "",
+    op: "stance_self",
+    workspaceId: scope.workspaceId,
+    worldId,
+    principalId: scope.principalId,
+    role: stance,
+  });
 
   const records = await client.query<{ id: string; worldline_id: string }>(
     `SELECT id, worldline_id

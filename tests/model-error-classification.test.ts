@@ -292,3 +292,197 @@ test("service path: MODEL_AUTH_FAILED → disposition failed + 诊断 code 保�
   const events = await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
   assert.equal(events.length, 0, "失败不得写入任何事件");
 });
+
+test("orchestrator: 连接失败（无 HTTP status 的 MODEL_REQUEST_FAILED）→ retryable 且指引检查模型服务/设置", async () => {
+  const unreachable: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat(): Promise<ModelChatResponse> {
+      // 与 gateway 连接失败分支同形：fetch 未拿到响应 → 无 status。
+      throw new ModelProviderError(
+        "MODEL_REQUEST_FAILED",
+        "无法连接本地模型服务，请确认服务在线。",
+      );
+    },
+  };
+  const orchestrator = createModelPoweredM2TurnOrchestrator({
+    characters: [SCOUT],
+    getGateway: async () => unreachable,
+  });
+  await assert.rejects(
+    orchestrator.plan({ turnId: "turn-unreachable", playerText: "拆开密函。" }),
+    (error: unknown) => {
+      assert.ok(error instanceof RetryableTurnError, "连接失败仍可恢复，保持 retryable");
+      assert.equal(
+        error.code,
+        "MODEL_PROVIDER_UNREACHABLE",
+        "连接失败必须有专属可诊断 code，不得坍缩成泛用步骤失败",
+      );
+      assert.match(error.safeMessage, /模型服务|模型设置|供应商/, "玩家文案必须指引检查模型服务/设置");
+      assert.ok(
+        !/http|url|127\.0\.0\.1|localhost|ECONNREFUSED/i.test(error.safeMessage),
+        "safeMessage 不得回显连接细节",
+      );
+      return true;
+    },
+  );
+});
+
+test("orchestrator: 带 HTTP status 的 MODEL_REQUEST_FAILED 保持泛用 retryable 文案（对照）", async () => {
+  const serverError: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat(): Promise<ModelChatResponse> {
+      throw new ModelProviderError("MODEL_REQUEST_FAILED", "HTTP 500", 500);
+    },
+  };
+  const orchestrator = createModelPoweredM2TurnOrchestrator({
+    characters: [SCOUT],
+    getGateway: async () => serverError,
+  });
+  await assert.rejects(
+    orchestrator.plan({ turnId: "turn-500", playerText: "拆开密函。" }),
+    (error: unknown) => {
+      assert.ok(error instanceof RetryableTurnError);
+      assert.equal(error.code, "MODEL_PROVIDER_STEP_FAILED", "HTTP 5xx 不属于连接失败");
+      return true;
+    },
+  );
+});
+
+test("service path: 连接失败 → TURN_FAILED + 诊断 code/文案指引检查模型服务，且零事件写入", async () => {
+  let count = 0;
+  const counting: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat(): Promise<ModelChatResponse> {
+      count += 1;
+      throw new ModelProviderError(
+        "MODEL_REQUEST_FAILED",
+        "无法连接本地模型服务，请确认服务在线。",
+      );
+    },
+  };
+  type CommandPayload = { text: string; visibility: TurnVisibilityPlan };
+  type EventPayload = {
+    schemaVersion: 1;
+    role: "player" | "character" | "narrator" | "system";
+    speaker: string;
+    participantId: string | null;
+    content: string;
+    segments: readonly SemanticSegment[];
+  };
+  const repository: RuntimeRepository<
+    CommandPayload,
+    M2TurnPlan,
+    M2TurnCandidate,
+    M2TurnValidation,
+    EventPayload,
+    { recordId: string; eventIds: readonly string[] }
+  > = createInMemoryRuntimeRepository({
+    recordHeads: [{ recordId: LOCAL_RECORD_SCOPE.recordId, version: 1, nextOrdinal: 2 }],
+  });
+  const service = createLocalRecordService({
+    repository,
+    projection: {
+      async hasViewerProjection() {
+        return true;
+      },
+      async loadForPlayer() {
+        const runtimeEvents = await repository.listCommittedEvents(
+          LOCAL_RECORD_SCOPE.recordId,
+        );
+        return baseProjection(runtimeEvents.map((event, index) => ({
+          id: event.eventId,
+          ordinal: index + 2,
+          type: event.kind === "narration.committed" ? "narration" as const : "utterance" as const,
+          speaker: event.payload.speaker,
+          speakerParticipantId: event.payload.participantId,
+          role: event.payload.role,
+          content: event.payload.content,
+          segments: event.payload.segments,
+          worldTime: "停战纪元17年 · 雾月12日 · 入夜",
+          visibility: "public" as const,
+          status: "committed" as const,
+          createdAt: event.committedAt,
+        })));
+      },
+      async loadDeliveryForPlayer() {
+        const runtimeEvents = await repository.listCommittedEvents(
+          LOCAL_RECORD_SCOPE.recordId,
+        );
+        return {
+          record: baseProjection(runtimeEvents.map((event, index) => ({
+            id: event.eventId,
+            ordinal: index + 2,
+            type: event.kind === "narration.committed" ? "narration" as const : "utterance" as const,
+            speaker: event.payload.speaker,
+            speakerParticipantId: event.payload.participantId,
+            role: event.payload.role,
+            content: event.payload.content,
+            segments: event.payload.segments,
+            worldTime: "停战纪元17年 · 雾月12日 · 入夜",
+            visibility: "public" as const,
+            status: "committed" as const,
+            createdAt: event.committedAt,
+          }))),
+          viewer: {
+            cursor: "viewer-local" as const,
+            perspective: "omniscient" as const,
+            dynamicKnowledgeVisible: true,
+            characterInstanceId: null,
+            membershipRole: "owner" as const,
+          },
+        };
+      },
+      async loadRecentAuthorizedEvents() {
+        return [];
+      },
+    },
+    tokens: createMemoryWriteTokenRegistry({
+      randomToken: () => "opaque-test",
+      clock: () => new Date("2026-09-18T00:00:00.000Z"),
+    }),
+    orchestrator: createModelPoweredM2TurnOrchestrator({
+      characters: [SCOUT],
+      getGateway: async () => counting,
+    }),
+  });
+  const initial = await service.loadRecord();
+  await assert.rejects(
+    service.submitMessage({
+      recordId: LOCAL_RECORD_SCOPE.recordId,
+      content: "拆开密函。",
+      idempotencyKey: "unreachable-once",
+      writeToken: initial.writeToken,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalRecordServiceError);
+      assert.equal(error.code, "TURN_FAILED");
+      assert.equal(
+        error.diagnostic?.code,
+        "MODEL_PROVIDER_UNREACHABLE",
+        "诊断 code 必须区分连接失败（不得坍缩成泛用重试码）",
+      );
+      assert.equal(
+        error.diagnostic?.disposition,
+        "retryable",
+        "连接失败保持 retryable 暂停态（玩家可安全重试），与 Fatal 区分",
+      );
+      assert.match(
+        error.diagnostic?.message ?? "",
+        /模型服务|模型设置|供应商/,
+        "玩家可见诊断必须指引检查模型服务/设置",
+      );
+      assert.ok(!/ECONNREFUSED|127\.0\.0\.1|http/i.test(error.message));
+      return true;
+    },
+  );
+  // retryable 语义保留：服务层对 retryable 回合自动重试一次（provider 共两次）。
+  assert.equal(count, 2, "retryable 自动重试一次的语义不得改变");
+  const events = await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
+  assert.equal(events.length, 0, "失败不得写入任何事件");
+});

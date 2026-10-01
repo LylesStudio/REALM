@@ -27,12 +27,13 @@ test.describe("T8. 世界管理台 · 归档/删除与信息密度", () => {
     await openLibrary(page);
     const worldCard = page.locator(".library-world", { hasText: world.name });
 
-    // 信息密度：计数行显示 0 角色 · 1 故事 · 1 记录。
+    // 信息密度：计数行含 2 故事 · 2 记录（当前契约：createWorld 自动装配
+    // 起始故事+起始记录（createStarterStoryAndRecord），另加本用例各一）。
     await expect(worldCard.locator(".library-world-stats")).toContainText(
-      "1 故事",
+      "2 故事",
     );
     await expect(worldCard.locator(".library-world-stats")).toContainText(
-      "1 记录",
+      "2 记录",
     );
 
     // 归档：徽标出现、世界卡标记 data-archived。
@@ -55,7 +56,8 @@ test.describe("T8. 世界管理台 · 归档/删除与信息密度", () => {
     await expect(worldCard).toHaveAttribute("data-archived", "false");
 
     // 有记录世界删除被拒：两段确认后 WORLD_NOT_EMPTY 提示（引导归档），世界仍在。
-    await worldCard.getByRole("button", { name: "删除" }).click();
+    // exact：记录行也有「删除」按钮（strict mode 下不加精确匹配会歧义）。
+    await worldCard.getByRole("button", { name: "删除", exact: true }).click();
     await worldCard.getByRole("button", { name: "确认删除" }).click();
     await expect(page.locator(".notice-bar")).toContainText("先归档", {
       timeout: 15_000,
@@ -63,10 +65,31 @@ test.describe("T8. 世界管理台 · 归档/删除与信息密度", () => {
     await expect(worldCard).toBeVisible();
   });
 
-  test("T8-2 零记录世界两段确认删除后从世界库消失", async ({ page, request }) => {
+  test("T8-2 有历史世界两段确认删除被 fail-closed 拒绝，归档为受支持生命周期", async ({ page, request }) => {
+    // 当前契约：createWorld 自动装配起始故事+起始记录（createStarterStoryAndRecord），
+    // 不存在「零记录新世界」；WORLD_NOT_EMPTY 的 records 计数含已归档行
+    //（append-only 事件引用网使物理删除不可达）——删除按钮的可达路径是拒绝
+    // 并引导归档。本条钉住：起始记录归档后两段删除仍被拒、世界仍在、归档生效。
     test.setTimeout(240_000);
     const world = await createWorldViaApi(request);
     await createStoryViaApi(request, world.id);
+
+    // 先把起始记录归档（delete-record=隐藏归档，owner 即创建者）。
+    const library = (await (await request.get("/api/library")).json()) as {
+      worlds: Array<{
+        id: string;
+        stories: Array<{ records: Array<{ id: string }> }>;
+      }>;
+    };
+    const starterRecordId = library.worlds
+      .find((entry) => entry.id === world.id)
+      ?.stories.flatMap((story) => story.records)
+      .map((record) => record.id)[0];
+    expect(starterRecordId, "起始记录必须可从世界库读出").toBeTruthy();
+    const archiveResponse = await request.post("/api/library", {
+      data: { kind: "delete-record", worldId: world.id, recordId: starterRecordId },
+    });
+    expect(archiveResponse.ok(), "起始记录归档必须成功").toBeTruthy();
 
     await openDemoRecord(page);
     await openLibrary(page);
@@ -76,10 +99,19 @@ test.describe("T8. 世界管理台 · 归档/删除与信息密度", () => {
       "0 记录",
     );
 
-    await worldCard.getByRole("button", { name: "删除" }).click();
+    // 两段确认删除：被服务端 WORLD_NOT_EMPTY 拒绝（409），世界仍在。
+    await worldCard.getByRole("button", { name: "删除", exact: true }).click();
     await worldCard.getByRole("button", { name: "确认删除" }).click();
+    await expect(worldCard).toBeVisible();
     await expect(
       page.locator(".library-world", { hasText: world.name }),
-    ).toHaveCount(0);
+    ).toHaveCount(1);
+
+    // 受支持的生命周期是归档：徽标出现、data-archived 置位。
+    await worldCard.getByRole("button", { name: "归档", exact: true }).click();
+    await expect(worldCard.locator(".world-archived-badge")).toContainText(
+      "已归档",
+    );
+    await expect(worldCard).toHaveAttribute("data-archived", "true");
   });
 });

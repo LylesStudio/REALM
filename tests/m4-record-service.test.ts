@@ -262,6 +262,11 @@ test("interrupting a turn commits nothing and the draft can be resubmitted", asy
   });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(
+    service.cancelMessage("record-another", "interrupt-me"),
+    false,
+    "a key authorized for one Record cannot abort another Record",
+  );
+  assert.equal(
     service.cancelMessage(LOCAL_RECORD_SCOPE.recordId, "interrupt-me"),
     true,
   );

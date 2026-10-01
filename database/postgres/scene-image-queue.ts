@@ -31,6 +31,8 @@ export interface SceneImageRequest {
   status: SceneImageRequestStatus;
   generationId: string | null;
   attempts: number;
+  /** Monotonic fencing token, changes every time a request is claimed. */
+  leaseRevision: number;
 }
 
 export class SceneImageQueueError extends Error {
@@ -41,6 +43,43 @@ export class SceneImageQueueError extends Error {
     this.name = "SceneImageQueueError";
     this.code = code;
   }
+}
+
+/** request 终态迁移（client 级；与 generation 写入同一事务时复用）。
+ * 返回是否命中当前 lease（false = authority 已失，不得有任何副作用）。 */
+export async function settleRequestCompletedWithClient(
+  client: { query: (sql: string, values?: unknown[]) => Promise<{ rowCount?: number | null }> },
+  scope: { workspaceId: string; id: string; leaseRevision: number },
+  generationId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `UPDATE scene_image_requests
+     SET status = 'completed', generation_id = $3,
+         leased_at = NULL, lease_expires_at = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE workspace_id = $1 AND id = $2 AND status = 'leased'
+       AND lease_revision = $4`,
+    [scope.workspaceId, scope.id, generationId, scope.leaseRevision],
+  );
+  return (result.rowCount ?? 0) === 1;
+}
+
+/** 同上的失败终态（last_error 只写安全分类码）。 */
+export async function settleRequestFailedWithClient(
+  client: { query: (sql: string, values?: unknown[]) => Promise<{ rowCount?: number | null }> },
+  scope: { workspaceId: string; id: string; leaseRevision: number },
+  errorCode: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `UPDATE scene_image_requests
+     SET status = 'failed', last_error = $3,
+         leased_at = NULL, lease_expires_at = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE workspace_id = $1 AND id = $2 AND status = 'leased'
+       AND lease_revision = $4`,
+    [scope.workspaceId, scope.id, errorCode.slice(0, 64), scope.leaseRevision],
+  );
+  return (result.rowCount ?? 0) === 1;
 }
 
 export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
@@ -86,7 +125,8 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (workspace_id, trigger_kind, source_event_id) DO NOTHING
              RETURNING id, world_id, record_id, scene_id, principal_id,
-                       trigger_kind, source_event_id, status, generation_id, attempts`,
+                       trigger_kind, source_event_id, status, generation_id, attempts,
+                       lease_revision`,
             [
               input.workspaceId, id, input.worldId, input.recordId, input.sceneId,
               input.principalId, input.triggerKind, input.sourceEventId,
@@ -97,7 +137,8 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
           }
           const existing = await client.query(
             `SELECT id, world_id, record_id, scene_id, principal_id,
-                    trigger_kind, source_event_id, status, generation_id, attempts
+                    trigger_kind, source_event_id, status, generation_id, attempts,
+                    lease_revision
              FROM scene_image_requests
              WHERE workspace_id = $1 AND trigger_kind = $2 AND source_event_id = $3`,
             [input.workspaceId, input.triggerKind, input.sourceEventId],
@@ -121,7 +162,8 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
         async (client) => {
           const candidate = await client.query(
             `SELECT id, world_id, record_id, scene_id, principal_id,
-                    trigger_kind, source_event_id, status, generation_id, attempts
+                    trigger_kind, source_event_id, status, generation_id, attempts,
+                    lease_revision
              FROM scene_image_requests AS request
              WHERE workspace_id = $1 AND status = 'queued'
                AND NOT EXISTS (
@@ -142,62 +184,49 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
           const claimed = await client.query(
             `UPDATE scene_image_requests
              SET status = 'leased',
+                 lease_revision = lease_revision + 1,
                  leased_at = CURRENT_TIMESTAMP,
                  lease_expires_at = CURRENT_TIMESTAMP + ($2::text || ' milliseconds')::interval,
                  updated_at = CURRENT_TIMESTAMP
              WHERE workspace_id = $1 AND id = $3 AND status = 'queued'
-             RETURNING id`,
+             RETURNING id, lease_revision`,
             [scope.workspaceId, String(options.leaseMs), row.id],
           );
           if ((claimed.rowCount ?? 0) === 0) return null;
-          return toRequest({ ...row, status: "leased" });
+          return toRequest({ ...row, ...claimed.rows[0], status: "leased" });
         },
       );
     },
 
     async complete(
-      scope: { workspaceId: string; id: string },
+      scope: { workspaceId: string; id: string; leaseRevision: number },
       generationId: string,
     ): Promise<void> {
       await withWorkspaceTransaction(
         database,
         scope.workspaceId,
         async (client) => {
-          await client.query(
-            `UPDATE scene_image_requests
-             SET status = 'completed', generation_id = $3,
-                 leased_at = NULL, lease_expires_at = NULL,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
-            [scope.workspaceId, scope.id, generationId],
-          );
+          await settleRequestCompletedWithClient(client, scope, generationId);
         },
       );
     },
 
     /** 终态失败（永久错误；last_error 只写安全分类码）。 */
     async fail(
-      scope: { workspaceId: string; id: string },
+      scope: { workspaceId: string; id: string; leaseRevision: number },
       errorCode: string,
     ): Promise<void> {
       await withWorkspaceTransaction(
         database,
         scope.workspaceId,
         async (client) => {
-          await client.query(
-            `UPDATE scene_image_requests
-             SET status = 'failed', last_error = $3,
-                 leased_at = NULL, lease_expires_at = NULL,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
-            [scope.workspaceId, scope.id, errorCode.slice(0, 64)],
-          );
+          await settleRequestFailedWithClient(client, scope, errorCode);
         },
       );
     },
 
     /** 临时失败重试：leased → queued，attempts+1（退避由 worker 计算）。 */
-    async retry(scope: { workspaceId: string; id: string }): Promise<void> {
+    async retry(scope: { workspaceId: string; id: string; leaseRevision: number }): Promise<void> {
       await withWorkspaceTransaction(
         database,
         scope.workspaceId,
@@ -207,8 +236,9 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
              SET status = 'queued', attempts = attempts + 1,
                  leased_at = NULL, lease_expires_at = NULL,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
-            [scope.workspaceId, scope.id],
+             WHERE workspace_id = $1 AND id = $2 AND status = 'leased'
+               AND lease_revision = $3`,
+            [scope.workspaceId, scope.id, scope.leaseRevision],
           );
         },
       );
@@ -243,7 +273,8 @@ export function createPostgresSceneImageQueue(database: WorkspaceDatabase) {
         async (client) => {
           const result = await client.query(
             `SELECT id, world_id, record_id, scene_id, principal_id,
-                    trigger_kind, source_event_id, status, generation_id, attempts
+                    trigger_kind, source_event_id, status, generation_id, attempts,
+                    lease_revision
              FROM scene_image_requests
              WHERE workspace_id = $1 AND record_id = $2
              ORDER BY created_at DESC, id DESC
@@ -270,6 +301,7 @@ function toRequest(row: Record<string, unknown>): SceneImageRequest {
     status: String(row.status) as SceneImageRequestStatus,
     generationId: row.generation_id === null ? null : String(row.generation_id),
     attempts: Number(row.attempts),
+    leaseRevision: Number(row.lease_revision ?? 0),
   };
 }
 

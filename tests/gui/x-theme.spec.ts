@@ -74,7 +74,12 @@ test("主题切换：状态同步、刷新持久化、表面真正变深、窄�
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
+    if (message.type() !== "error") return;
+    // M7 operator 门禁：非 operator 打开设置页时 ComfyUI 卡按契约 403
+    //（fail-closed），浏览器对非 2xx 资源必然产生该 console error——
+    // 属预期行为，按精确 URL 过滤，不影响其它 console error 的零容忍。
+    if (message.location()?.url?.includes("/api/settings/comfyui")) return;
+    consoleErrors.push(message.text());
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto("/?recordId=record_first_watch");

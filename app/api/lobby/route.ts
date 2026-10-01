@@ -4,7 +4,7 @@ import {
 } from "../../../modules/application/advertised-origin.ts";
 import { LOCAL_RECORD_SCOPE } from "../../../modules/application/local-record-service.ts";
 import { getSharedRuntimePool } from "../world-scope.ts";
-import { resolveRequestPrincipal, unauthorizedResponse } from "../auth-context.ts";
+import { resolveRequestPrincipal, sessionProofFromRequest, unauthorizedResponse } from "../auth-context.ts";
 
 export const runtime = "nodejs";
 
@@ -63,7 +63,11 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const roomId = url.searchParams.get("roomId")?.trim() ?? "";
   const service = lobbyService(pool);
-  const scope = { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId };
+  const scope = {
+    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+    principalId,
+    sessionProof: sessionProofFromRequest(request) ?? "",
+  };
   try {
     const rooms = await service.listRooms(scope);
     const members = roomId ? await service.listMembers(scope, roomId) : undefined;
@@ -106,7 +110,11 @@ export async function POST(request: Request) {
     );
   }
   const service = lobbyService(pool);
-  const scope = { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId };
+  const scope = {
+    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+    principalId,
+    sessionProof: sessionProofFromRequest(request) ?? "",
+  };
   try {
     if (body.kind === "create-room") {
       const result = await service.createRoom(scope, {

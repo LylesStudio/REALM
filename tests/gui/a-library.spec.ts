@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import {
-  createWorldViaApi,
   openDemoRecord,
   openLibrary,
   openManualForm,
@@ -91,27 +90,6 @@ test.describe("A. 世界库", () => {
     await expect(page.locator("#realm-message")).toBeEnabled();
   });
 
-  test("A5 世界线分支：创建后列表显示原初与分支标签", async ({ page, request }) => {
-    const world = await createWorldViaApi(request);
-    const branchLabel = uniqueName("GUI分支");
-    await openDemoRecord(page);
-    await openManualForm(page);
-
-    await page.locator(".library-tabs button", { hasText: "分支" }).click();
-    await page
-      .locator(".library-fields select")
-      .selectOption({ label: world.name });
-    await page.locator(".library-fields input").first().fill(branchLabel);
-    await page.locator(".library-submit").click();
-
-    const worldSection = page.locator(".library-world", { hasText: world.name });
-    await expect(
-      worldSection.locator(".library-worldline", { hasText: branchLabel }),
-    ).toContainText("分支");
-    await expect(
-      worldSection.locator(".library-worldline").first(),
-    ).toContainText("原初");
-  });
 
   test("A6 timeline 标签：回溯记录显示 Retrospection，普通记录不带该标签", async ({
     page,

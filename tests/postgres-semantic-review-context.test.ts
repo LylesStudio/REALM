@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
+import { createSessionValue, SESSION_COOKIE } from "../modules/identity/auth.ts";
 import { GET as contextGET } from "../app/api/worldline/conflict/semantic/context/route.ts";
 import {
   POSTGRES_DEMO_IDS,
@@ -62,10 +63,12 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-function getContext(worldId: string): Request {
-  return new Request(
-    `http://localhost/api/worldline/conflict/semantic/context?worldId=${encodeURIComponent(worldId)}`,
-  );
+function getContext(worldId: string, principalId?: string): Request {
+  const url = `http://localhost/api/worldline/conflict/semantic/context?worldId=${encodeURIComponent(worldId)}`;
+  const init = principalId
+    ? { headers: { cookie: `${SESSION_COOKIE}=${createSessionValue(principalId)}` } }
+    : undefined;
+  return new Request(url, init);
 }
 
 test(
@@ -119,8 +122,7 @@ test(
     }
     await seedPostgresDemo(ownerPool);
 
-    // 1. 门禁开启且无会话 → 401（无 principal）。
-    process.env.REALM_ACCESS_TOKEN = "t11d-context-gate-token";
+    // 1. runtime 账户门禁开启且无会话 → 401（无 principal）。
     const unauthorized = await contextGET(getContext(POSTGRES_DEMO_IDS.world));
     assert.equal(unauthorized.status, 401);
     const unauthorizedBody = await unauthorized.json() as { ok: boolean; error: { code: string } };
@@ -138,7 +140,9 @@ test(
     assert.equal(noRuntimeBody.error.code, "LOCAL_RUNTIME_NOT_INITIALIZED");
 
     // 3. 未知世界 → 404 WORLD_NOT_FOUND（不泄露存在性）。
-    const unknown = await contextGET(getContext("world_nope"));
+    const unknown = await contextGET(
+      getContext("world_nope", POSTGRES_DEMO_IDS.principal),
+    );
     assert.equal(unknown.status, 404);
     const unknownBody = await unknown.json() as { ok: boolean; error: { code: string } };
     assert.equal(unknownBody.error.code, "WORLD_NOT_FOUND");
@@ -156,7 +160,9 @@ test(
        VALUES ($1, $2, $3, '原初')`,
       [POSTGRES_DEMO_IDS.workspace, outsiderWorldId, outsiderWorldlineId],
     );
-    const outsider = await contextGET(getContext(outsiderWorldId));
+    const outsider = await contextGET(
+      getContext(outsiderWorldId, POSTGRES_DEMO_IDS.principal),
+    );
     assert.equal(outsider.status, 404);
     const outsiderBody = await outsider.json() as { ok: boolean; error: { code: string } };
     assert.equal(outsiderBody.error.code, "WORLD_NOT_FOUND");
@@ -178,13 +184,17 @@ test(
       `UPDATE worldlines SET head_tick = $1 WHERE workspace_id = $2 AND id = $3`,
       ["9007199254740992", POSTGRES_DEMO_IDS.workspace, headRow.id],
     );
-    const unsafeHead = await contextGET(getContext(POSTGRES_DEMO_IDS.world));
+    const unsafeHead = await contextGET(
+      getContext(POSTGRES_DEMO_IDS.world, POSTGRES_DEMO_IDS.principal),
+    );
     assert.equal(unsafeHead.status, 500, "unsafe bigint head must fail closed");
     await ownerPool.query(
       `UPDATE worldlines SET head_tick = $1 WHERE workspace_id = $2 AND id = $3`,
       [headRow.head_tick, POSTGRES_DEMO_IDS.workspace, headRow.id],
     );
-    const ok = await contextGET(getContext(POSTGRES_DEMO_IDS.world));
+    const ok = await contextGET(
+      getContext(POSTGRES_DEMO_IDS.world, POSTGRES_DEMO_IDS.principal),
+    );
     assert.equal(ok.status, 200);
     const okBody = await ok.json() as Record<string, unknown>;
     assert.deepEqual(Object.keys(okBody).sort(), ["existingFuture", "ok", "scope"]);

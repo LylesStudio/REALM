@@ -264,15 +264,6 @@ test("C: 文案 key 三语完整；新 key 存在且现代", () => {
     "ui.guided.back",
     "ui.guided.suggestFailed",
     "ui.guided.suggestRetry",
-    "ui.guided.question.worldName",
-    "ui.guided.question.era",
-    "ui.guided.question.style",
-    "ui.guided.question.summary",
-    "ui.guided.question.story",
-    "ui.guided.question.playerRole",
-    "ui.guided.question.stance",
-    "ui.guided.question.companions",
-    "ui.guided.question.review",
   ];
   for (const key of newKeys) {
     const table = uiMessageTable(key);
@@ -295,29 +286,36 @@ test("C: 文案 key 三语完整；新 key 存在且现代", () => {
   assert.equal(uiText("ui.library.sourceFallback", "zh-CN"), "AI 不可用 · 使用本地草稿");
 });
 
-test("C: 组件源码无古风残留；提问固定现代文案不随 draft.style 变化", () => {
+test("C: guided 问句使用界面语言 × 世界文风模板", () => {
   const guided = readFileSync(
     fileURLToPath(new URL("../app/components/guided-genesis.tsx", import.meta.url)),
     "utf8",
   );
-  const questionKeys = {
-    "world-name": "ui.guided.question.worldName",
-    era: "ui.guided.question.era",
-    style: "ui.guided.question.style",
-    summary: "ui.guided.question.summary",
-    story: "ui.guided.question.story",
-    "player-role": "ui.guided.question.playerRole",
-    stance: "ui.guided.question.stance",
-    companions: "ui.guided.question.companions",
-    scene: "ui.guided.question.scene",
-    review: "ui.guided.question.review",
+  const questionTemplateKeys = {
+    "world-name": "guided.step.world-name.question",
+    era: "guided.step.era.question",
+    style: "guided.step.style.question",
+    summary: "guided.step.summary.question",
+    story: "guided.step.story.question",
+    "player-role": "guided.step.player-role.question",
+    stance: "guided.step.stance.question",
+    companions: "guided.step.companions.question",
+    scene: "guided.step.scene.question",
+    review: "guided.step.review.question",
   } as const;
-  for (const [step, key] of Object.entries(questionKeys)) {
+  for (const [step, key] of Object.entries(questionTemplateKeys)) {
     const sourceKey = step.includes("-") ? `"${step}"` : step;
-    assert.ok(guided.includes(`${sourceKey}: "${key}"`), `${step} question key mapping missing`);
-    assert.notEqual(uiText(key, "zh-CN"), key, `${key} must resolve to a registered message`);
+    assert.ok(
+      guided.includes(`${sourceKey}: "${key}"`),
+      `${step} must map to its world-style template`,
+    );
   }
-  assert.doesNotMatch(guided, /guided\.step\.\$\{step\.id\}\.question/, "提问不得再调用 style 模板");
+  assert.match(
+    guided,
+    /worldStyleText\(\s*STEP_QUESTION_TEMPLATE_KEYS\[step\.id\],\s*draft\.style,\s*undefined,\s*uiLanguage\s*\)/,
+    "every step question must use the selected style and interface language",
+  );
+  assert.doesNotMatch(guided, /ui\.guided\.question\./, "obsolete fixed question keys must not drive rendering");
   for (const archaic of ["司卷", "落笔", "落墨", "合卷", "世界之名", "纪元基调", "世界底色", "同行之人", "初始场景", "已定之卷", "纸墨手稿"]) {
     assert.ok(!guided.includes(archaic), `guided-genesis 残留: ${archaic}`);
   }

@@ -15,6 +15,12 @@ import { createPostgresLibraryService } from "../modules/application/library-ser
 import { POST } from "../app/api/worldline/merge/route.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
@@ -51,6 +57,7 @@ const MIGRATIONS = [
   "0039_scene_weather_snapshot.sql",
   "0040_scene_display_time_snapshot.sql",
   "0044_record_branch_timeline_kind.sql",
+  "0053_membership_capability.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -124,6 +131,7 @@ test(
       await ownerPool.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, "ws_demo");
 
     // F1：缺失 worldId → 400。
     const missing = await POST(postJson({
@@ -154,6 +162,7 @@ test(
     const library = createPostgresLibraryService(ownerPool);
     const scope = {
       workspaceId: "ws_demo",
+      sessionProof: sessionProofFor("principal_demo_player"),
       principalId: "principal_demo_player",
     };
     await library.create(scope, {

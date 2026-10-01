@@ -111,8 +111,8 @@ test("PostgreSQL authoritative migrations stay complete and archive-free", () =>
   const files = readdirSync(directory).filter((name) => name.endsWith(".sql")).sort();
   assert.deepEqual(
     files.map((name) => name.slice(0, 4)),
-    Array.from({ length: 51 }, (_, index) => String(index + 1).padStart(4, "0")),
-    "PG migrations 0001–0038 应齐全（0024=T11-A2 账本、0025=T11-B 拓扑、0026/0027=T11-G 安全受众、0028=T11-I owner append、0029=Record 场景局势隔离、0030=Record 角色动态状态、0031=锐意洞察结果回填、0032=角色进退场权限、0033=基础技能 metadata 权限、0034=撤销过宽权限、0035=具体发现事实、0036=地点上下文、0037=Record 删除隐藏权限、0038=清理基础技能隐藏线索、0039/0040=场景天气/显示时间快照、0041=article qualification 账本与导入身份、0042=realm_transfer 角色校正+导入任务账本五表+受控函数、0043=node audience 归档闸门、0044=Record 分支 timeline kind、0045=大厅房间/成员表、0046=大厅房间绑定共享世界、0047=大厅房主在线租约、0048=场景图生成台账+world_files 图像类型扩展、0049=账号级场景图自动模式、0050=场景图自动请求队列、0051=账户密码哈希列）",
+    Array.from({ length: 53 }, (_, index) => String(index + 1).padStart(4, "0")),
+    "PG migrations 0001–0053 应连续齐全；0048–0050 负责场景图，0051 账户密码，0052 场景图队列 lease fencing、0053 membership capability。",
   );
   for (const name of files) {
     const sql = readFileSync(join(directory, name), "utf8");

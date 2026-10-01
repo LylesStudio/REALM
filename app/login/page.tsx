@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 import { LanguageMenu } from "../components/language-menu.tsx";
 import { readUiLanguage, subscribeUiLanguage } from "../ui-language.ts";
+import { safeLoginReturnTo } from "../../modules/identity/return-to.ts";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
@@ -40,7 +41,7 @@ export default function LoginPage() {
         return;
       }
       const returnTo = new URLSearchParams(window.location.search).get("return_to");
-      window.location.href = returnTo && returnTo.startsWith("/") ? returnTo : "/";
+      window.location.href = safeLoginReturnTo(returnTo, window.location.origin);
     } catch {
       setError(uiText("ui.login.error", language));
     } finally {

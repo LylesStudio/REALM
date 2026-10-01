@@ -23,6 +23,12 @@ import {
 import { POST as branchPOST } from "../app/api/record/branch/route.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
@@ -107,10 +113,11 @@ async function createFixtureDatabase(t: test.TestContext): Promise<Fixture> {
     await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, WS);
 
   // 隔离世界 + 起始记录（owner = OWNER）。
   const library = createPostgresLibraryService(ownerPool);
-  const scope = { workspaceId: WS, principalId: OWNER };
+  const scope = { workspaceId: WS, principalId: OWNER, sessionProof: sessionProofFor(OWNER) };
   await library.create(scope, {
     kind: "world",
     name: "分支试验场",
@@ -213,7 +220,7 @@ async function commitSyntheticEvent(
   return eventId;
 }
 
-const SCOPE = { workspaceId: WS, principalId: OWNER };
+const SCOPE = { workspaceId: WS, principalId: OWNER, sessionProof: sessionProofFor(OWNER) };
 
 test(
   "branch tree projection: lineage, current marker, tombstones, membership fail-closed",

@@ -1,14 +1,22 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openDemoRecord } from "./helpers";
+import {
+  DEMO_RECORD_ID,
+  installPlayerEventProjectionFixture,
+  openDemoRecord,
+} from "./helpers";
 
 /** 切换界面语言并回到记录页。 */
-async function switchLanguage(page: Page, label: "中文" | "English" | "日本語") {
+async function switchLanguage(
+  page: Page,
+  label: "中文" | "English" | "日本語",
+  returnTo = "/",
+) {
   await page.goto("/settings");
   await page.locator(".settings-language button", { hasText: label }).click();
   await expect(
     page.locator(".settings-language button", { hasText: label }),
   ).toHaveClass(/is-active/);
-  await page.goto("/");
+  await page.goto(returnTo);
 }
 
 test.describe("Q. 全文本 i18n", () => {
@@ -34,15 +42,19 @@ test.describe("Q. 全文本 i18n", () => {
     // 第二层：行动卡跟随界面语言（demo 世界 classical × en）。
     await page.getByRole("button", { name: "Actions" }).click();
     const panel = page.getByRole("dialog", { name: "Available actions" });
-    await expect(panel).toContainText("Mark the stirrings about 灰鲸港 · 北防波堤");
-    // 风格维度保持：仍是 classical 措辞（Mark/stirrings），不是 modern 的 Watch。
-    await expect(panel).not.toContainText("Watch how things shift");
+    // 技能/资产/姿态按种子标题经 i18n 表本地化（EN）。
+    await expect(panel).toContainText("Careful Observation");
+    await expect(panel).toContainText("Mist Harbor Signal Lantern");
+    // 场景行动是当前场景快照生成的世界内动态文案（中文世界数据），
+    // 不随界面语言翻译（与 Q3 动态内容原样展示同源契约）。
+    await expect(panel).toContainText("观察四周");
+    await expect(panel).toContainText("灰鲸港 · 北防波堤");
     await page.getByRole("button", { name: "Close action panel" }).click();
 
-    // 动态文本不受影响：演示记录事件仍为原文。
-    await expect(
-      page.locator(".event-card", { hasText: "雾沿着石阶爬上防波堤" }).first(),
-    ).toBeVisible();
+    // 世界内系统环境段按界面语言本地化（该 seed 段为 zh-CN→en 对照）。
+    await expect(page.locator(".semantic-segment").first()).toHaveText(
+      "Mist climbs the breakwater along the stone steps.",
+    );
 
     // 语言持久化：刷新后仍为英文。
     await page.reload();
@@ -57,20 +69,26 @@ test.describe("Q. 全文本 i18n", () => {
     // 界面已是日语：世界库按钮与退出按钮按日语标签定位。
     await page.getByRole("button", { name: "世界庫" }).click();
     await expect(page.locator(".library-panel")).toBeVisible();
-    await page.locator(".guided-entry").click();
+    await page.locator('.library-create > [data-creation-focus-return="create-guided"]').click();
     await expect(page.locator(".guided-question")).toContainText(
       "この世界の名前は？",
     );
     await page.getByRole("button", { name: "ガイドを閉じる" }).click();
   });
 
-  test("Q3 玩家输入原样展示（动态文本不进资源文件）", async ({ page }) => {
+  test("Q3 玩家动态输入原样展示（确定性 Record 投影 fixture）", async ({ page }) => {
+    const playerInput = "玩家原文：Hello, 旅人！";
+    await installPlayerEventProjectionFixture(page, DEMO_RECORD_ID, playerInput);
     await openDemoRecord(page);
-    // 玩家事件原文展示（含既有中文与任意输入语言）。
-    await expect(
-      page.locator(".event-card", { hasText: "这里好安静" }).first(),
-    ).toBeVisible();
-    // 界面为中文时文案键不裸露。
+    const card = page.locator(".event-card.is-committed", { hasText: playerInput });
+    await expect(card).toBeVisible();
+
+    // 切换界面语言后，玩家原文仍逐字保留。
+    await switchLanguage(page, "English", `/?recordId=${DEMO_RECORD_ID}`);
+    const playerDialogue = page.locator('.semantic-segment[data-segment-kind="dialogue"]', {
+      hasText: playerInput,
+    });
+    await expect(playerDialogue).toHaveText(playerInput);
     await expect(page.locator("body")).not.toContainText("ui.composer");
     await expect(page.locator("body")).not.toContainText("ui.nav.");
   });

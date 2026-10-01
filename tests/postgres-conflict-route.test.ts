@@ -19,6 +19,12 @@ import { createWorldKnowledgeService } from "../modules/world-knowledge/public.t
 import { POST } from "../app/api/worldline/conflict/route.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
@@ -50,6 +56,7 @@ const MIGRATIONS = [
   "0021_world_admin.sql",
   "0022_worldline_merge_grants.sql",
   "0024_graph_invalidation_events.sql",
+  "0053_membership_capability.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -122,6 +129,7 @@ test(
       await ownerPool.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, "ws_demo");
 
     // legacy 分支零回归（纯游标分类，不触 DB）。
     const legacy = await POST(postJson({
@@ -189,7 +197,7 @@ test(
 
     // 成员世界 + DB 事实：claims/edges 只能来自解析 scope。
     const library = createPostgresLibraryService(ownerPool);
-    const scope = { workspaceId: "ws_demo", principalId: "principal_demo_player" };
+    const scope = { workspaceId: "ws_demo", principalId: "principal_demo_player", sessionProof: sessionProofFor("principal_demo_player") };
     await library.create(scope, {
       kind: "world",
       name: "因果校验场",

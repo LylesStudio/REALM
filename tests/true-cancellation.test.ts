@@ -466,7 +466,7 @@ test("preview: an aborted session drops chunks and never ends committed", () => 
   const events: LocalPreviewEvent[] = [];
   hub.subscribe("record-1", (event) => events.push(event));
   const controller = new AbortController();
-  hub.begin("record-1", "preview-1", controller.signal);
+  hub.begin("record-1", "preview-1", controller.signal, { kind: "public" });
   controller.abort();
   hub.publishChunk("record-1", "narrator", "迟到的一句");
   hub.end("record-1", "committed");

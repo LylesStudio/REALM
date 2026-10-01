@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const requiredRootMarkdown = [
+  "AGENT.md",
   "CHANGELOG.md",
   "CODE_OF_CONDUCT.md",
   "CONTRIBUTING.md",
@@ -13,6 +14,7 @@ const requiredRootMarkdown = [
   "README.ja.md",
   "README.md",
   "SECURITY.md",
+  "STATUS.md",
 ];
 
 function collectMarkdown(directory) {

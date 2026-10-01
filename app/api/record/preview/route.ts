@@ -40,9 +40,14 @@ export async function handlePreviewGet(
   if (!principalId) return unauthorizedResponse();
   const url = new URL(request.url);
   const recordId = url.searchParams.get("recordId") ?? LOCAL_RECORD_SCOPE.recordId;
+  let viewerCharacterInstanceId: string | undefined;
   try {
     // 未知 Record / 非成员 / 无 viewer projection → 404；未初始化 → 503。
-    await service.authorizeRecordViewer(recordId, principalId);
+    // viewer identity 由服务端 scope 按已验证 principal 得出，忽略 query/body。
+    viewerCharacterInstanceId = await service.authorizeRecordViewer(
+      recordId,
+      principalId,
+    );
   } catch (error) {
     return previewRouteError(error);
   }
@@ -77,7 +82,7 @@ export async function handlePreviewGet(
         } catch {
           cleanup();
         }
-      });
+      }, viewerCharacterInstanceId);
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": ping\n\n"));

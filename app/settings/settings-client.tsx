@@ -61,6 +61,8 @@ export function ModelSettingsClient() {
   const [comfyBusy, setComfyBusy] = useState<"save" | "test" | null>(null);
   const [comfyNotice, setComfyNotice] = useState<string | null>(null);
   const [comfyError, setComfyError] = useState<string | null>(null);
+  // M7：ComfyUI 设置是 operator 能力；403 → 只显示权限状态，绝不渲染表单。
+  const [comfyForbidden, setComfyForbidden] = useState(false);
   const [passwordCurrent, setPasswordCurrent] = useState("");
   const [passwordNext, setPasswordNext] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
@@ -96,6 +98,11 @@ export function ModelSettingsClient() {
               cache: "no-store",
               headers: { Accept: "application/json" },
             });
+            // 403 = 非 operator：固定权限状态，不读取/渲染任何设置内容。
+            if (comfyResponse.status === 403) {
+              if (active) setComfyForbidden(true);
+              return;
+            }
             const comfyBody: unknown = await comfyResponse.json();
             const loaded = parseComfyEnvelope(comfyBody);
             if (!comfyResponse.ok || !loaded) throw new Error("load failed");
@@ -195,6 +202,12 @@ export function ModelSettingsClient() {
         }),
       });
       const body: unknown = await response.json();
+      // 403 = 非 operator（例如会话中途失去授权）：切到权限状态，隐藏表单。
+      if (response.status === 403) {
+        setComfyForbidden(true);
+        setComfy(null);
+        return;
+      }
       if (action === "test") {
         if (!response.ok) throw new Error(readError(body, uiText("ui.comfyui.errTest", uiLanguage)));
         setComfyNotice(uiText("ui.comfyui.testOk", uiLanguage));
@@ -548,7 +561,14 @@ export function ModelSettingsClient() {
 
           <section className="settings-card" data-testid="comfyui-card">
             <header><span>03</span><div><h3>{uiText("ui.comfyui.cardTitle", uiLanguage)}</h3><p>{uiText("ui.comfyui.cardBody", uiLanguage)}</p></div></header>
-            {comfy ? (
+            {comfyForbidden ? (
+              // i18n 表不在本批修改范围：内联双语文案（zh/其他语言回落英文）。
+              <p className="settings-notice is-error" data-testid="comfyui-operator-only" role="status">
+                {uiLanguage === "zh-CN"
+                  ? "图像生成设置仅本机 operator 可管理。"
+                  : "Image generation settings are managed by the local operator only."}
+              </p>
+            ) : comfy ? (
               <>
                 {comfyNotice ? <div className="settings-notice is-success" role="status">{comfyNotice}</div> : null}
                 {comfyError ? <div className="settings-notice is-error" role="alert">{comfyError}</div> : null}

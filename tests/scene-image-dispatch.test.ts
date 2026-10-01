@@ -50,6 +50,7 @@ const SCOPE_FIXTURE: RecordRuntimeScope = {
     displayName: "旅人",
     profileSummary: "",
   },
+  viewerCharacterInstanceId: "ci",
   aiCharacters: [],
   observerCharacterInstanceIds: [],
   recentPublicEvents: [],
@@ -60,7 +61,12 @@ const SCOPE_FIXTURE: RecordRuntimeScope = {
 const SCOPE = { workspaceId: "ws_test", principalId: "principal_test", recordId: "record_test" };
 
 function scopeRepository() {
-  return { async resolve() { return SCOPE_FIXTURE; } };
+  return {
+    async resolve() { return SCOPE_FIXTURE; },
+    async resolveViewerCharacterInstanceId() {
+      return SCOPE_FIXTURE.viewerCharacterInstanceId;
+    },
+  };
 }
 
 async function tmpStore() {

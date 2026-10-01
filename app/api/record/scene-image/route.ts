@@ -1,6 +1,7 @@
 import {
   LOCAL_RECORD_SCOPE,
   LocalRecordServiceError,
+  getLocalRecordService,
 } from "../../../../modules/application/local-record-service.ts";
 import { createSceneImageService } from "../../../../modules/application/scene-image-service.ts";
 import {
@@ -23,6 +24,9 @@ export const runtime = "nodejs";
  * 落库（world_files + 台账同事务），ready 返回 `/api/files/<id>`，
  * 进行中/超时返回 status:"running"，失败 status:"failed" + 安全分类码。
  * principal 只来自服务端 session；recordId/seed/dispatch 只来自 body 字段。
+ * 授权与 preview/cancel 同源（authorizeRecordViewer：Record scope +
+ * world membership + viewer projection），未知 Record / 非成员在任何
+ * scope 解析、台账写入或 provider 调用之前 fail-closed 404。
  */
 export async function POST(request: Request) {
   const principalId = resolveRequestPrincipal(request, LOCAL_RECORD_SCOPE.principalId);
@@ -53,14 +57,18 @@ export async function POST(request: Request) {
   } catch {
     // 空/非法 body 按默认 record 处理（与 GET 默认记录语义一致）。
   }
-  const service = createSceneImageService({
-    scopeRepository: createPostgresRecordRuntimeScopeRepository(
-      getSharedRuntimePool(connectionString),
-    ),
-    comfyUiStore: createComfyUiSettingsStore(),
-    sceneImageStore: createPostgresSceneImageStore(getSharedRuntimePool(connectionString)),
-  });
   try {
+    // 先过同源窄授权（只读零副作用）：未授权时不得触及 scope 解析、
+    // 台账或 ComfyUI。
+    const recordService = await getLocalRecordService();
+    await recordService.authorizeRecordViewer(recordId, principalId);
+    const service = createSceneImageService({
+      scopeRepository: createPostgresRecordRuntimeScopeRepository(
+        getSharedRuntimePool(connectionString),
+      ),
+      comfyUiStore: createComfyUiSettingsStore(),
+      sceneImageStore: createPostgresSceneImageStore(getSharedRuntimePool(connectionString)),
+    });
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId,
@@ -76,7 +84,11 @@ export async function POST(request: Request) {
     return Response.json({ ok: true as const, dispatched: true, ...result });
   } catch (error) {
     if (error instanceof LocalRecordServiceError) {
-      const status = error.code === "NOT_FOUND" ? 404 : 409;
+      const status = error.code === "NOT_FOUND"
+        ? 404
+        : error.code === "LOCAL_RUNTIME_NOT_INITIALIZED"
+          ? 503
+          : 409;
       return Response.json(
         { ok: false as const, error: { code: error.code, message: error.message } },
         { status },

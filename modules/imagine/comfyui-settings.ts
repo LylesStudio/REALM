@@ -41,13 +41,72 @@ export class ComfyUiSettingsError extends Error {
 export const COMFYUI_DEFAULT_WORKFLOW_ID = "anima-scene-t2i-v0";
 export const COMFYUI_TIMEOUT_LIMITS = { min: 5_000, max: 120_000 } as const;
 
+/**
+ * 出站地址分类（M7 收口）：REALM 定位本机/内部 LAN——只允许 loopback
+ * （127/8、::1）与 RFC1918（10/8、172.16/12、192.168/16）/IPv6 ULA
+ * （fc00::/7）。link-local（169.254/16、fe80::/10，含云 metadata 段）、
+ * CGNAT（100.64/10）、unspecified、multicast、公网一律拒绝。
+ * IPv4-mapped IPv6（::ffff:a.b.c.d）按嵌入 v4 同规则判定。
+ * hostname 名字不在此判定（连接时解析全集校验，见 comfyui-client）。
+ */
+export type ComfyUiAddressClass = "loopback" | "private" | "blocked" | "not-ip";
+
+function classifyIpv4(a: number, b: number): ComfyUiAddressClass {
+  if (a === 127) return "loopback";
+  if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) {
+    return "private";
+  }
+  return "blocked";
+}
+
+const IPV4_TEXT = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+export function classifyComfyUiAddress(rawHost: string): ComfyUiAddressClass {
+  // WHATWG URL 的 hostname：IPv6 带方括号、已归一化（如 127.1 → 127.0.0.1、
+  // ::ffff:127.0.0.1 → [::ffff:7f00:1]）。
+  const host = rawHost.startsWith("[") && rawHost.endsWith("]")
+    ? rawHost.slice(1, -1)
+    : rawHost;
+  const v4 = IPV4_TEXT.exec(host);
+  if (v4) {
+    const octets = v4.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) return "not-ip";
+    return classifyIpv4(octets[0]!, octets[1]!);
+  }
+  if (!host.includes(":")) return "not-ip";
+  // 展开 v6 groups（含 :: 压缩）。
+  const [head, tail] = host.split("::");
+  if (host.split("::").length > 2) return "not-ip";
+  const headGroups = head ? head.split(":") : [];
+  const tailGroups = tail ? tail.split(":") : [];
+  if (headGroups.concat(tailGroups).some((group) => !/^[0-9a-fA-F]{1,4}$/.test(group))) {
+    return "not-ip";
+  }
+  const missing = 8 - headGroups.length - tailGroups.length;
+  if (missing < 0 || (missing === 0 && host.includes("::"))) return "not-ip";
+  const groups = [
+    ...headGroups,
+    ...Array.from({ length: Math.max(missing, 0) }, () => "0"),
+    ...tailGroups,
+  ].map((group) => parseInt(group, 16));
+  if (groups.length !== 8) return "not-ip";
+  // IPv4-mapped ::ffff:a.b.c.d → 按嵌入 v4 分类。
+  if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+    return classifyIpv4(groups[6]! >> 8, groups[6]! & 0xff);
+  }
+  if (groups.every((group, index) => group === (index === 7 ? 1 : 0))) return "loopback";
+  if ((groups[0]! & 0xfe00) === 0xfc00) return "private"; // fc00::/7 ULA
+  return "blocked";
+}
+
 type SettingsEnvironment = Readonly<Record<string, string | undefined>>;
 
 function defaultSettings(environment: SettingsEnvironment, clock: () => Date): ComfyUiSettings {
   return {
     enabled: environment.REALM_COMFYUI_ENABLED === "1",
-    // server-only 默认值：本批实测的 LAN 实例；可用环境变量覆盖。
-    baseUrl: environment.REALM_COMFYUI_BASE_URL?.trim() || "http://192.168.31.242:8000",
+    // server-only 默认值：ComfyUI 官方默认 loopback 端口；可用环境变量或
+    // 设置页显式覆盖。不得内置任何真实内网/私网地址。
+    baseUrl: environment.REALM_COMFYUI_BASE_URL?.trim() || "http://127.0.0.1:8188",
     requestTimeoutMs: 30_000,
     workflowId: COMFYUI_DEFAULT_WORKFLOW_ID,
     apiKey: "",
@@ -70,6 +129,12 @@ export function validateComfyUiSettings(raw: unknown): ComfyUiSettings {
   }
   if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
     throw invalid("baseUrl must not embed credentials, query, or fragment.");
+  }
+  // 保存期 IP literal 校验（M7）：loopback/RFC1918/ULA 之外的 literal 直接
+  // 拒绝；hostname 名字留到连接时全答案校验+pinning（comfyui-client）。
+  // 错误文案不含地址本体。
+  if (classifyComfyUiAddress(endpoint.hostname) === "blocked") {
+    throw invalid("baseUrl must target a loopback or private LAN address.");
   }
   if (
     typeof raw.requestTimeoutMs !== "number"

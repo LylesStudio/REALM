@@ -1,8 +1,7 @@
 /**
- * v37 Y2：0042/0043 + realm_transfer 真实 PG 迁移测试（隔离库/容器内角色，
- * finally 清理）。
+ * 全链真实 PG 迁移测试（隔离库/容器内角色，finally 清理）。
  *
- * 覆盖：全链 0001–0043 真实 runner 应用 + 台账 checksum + 幂等重放；
+ * 覆盖：全链 0001–最新迁移真实 runner 应用 + 台账 checksum + 幂等重放；
  * 角色五态（缺 role/NOLOGIN/LOGIN/错误成员/重复应用收敛）；读回断言全集
  * （RLS FORCE 五表、22 函数签名集合冻结清单、search_path 锚点、proacl
  * allowlist、owner 结构、四主体 mutation 全 false、直 UPDATE 双负例
@@ -123,7 +122,7 @@ if (!adminConnectionString) {
 
 
   // ------------------------------------------------------------------
-  test("0042/0043 full chain via real runner: ledger checksums, idempotent replay, 66 tables", { timeout: 300_000 }, async (t) => {
+  test("full migration chain via real runner: ledger checksums, idempotent replay, 68 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -132,7 +131,7 @@ if (!adminConnectionString) {
     )).stdout;
     assert.match(first, /apply 0042_realm_transfer_and_import_jobs\.sql/);
     assert.match(first, /apply 0043_propagation_node_audience_archived_guard\.sql/);
-    assert.match(first, /66 tables/);
+    assert.match(first, /68 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(
@@ -147,7 +146,7 @@ if (!adminConnectionString) {
     const ledger = await pool.query(
       "SELECT filename, checksum FROM realm_schema_migrations ORDER BY filename",
     );
-    assert.equal(ledger.rows.length, 51);
+    assert.equal(ledger.rows.length, ALL_MIGRATIONS.length);
     for (const row of ledger.rows) {
       const sql = await readFile(new URL(row.filename, migrationDir), "utf8");
       assert.equal(

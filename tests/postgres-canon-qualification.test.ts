@@ -57,6 +57,7 @@ const MIGRATIONS = [
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
   "0028_propagation_node_audiences_owner_append.sql",
+  "0053_membership_capability.sql",
 ];
 
 const SCOPE = {

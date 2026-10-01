@@ -4,7 +4,10 @@
 import {
   isAccessGateEnabled,
   principalFromRequest,
+  sessionProofFromRequest,
 } from "../../modules/identity/auth.ts";
+
+export { sessionProofFromRequest };
 
 export function resolveRequestPrincipal(
   request: Request,

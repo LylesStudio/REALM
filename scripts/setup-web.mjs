@@ -24,6 +24,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSceneImageWorkerHost } from "../launcher/scene-image-worker-host.mjs";
+import { OWNER_ONLY_ENV_KEYS } from "./web-child-env.mjs";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const MIN_NODE = [22, 13, 0];
@@ -313,8 +314,22 @@ async function confirm(question, assumeYes) {
   }
 }
 
+const OWNER_ENV_PATH = ".env.owner.local";
+
+/**
+ * owner/provision 专用键（DATABASE_URL 等）写入相邻的 .env.owner.local
+ * （0600，gitignored，仅 db:* 脚本经 --env-file 读取），不进 .env.local——
+ * vinext 会把 .env.local 自动加载进 Web 进程。写 .env.local 时同时把
+ * 历史遗留的 owner 键剥离出去（迁移到 owner 文件，不丢数据）。
+ */
 function writeLocalEnv(values) {
   const envPath = resolve(projectRoot, ".env.local");
+  const ownerPath = resolve(projectRoot, OWNER_ENV_PATH);
+  const appValues = {};
+  const ownerValues = {};
+  for (const [key, value] of Object.entries(values)) {
+    (OWNER_ONLY_ENV_KEYS.includes(key) ? ownerValues : appValues)[key] = value;
+  }
   let existing = "";
   if (existsSync(envPath)) existing = readFileSync(envPath, "utf8");
   else {
@@ -322,9 +337,29 @@ function writeLocalEnv(values) {
     if (existsSync(template)) copyFileSync(template, envPath);
   }
   const source = existing || (existsSync(envPath) ? readFileSync(envPath, "utf8") : "");
-  writeFileSync(envPath, mergeEnvText(source, values), { encoding: "utf8", mode: 0o600 });
+  // 先迁移：.env.local 里遗留的 owner 键移入 owner 文件（owner 值优先用新值）。
+  const legacyOwner = parseEnvText(source);
+  for (const key of OWNER_ONLY_ENV_KEYS) {
+    if (legacyOwner[key] !== undefined && ownerValues[key] === undefined) {
+      ownerValues[key] = legacyOwner[key];
+    }
+  }
+  const strippedLines = source.split(/\r?\n/)
+    .filter((line) => !OWNER_ONLY_ENV_KEYS.some((key) => line.startsWith(`${key}=`)));
+  const strippedSource = `${strippedLines.join("\n").replace(/\n+$/, "")}\n`;
+  writeFileSync(envPath, mergeEnvText(strippedSource, appValues), { encoding: "utf8", mode: 0o600 });
   try { chmodSync(envPath, 0o600); } catch { /* Windows has no POSIX mode */ }
+  if (Object.keys(ownerValues).length > 0) {
+    const ownerSource = existsSync(ownerPath) ? readFileSync(ownerPath, "utf8") : "";
+    writeFileSync(ownerPath, mergeEnvText(ownerSource, ownerValues), { encoding: "utf8", mode: 0o600 });
+    try { chmodSync(ownerPath, 0o600); } catch { /* Windows has no POSIX mode */ }
+  }
   return envPath;
+}
+
+function readOwnerEnv() {
+  const path = resolve(projectRoot, OWNER_ENV_PATH);
+  return existsSync(path) ? parseEnvText(readFileSync(path, "utf8")) : {};
 }
 
 function readLocalEnv() {
@@ -501,7 +536,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 1;
   }
 
-  const existingLocalEnv = readLocalEnv();
+  const existingLocalEnv = { ...readLocalEnv(), ...readOwnerEnv() };
   const configuredWebPort = Number(existingLocalEnv.PORT ?? 9999);
   const appPort = await chooseWebPort(
     Number.isSafeInteger(configuredWebPort) && configuredWebPort > 0 ? configuredWebPort : 9999,
@@ -513,8 +548,8 @@ export async function main(argv = process.argv.slice(2)) {
     pgBin: plan.pgBin,
   });
   const envPath = resolve(projectRoot, ".env.local");
-  if (existsSync(envPath)) {
-    const current = readLocalEnv();
+  if (existsSync(envPath) || existsSync(resolve(projectRoot, OWNER_ENV_PATH))) {
+    const current = { ...readLocalEnv(), ...readOwnerEnv() };
     const mismatches = Object.keys(databaseEnvironment)
       .filter((key) => current[key] && current[key] !== databaseEnvironment[key]);
     if (mismatches.length > 0 && !await confirm(
@@ -529,7 +564,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 1;
   }
   writeLocalEnv(databaseEnvironment);
-  const childEnvironment = { ...process.env, ...readLocalEnv() };
+  const childEnvironment = { ...process.env, ...readLocalEnv(), ...readOwnerEnv() };
 
   if (!existsSync(resolve(projectRoot, "node_modules"))) {
     if (!await confirm("Install npm dependencies with npm ci?", assumeYes)) return 1;

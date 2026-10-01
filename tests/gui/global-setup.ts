@@ -10,8 +10,8 @@ import { request, type FullConfig } from "@playwright/test";
  */
 
 const STATE_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../.playwright/auth-state.json",
+  process.env.GUI_AUTH_STATE_PATH
+    ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../.playwright/auth-state.json"),
 );
 
 const GUI_DISPLAY_NAME = "GUI 测试员";

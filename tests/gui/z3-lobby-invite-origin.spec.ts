@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { uniqueName } from "./helpers";
+import { prepareClipboardForTest, uniqueName } from "./helpers";
 
 /**
  * advertised origin GUI 验收（Z3 批次）：隔离 server 以显式
@@ -10,9 +10,14 @@ import { uniqueName } from "./helpers";
  * （换成可达 origin 后仍能打开大厅并定位目标、不自动加入）。
  */
 
-test("显式 LAN origin：分享链接形态与深链兼容", async ({ page }) => {
+test("显式 LAN origin：分享链接形态与深链兼容", async ({ page, browserName }) => {
+  test.skip(
+    !process.env.REALM_GUI_TEST_ADVERTISED_ORIGIN,
+    "需通过 GUI runner 显式传入固定 TEST-NET-1 advertised origin 单独运行",
+  );
   test.setTimeout(120_000);
   const roomName = uniqueName("可达房");
+  await prepareClipboardForTest(page, browserName);
 
   await page.goto("/?recordId=record_first_watch");
   await page.locator("#realm-message").waitFor({ state: "visible", timeout: 60_000 });
@@ -30,7 +35,6 @@ test("显式 LAN origin：分享链接形态与深链兼容", async ({ page }) =
   await expect(room).toBeVisible({ timeout: 15_000 });
 
   // 分享：clipboard fallback，链接使用显式 advertised origin。
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await room.getByRole("button", { name: "分享" }).click();
   await expect(panel.locator(".lobby-share-feedback").first()).toContainText(
     /已复制|已分享|手动复制/,

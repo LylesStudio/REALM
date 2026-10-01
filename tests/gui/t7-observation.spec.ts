@@ -32,10 +32,10 @@ test.describe("T7. 观察者之眼 · 世界自演真实模型可见", () => {
     await openLibrary(page);
     const worldCard = page.locator(".library-world", { hasText: world.name });
     await worldCard
-      .getByRole("button", { name: "观察者 · 执笔者" })
+      .getByRole("button", { name: "观察者 · 叙事者" })
       .click();
     await expect(
-      worldCard.getByRole("button", { name: "观察者 · 执笔者" }),
+      worldCard.getByRole("button", { name: "观察者 · 叙事者" }),
     ).toHaveAttribute("aria-pressed", "true");
     // 世界库已在开：直接点记录进入（openLibrary 再点会 toggle 关面板）。
     await page.locator(".library-record", { hasText: record.title }).first().click();
@@ -43,7 +43,7 @@ test.describe("T7. 观察者之眼 · 世界自演真实模型可见", () => {
     await expect(page.locator(".record-heading h1")).toHaveText(record.title);
 
     // 观察者身份：执笔者徽标；自演面板就绪。
-    await expect(page.locator(".view-mode.is-narrator")).toContainText("执笔者");
+    await expect(page.locator(".view-mode.is-narrator")).toContainText("叙事者");
     const panel = page.locator("[data-self-play-panel]");
     await expect(panel).toBeVisible();
     await expect(panel).toContainText("世界自演");

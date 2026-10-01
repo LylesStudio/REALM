@@ -47,6 +47,16 @@ const migrationPaths = [
   "../database/postgres/migrations/0041_article_qualification_and_import_entries.sql",
   "../database/postgres/migrations/0042_realm_transfer_and_import_jobs.sql",
   "../database/postgres/migrations/0043_propagation_node_audience_archived_guard.sql",
+  "../database/postgres/migrations/0044_record_branch_timeline_kind.sql",
+  "../database/postgres/migrations/0045_lobby_rooms.sql",
+  "../database/postgres/migrations/0046_lobby_room_world_link.sql",
+  "../database/postgres/migrations/0047_lobby_host_lease.sql",
+  "../database/postgres/migrations/0048_scene_image_generations.sql",
+  "../database/postgres/migrations/0049_scene_image_mode.sql",
+  "../database/postgres/migrations/0050_scene_image_requests.sql",
+  "../database/postgres/migrations/0051_account_password_hash.sql",
+  "../database/postgres/migrations/0052_scene_image_queue_lease_fencing.sql",
+  "../database/postgres/migrations/0053_membership_capability.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
@@ -113,6 +123,12 @@ const scopedTables = [
   "realm_import_bootstrap",
   "realm_import_content_log",
   "realm_import_pack_tables",
+  "lobby_rooms",
+  "lobby_room_members",
+  "scene_image_generations",
+  "scene_image_requests",
+  "realm_capability_keys",
+  "realm_capability_nonces",
 ];
 
 function canonical(value) {
@@ -164,7 +180,7 @@ test("migrations are non-destructive, repeatable, and transaction-runner owned",
   }
 });
 
-test("the complete Runtime Contract v1 table set is present", () => {
+test("all workspace-scoped tables in the canonical migration chain are listed", () => {
   const expected = ["workspaces", ...scopedTables];
   for (const tableName of expected) {
     assert.match(
@@ -178,28 +194,30 @@ test("the complete Runtime Contract v1 table set is present", () => {
   );
 });
 
-// 0042 的四个 job 子表经 (workspace_id, job_id) 复合 FK 锚定 realm_import_jobs
-//（workspace 域由此传递锚定；直接 workspaces FK 由 jobs 表承担）。
-const COMPOSITE_JOB_ANCHORED = new Set([
-  "realm_import_job_events",
-  "realm_import_bootstrap",
-  "realm_import_content_log",
-  "realm_import_pack_tables",
+// Workspace containment is inherited through the declared composite parent FK.
+const COMPOSITE_SCOPE_ANCHORS = new Map([
+  ["realm_import_job_events", "job_id) references realm_import_jobs (workspace_id, id)"],
+  ["realm_import_bootstrap", "job_id) references realm_import_jobs (workspace_id, id)"],
+  ["realm_import_content_log", "job_id) references realm_import_jobs (workspace_id, id)"],
+  ["realm_import_pack_tables", "job_id) references realm_import_jobs (workspace_id, id)"],
+  ["lobby_room_members", "room_id) references lobby_rooms (workspace_id, id)"],
 ]);
 
 test("every tenant table is workspace-scoped with a workspace-qualified primary key", () => {
   for (const tableName of scopedTables) {
     const body = tableBody(tableName);
     assert.match(body, /workspace_id text not null/);
-    if (COMPOSITE_JOB_ANCHORED.has(tableName)) {
-      assert.match(
-        body,
-        /foreign key \(workspace_id, job_id\) references realm_import_jobs \(workspace_id, id\)/,
+    const compositeAnchor = COMPOSITE_SCOPE_ANCHORS.get(tableName);
+    if (compositeAnchor) {
+      assert.ok(
+        body.includes(`foreign key (workspace_id, ${compositeAnchor}`),
+        `${tableName} lacks its workspace-qualified composite anchor`,
       );
     } else {
-      assert.match(body, /foreign key \(workspace_id\) references workspaces \(id\)/);
+      assert.ok(body.includes("foreign key (workspace_id) references workspaces (id)"), `${tableName} lacks a direct workspace foreign key`);
     }
-    assert.match(body, /primary key \(\s*workspace_id,/);
+    const primaryKey = body.match(/primary key\s*\(([^)]*)\)/)?.[1] ?? "";
+    assert.equal(primaryKey.split(",")[0].trim(), "workspace_id");
   }
 });
 
@@ -270,6 +288,12 @@ test("forced row-level security denies unscoped workspace access", () => {
       "propagation_node_audiences",
       "article_qualifications",
       "article_import_entries",
+      "lobby_rooms",
+      "lobby_room_members",
+      "scene_image_generations",
+      "scene_image_requests",
+      "realm_capability_keys",
+      "realm_capability_nonces",
     ].includes(tableName)) {
       assert.match(
         canonicalSql,
@@ -511,11 +535,29 @@ test("T10-B7 library runtime grants sink the owner-pool exception minimally", ()
   assert.match(canonicalSql, /grant insert on effect_definitions to realm_runtime/);
   assert.match(canonicalSql, /grant insert on character_skills to realm_runtime/);
   assert.match(canonicalSql, /grant insert on character_assets to realm_runtime/);
-  const b23 = canonical(migrationSql[migrationPaths.length - 1]);
+  const b23 = canonical(
+    migrationSql[migrationPaths.findIndex((path) => path.includes("0023_library_runtime_grants"))],
+  );
   assert.doesNotMatch(b23, /grant all/);
   assert.doesNotMatch(b23, /on all tables/);
   assert.doesNotMatch(b23, /grant delete/);
   assert.doesNotMatch(b23, /bypassrls/);
+});
+
+test("0053 membership capability narrows runtime writes to a definer channel", () => {
+  const m53 = canonical(
+    migrationSql[migrationPaths.findIndex((path) => path.includes("0053_membership_capability"))],
+  );
+  assert.match(m53, /revoke insert on player_world_memberships from realm_runtime/);
+  assert.match(m53, /revoke update \(role\) on player_world_memberships from realm_runtime/);
+  assert.match(m53, /create role realm_capability nologin nosuperuser/);
+  assert.match(m53, /owner to realm_capability/);
+  assert.match(m53, /revoke all on function membership_capability_apply\(text\) from public/);
+  assert.match(m53, /grant execute on function membership_capability_grant/);
+  // 通道内也不得有 GRANT ALL/整 schema/绕 RLS。
+  assert.doesNotMatch(m53, /grant all/);
+  assert.doesNotMatch(m53, /on all tables/);
+  assert.doesNotMatch(m53, /grant delete/);
 });
 
 test("T10-B1 worldline merge grants add only the topology INSERT surface", () => {

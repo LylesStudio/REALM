@@ -110,6 +110,7 @@ function createFakeService(options: {
     async authorizeRecordViewer(recordId, principalId) {
       spies.authorizeCalls.push({ recordId, principalId });
       if (options.authorizeError) throw options.authorizeError;
+      return "char_inst_player";
     },
     subscribePreviews(recordId, listener) {
       spies.subscribeCalls.push(recordId);

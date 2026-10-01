@@ -31,6 +31,12 @@ import {
 } from "../modules/application/local-record-service.ts";
 import { createDeterministicActionResolver } from "../modules/actions/public.ts";
 import { FatalTurnError } from "../modules/runtime/public.ts";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 const adminConnectionString = process.env.DATABASE_URL;
 
@@ -57,6 +63,7 @@ const MIGRATIONS = [
   "0024_graph_invalidation_events.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0053_membership_capability.sql",
 ];
 
 const CARD = {
@@ -138,6 +145,7 @@ async function createTempDatabase(t: test.TestContext) {
     await ownerPool.query(sql);
   }
   await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, SCOPE.workspaceId);
   await ownerPool.query(
     `INSERT INTO accounts (workspace_id, principal_id, display_name)
      VALUES ($1, $2, $3)
@@ -150,6 +158,7 @@ async function createTempDatabase(t: test.TestContext) {
 const SCOPE = {
   workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
   principalId: LOCAL_RECORD_SCOPE.principalId,
+  sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
 };
 
 /** 建世界 → 导入卡 → 故事 → 记录（装配路径），返回各 id。 */

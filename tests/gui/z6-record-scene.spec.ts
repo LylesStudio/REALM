@@ -74,18 +74,18 @@ async function assertSceneLayer(page: import("@playwright/test").Page, width: nu
 
 test.describe("Z6 record scene background", () => {
   for (const width of [375, 1440]) {
-    test(`场景背景层结构/交互/溢出 @${width}px`, async ({ page }) => {
+    test(`场景背景层结构/交互/溢出 @${width}px`, async ({ page }, testInfo) => {
       const pageErrors: string[] = [];
       page.on("pageerror", (error) => pageErrors.push(String(error)));
       await page.setViewportSize({ width, height: width === 375 ? 760 : 900 });
       await openDemoRecord(page);
       await assertSceneLayer(page, width);
-      await page.screenshot({ path: `/tmp/realm-z6-record-scene-${width}.png` });
+      await page.screenshot({ path: testInfo.outputPath(`record-scene-${width}.png`) });
       expect(pageErrors, "pageerror 必须为零").toEqual([]);
     });
   }
 
-  test("夜间主题：遮罩 token 切换且背景层仍克制", async ({ page }) => {
+  test("夜间主题：遮罩 token 切换且背景层仍克制", async ({ page }, testInfo) => {
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(String(error)));
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -100,7 +100,7 @@ test.describe("Z6 record scene background", () => {
     );
     expect(veilStrength).toBe("84%");
     await assertSceneLayer(page, 1440);
-    await page.screenshot({ path: "/tmp/realm-z6-record-scene-night.png" });
+    await page.screenshot({ path: testInfo.outputPath("record-scene-night.png") });
     expect(pageErrors, "夜间 pageerror 必须为零").toEqual([]);
   });
 });

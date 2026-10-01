@@ -63,11 +63,13 @@ test("1. 两种来源共用同一入口组件与共享 overlay 渲染", () => {
 });
 
 test("2. 来源返回语义：library 来源收/回世界库；fallback 保留 source；成功统一关闭", () => {
-  const open = fnBody(realmClient, "function openCreation", ["function closeCreation"]);
+  const open = fnBody(realmClient, "function openCreation", ["const closeCreation = useCallback"]);
   assert.match(open, /if \(source === "library"\) setLibraryOpen\(false\)/);
-  const close = fnBody(realmClient, "function closeCreation", ["async function confirmCreation"]);
+  const close = fnBody(realmClient, "const closeCreation = useCallback", ["async function confirmCreation"]);
   assert.match(close, /setCreationOverlay\(null\)/);
-  assert.match(close, /if \(source === "library"\) openLibrary\(\)/);
+  assert.match(close, /setLobbyOpen\(false\)/);
+  assert.match(close, /setLobbyInvite\(null\)/);
+  assert.match(close, /if \(source === "library"\)\s*\{[\s\S]*setLibraryOpen\(true\)/);
   const confirm = fnBody(realmClient, "async function confirmCreation", [
     "function renderCreationOverlay",
   ]);
@@ -75,11 +77,14 @@ test("2. 来源返回语义：library 来源收/回世界库；fallback 保留 s
   // 关闭 overlay；新 record 由组件 onOpenRecord 打开。
   assert.match(confirm, /confirmWorldGenesis\(draft\)/);
   assert.match(confirm, /if \(recordId\) setCreationOverlay\(null\)/);
-  // chat → guided fallback 保留来源，不产生第二套 overlay 状态。
+  // chat → guided fallback 保留来源并移交对谈上下文（turns/未发送文本/草案），
+  // 不产生第二套 overlay 状态。
   assert.match(
     realmClient,
-    /onFallback=\{\(\) =>\s*setCreationOverlay\(\{ kind: "guided", source: creationOverlay\.source \}\)\}/,
+    /onFallback=\{\(payload\) =>\s*setCreationOverlay\(\{[\s\S]*?kind: "guided",[\s\S]*?source: creationOverlay\.source,[\s\S]*?fallback: payload,[\s\S]*?\}\)\}/,
   );
+  // fallback 载荷交给 GuidedGenesis（draft 初始化 + 恢复面板）。
+  assert.match(realmClient, /fallback=\{creationOverlay\.fallback \?\? null\}/);
 });
 
 test("3. 旧单轮 genesis 路径与死代码已移除；管理能力保留", () => {

@@ -54,7 +54,7 @@ function workflowPath(filename: string): string {
 
 export class SceneWorkflowError extends Error {
   readonly code: "INVALID_WORKFLOW_FILE" | "UNKNOWN_BINDING" | "GRAPH_NODE_MISSING"
-    | "COMFYUI_DISABLED";
+    | "COMFYUI_DISABLED" | "SCENE_IMAGE_FENCE_STALE" | "SCENE_IMAGE_FENCE_REQUIRED";
 
   constructor(code: SceneWorkflowError["code"], message: string) {
     super(message);

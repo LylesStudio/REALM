@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
   createNewUserContext,
+  prepareClipboardForTest,
   uniqueName,
 } from "./helpers";
 
@@ -20,14 +21,14 @@ async function openLobby(page: Page) {
   return panel;
 }
 
-test("邀请链接：分享→落地定位→显式加入→失效目标稳定提示", async ({ browser, page, request }) => {
+test("邀请链接：分享→落地定位→显式加入→失效目标稳定提示", async ({ browser, page, request, browserName }) => {
   test.setTimeout(180_000);
   const publicName = uniqueName("邀请公开房");
   const lockedName = uniqueName("邀请密码房");
   const password = "猎户座密码";
 
   // 房主创建两间房并分享公开房链接（clipboard fallback）。
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await prepareClipboardForTest(page, browserName);
   const hostPanel = await openLobby(page);
   await hostPanel.getByLabel("房间名称").fill(publicName);
   await hostPanel.getByRole("button", { name: "创建房间" }).click();

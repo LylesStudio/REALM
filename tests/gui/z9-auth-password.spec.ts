@@ -7,7 +7,7 @@ import { expect, test } from "@playwright/test";
  * 覆盖：门禁重定向、登录页字段形态（无访问令牌）、无密码账户进入、
  * 密码账户创建/错误拒绝/正确进入、登出回登录页、pageerror 为零。
  */
-test("账户名+可选密码登录：无密码进入 / 密码校验 / 退役令牌不影响", async ({ browser, baseURL }) => {
+test("账户名+可选密码登录：无密码进入 / 密码校验 / 退役令牌不影响", async ({ browser, baseURL }, testInfo) => {
   // 显式空会话（项目级 storageState 不得泄漏进本用例）。
   const context = await browser.newContext({
     baseURL,
@@ -70,7 +70,7 @@ test("账户名+可选密码登录：无密码进入 / 密码校验 / 退役令�
     await submitButton.click();
     await expect(page.locator(".world-onboarding")).toBeVisible({ timeout: 60_000 });
 
-    await page.screenshot({ path: "/tmp/realm-z9-login.png" });
+    await page.screenshot({ path: testInfo.outputPath("login-onboarding.png") });
     expect(pageErrors, "pageerror 必须为零").toEqual([]);
   } finally {
     await context.close();

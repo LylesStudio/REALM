@@ -4,6 +4,7 @@ import {
   openDemoRecord,
   uniqueName,
 } from "./helpers";
+import { promoteDemoMembershipToOwner } from "../helpers/membership-fixture.mjs";
 
 /**
  * LAN 游戏大厅 GUI 验收（Y 批次）：两个浏览器上下文、两个不同身份，
@@ -115,7 +116,12 @@ test("大厅世界绑定：房主绑定自有世界，客人加入后进入共�
   test.setTimeout(180_000);
   const roomName = uniqueName("共享局");
 
-  // 房主创建绑定 demo 世界（烬海诸国，房主即 owner）的房间。
+  // 房主创建绑定 demo 世界（烬海诸国）的房间。可绑定清单只含「拥有的世界」；
+  // T10 后登录默认 player 席位，须由 fixture 显式提升 owner
+  //（scratch admin，隔离护栏见 helper）。
+  const me = await request.get("/api/auth/me");
+  const { principalId } = await me.json();
+  await promoteDemoMembershipToOwner(process.env.DATABASE_URL, principalId);
   const hostPanel = await openLobby(page);
   await hostPanel.getByLabel("房间名称").fill(roomName);
   await hostPanel.getByLabel("共享世界（可选）").selectOption({ label: "烬海诸国" });
@@ -154,7 +160,10 @@ test("大厅 onboarding 入口：新账号从引导屏进入大厅并加入房�
   test.setTimeout(180_000);
   const roomName = uniqueName("迎客局");
 
-  // 房主先开好一个绑定世界的房间。
+  // 房主先开好一个绑定世界的房间（owner 席位由 fixture 建立，同上）。
+  const me = await request.get("/api/auth/me");
+  const { principalId } = await me.json();
+  await promoteDemoMembershipToOwner(process.env.DATABASE_URL, principalId);
   const hostPanel = await openLobby(page);
   await hostPanel.getByLabel("房间名称").fill(roomName);
   await hostPanel.getByLabel("共享世界（可选）").selectOption({ label: "烬海诸国" });

@@ -121,6 +121,7 @@ function stubScope(): RecordRuntimeScope {
       displayName: "测试者",
       profileSummary: "并行化测试角色。",
     },
+    viewerCharacterInstanceId: "char_inst_player",
     aiCharacters: [],
     observerCharacterInstanceIds: [],
     recentPublicEvents: [],
@@ -244,6 +245,9 @@ function createService(options: {
     },
   };
   const runtimeScopeProvider = {
+    async resolveViewerCharacterInstanceId() {
+      return stubScope().viewerCharacterInstanceId;
+    },
     async resolve() {
       barrier?.mark("scope");
       return options.scopeResult === undefined ? stubScope() : options.scopeResult;

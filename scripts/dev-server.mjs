@@ -7,6 +7,7 @@
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { webChildEnv } from "./web-child-env.mjs";
 
 const host = process.env.HOST_BIND ?? "127.0.0.1";
 const port = process.env.PORT ?? "9999";
@@ -18,7 +19,9 @@ const cli = fileURLToPath(
 const child = spawn(
   process.execPath,
   [cli, mode, "--hostname", host, "--port", port],
-  { stdio: "inherit" },
+  // Web/Vinext 进程不继承 owner/provision 专用凭据（DATABASE_URL 等）。
+  // 应用代码只读 REALM_RUNTIME_DATABASE_URL / REALM_TRANSFER_DATABASE_URL。
+  { stdio: "inherit", env: webChildEnv() },
 );
 
 // launcher/Tauri/systemd 结束的是这个 wrapper；必须把信号转发给 Vinext，

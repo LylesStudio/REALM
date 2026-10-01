@@ -570,7 +570,7 @@ test("committed SSE replays only projected events and honors viewer-local cursor
     async listCommittedEvents(_recordId: string, afterOrdinal: number) {
       return event.ordinal > afterOrdinal ? [event] : [];
     },
-    async authorizeRecordViewer() {},
+    async authorizeRecordViewer() { return undefined; },
     cancelMessage() {
       return false;
     },
@@ -631,7 +631,7 @@ test("SSE cancellation stops projection polling immediately", async () => {
       calls += 1;
       return [];
     },
-    async authorizeRecordViewer() {},
+    async authorizeRecordViewer() { return undefined; },
     cancelMessage() {
       return false;
     },
@@ -666,7 +666,7 @@ test("SSE request abort stops projection polling", async () => {
       calls += 1;
       return [];
     },
-    async authorizeRecordViewer() {},
+    async authorizeRecordViewer() { return undefined; },
     cancelMessage() {
       return false;
     },
@@ -703,7 +703,7 @@ test("SSE does not poll when the request was already aborted", async () => {
       calls += 1;
       return [];
     },
-    async authorizeRecordViewer() {},
+    async authorizeRecordViewer() { return undefined; },
     cancelMessage() {
       return false;
     },

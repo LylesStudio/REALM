@@ -5,8 +5,9 @@
  * API 要求账户会话（账户名 + 可选密码）；缺失 → 纯单机/测试回落本地单用户
  * principal。REALM_ACCESS_TOKEN 已退役——存在也仅被忽略，绝不再作为凭据。
  * Sessions 是 30 天 httpOnly HMAC cookie；cookie 只携带 principalId，
- * 签名密钥来自 session-secret.ts（环境变量 → 安装级 0600 文件 → 开发兜底），
- * 绝不依赖已退役的访问令牌。
+ * 签名密钥来自 session-secret.ts（环境变量 → 安装级 0600 文件 → 开发兜底
+ * 仅限非 production；production 下无可用来源即抛 SessionSecretUnavailableError
+ * fail-closed，绝不签发可用 cookie），绝不依赖已退役的访问令牌。
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -64,6 +65,22 @@ export function principalFromRequest(request: Request): string | null {
     const [name, ...rest] = entry.trim().split("=");
     if (name === SESSION_COOKIE) {
       return verifySessionValue(rest.join("="));
+    }
+  }
+  return null;
+}
+
+/**
+ * 原始会话证明（cookie 原值）：供服务端写路径转发给 DB capability 验证。
+ * 不做验证（验证 = principalFromRequest 的职责）；无 cookie 返回 null。
+ */
+export function sessionProofFromRequest(request: Request): string | null {
+  const cookie = request.headers.get("cookie") ?? "";
+  for (const entry of cookie.split(";")) {
+    const [name, ...rest] = entry.trim().split("=");
+    if (name === SESSION_COOKIE) {
+      const value = rest.join("=");
+      return value || null;
     }
   }
   return null;

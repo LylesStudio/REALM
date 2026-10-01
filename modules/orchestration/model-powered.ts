@@ -1768,7 +1768,9 @@ async function modelCall<T>(
  * 并保留可操作的诊断 code（不缺 key / 配置错误 / 401/403），玩家被告知
  * 检查模型设置，而不是无意义地「稍后重试」；不得触发注定失败的
  * retryTurn。Retryable 仅保留可恢复的 429/5xx/timeout/network 与临时
- * provider failure。safeMessage 一律静态文案——不回显上游 error.message
+ * provider failure；其中连接失败（无 HTTP status 的 MODEL_REQUEST_FAILED）
+ * 单列 MODEL_PROVIDER_UNREACHABLE，玩家文案指引检查本地模型服务/供应商
+ * 设置。safeMessage 一律静态文案——不回显上游 error.message
  * （可能含 URL/连接细节/凭据回声）。
  */
 function classifyModelStepError(error: unknown): FatalTurnError | RetryableTurnError {
@@ -1777,6 +1779,19 @@ function classifyModelStepError(error: unknown): FatalTurnError | RetryableTurnE
   }
   if (error instanceof ModelProviderError && error.code === "MODEL_AUTH_FAILED") {
     return new FatalTurnError("MODEL_AUTH_FAILED", "模型认证失败，请检查设置中的 API key。");
+  }
+  // 连接失败（fetch 未拿到响应 → 无 HTTP status）：仍可恢复故保持
+  // retryable，但给玩家可操作的指引（检查本地服务/供应商设置），而不是
+  // 一句空泛的「可以安全重试」。带 status 的 HTTP 错误不算连接失败。
+  if (
+    error instanceof ModelProviderError
+    && error.code === "MODEL_REQUEST_FAILED"
+    && error.status === undefined
+  ) {
+    return new RetryableTurnError(
+      "MODEL_PROVIDER_UNREACHABLE",
+      "无法连接模型服务：请确认本地模型服务已启动，或到设置检查供应商与端点；恢复后可安全重试。",
+    );
   }
   return new RetryableTurnError(
     "MODEL_PROVIDER_STEP_FAILED",

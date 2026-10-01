@@ -10,6 +10,12 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
+import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+installTestSessionSecret();
 import { seedPostgresDemo } from "../database/postgres/public.ts";
 import {
   LibraryServiceError,
@@ -74,6 +80,10 @@ const CURRENT_MIGRATIONS = [
   // 0044：records.timeline_kind 增加 'branch'——branch 命令现在创建
   // timeline_kind='branch' 的可玩拓扑，pre-0044 CHECK 会拒绝。
   "0044_record_branch_timeline_kind.sql",
+  // 0053 撤销 runtime 的 membership 直写（role UPDATE 改走 capability
+  // 窄通道）；0041 提供 pgcrypto 依赖。
+  "0041_article_qualification_and_import_entries.sql",
+  "0053_membership_capability.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -118,6 +128,9 @@ async function createDatabase(
     await ownerPool.query(sql);
   }
   await seedPostgresDemo(ownerPool);
+  if (migrations.includes("0053_membership_capability.sql")) {
+    await seedCapabilitySessionKey(ownerPool, "ws_demo");
+  }
   return { ownerPool, runtimePool, databaseName };
 }
 
@@ -146,8 +159,15 @@ test(
 
     // ---- 迁移前缺口证据（0001–0022 库）：world 创建被授权拒绝 ----
     const pre = await createDatabase(t, maintenance, adminUrl, "pre", MIGRATIONS.slice(0, -1));
+
+    // ---- 迁移前缺口证据（0001–0022 库）：world 创建被授权拒绝 ----
+
     const preService = createPostgresLibraryService(pre.runtimePool);
-    const scope = { workspaceId: "ws_demo", principalId: "principal_demo_player" };
+    const scope = {
+      workspaceId: "ws_demo",
+      principalId: "principal_demo_player",
+      sessionProof: sessionProofFor("principal_demo_player"),
+    };
     await assert.rejects(
       preService.create(scope, {
         kind: "world",
@@ -175,7 +195,8 @@ test(
     );
     assert.equal(postGrants.rows[0].worlds_insert, true);
     assert.equal(postGrants.rows[0].participants_insert, true);
-    assert.equal(postGrants.rows[0].role_update, true);
+    // 0053：runtime 不再持有 memberships.role 直写（capability 通道替代）。
+    assert.equal(postGrants.rows[0].role_update, false);
     assert.equal(postGrants.rows[0].skill_metadata_update, false);
     assert.equal(postGrants.rows[0].instance_status_update, true);
 

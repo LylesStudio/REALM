@@ -55,6 +55,7 @@ const MIGRATIONS = [
   "0024_graph_invalidation_events.sql",
   "0025_propagation_topology_semantic_scope.sql",
   "0026_canon_security_audience.sql",
+  "0053_membership_capability.sql",
 ];
 
 const SCOPE = {

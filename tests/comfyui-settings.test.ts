@@ -32,6 +32,12 @@ test("store: 缺省文件回落默认值（环境覆盖优先于内置缺省）"
     assert.equal(loaded.enabled, false);
     assert.equal(loaded.workflowId, COMFYUI_DEFAULT_WORKFLOW_ID);
     assert.equal(loaded.apiKey, "");
+    // M9：内置默认 baseUrl 必须是 loopback，不得携带开发者内网/真实私网地址。
+    const defaultHost = new URL(loaded.baseUrl).hostname;
+    assert.ok(
+      ["127.0.0.1", "localhost", "::1"].includes(defaultHost),
+      `默认 baseUrl 必须指向 loopback，得到 ${defaultHost}`,
+    );
   } finally {
     await plain.cleanup();
   }
@@ -86,6 +92,58 @@ test("store: 非法 URL/协议/内嵌凭据/超时越界 fail-closed", async () 
         assert.ok(error instanceof ComfyUiSettingsError);
         return true;
       }, JSON.stringify(patch));
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * M7 收口：baseUrl 的 IP literal 保存期校验（loopback/RFC1918/ULA 允许；
+ * 公网、link-local、unspecified、multicast 拒绝；IPv4-mapped IPv6 按嵌入
+ * v4 同规则）。hostname 名字不在保存期解析（连接时全答案校验+pinning，
+ * 见 comfyui-client 测试）。
+ */
+test("store: baseUrl IP literal 只接受 loopback/LAN，公网与 link-local 拒绝", async () => {
+  const { store, cleanup } = await tempStore();
+  try {
+    const accepted = [
+      "http://127.0.0.1:8188",
+      "http://127.1:8188",            // WHATWG 归一化为 127.0.0.1
+      "http://10.0.0.8:8188",
+      "http://172.16.0.2:8188",
+      "http://192.168.31.10:8188",
+      "http://[::1]:8188",
+      "http://[fd12:3456::1]:8188",   // ULA
+      "http://[::ffff:127.0.0.1]:8188", // mapped loopback
+      "http://[::ffff:192.168.1.2]:8188", // mapped RFC1918
+      "http://comfy.lan:8188",        // hostname：保存期不解析
+      "http://localhost:8188",
+    ];
+    for (const baseUrl of accepted) {
+      const saved = await store.save({ baseUrl });
+      assert.equal(saved.baseUrl, baseUrl.replace(/\/+$/, ""), `应接受 ${baseUrl}`);
+    }
+    const rejected = [
+      "http://8.8.8.8:8188",          // 公网
+      "http://1.1.1.1:8188",
+      "http://169.254.169.254:80",    // link-local（云 metadata 段，明确不支持）
+      "http://[fe80::1]:8188",        // v6 link-local（同上）
+      "http://0.0.0.0:8188",          // unspecified
+      "http://[::]:8188",
+      "http://224.0.0.1:8188",        // multicast
+      "http://100.64.0.1:8188",       // CGNAT 非 RFC1918，拒绝
+      "http://[::ffff:8.8.8.8]:8188", // mapped 公网
+    ];
+    for (const baseUrl of rejected) {
+      let caught: unknown;
+      try {
+        await store.save({ baseUrl });
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught instanceof ComfyUiSettingsError, `应拒绝 ${baseUrl}`);
+      assert.ok(!String((caught as Error).message).includes("8.8.8.8"), "错误不得回显地址");
     }
   } finally {
     await cleanup();

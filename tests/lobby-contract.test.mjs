@@ -28,6 +28,9 @@ const migration = read("database/postgres/migrations/0045_lobby_rooms.sql");
 
 test("路由：principal 只来自 session；密码只在 body；无 URL/日志泄漏形态", () => {
   assert.match(route, /resolveRequestPrincipal\(request, LOCAL_RECORD_SCOPE\.principalId\)/);
+  // 0053：加入写 membership 的会话证明来自当前已认证请求的 cookie
+  // （sessionProofFromRequest），不由 body/查询供给。
+  assert.match(route, /sessionProofFromRequest\(request\)/);
   assert.ok(!/body\.userId|body\.principal/.test(route), "不得信任客户端身份字段");
   assert.match(route, /NOT_MEMBER/);
   // 密码只从 POST body 的 password 字段读取；不得出现在 URL/searchParams。
@@ -54,11 +57,16 @@ test("字段白名单：summary 无 hash/principal；服务不含明文存储路
   assert.match(service, /password\.length > 80/);
   // 校验路径必须走 verifyRoomPassword（无明文相等比较形态）。
   assert.ok(!/===\s*password|password\s*===\s*[^"]/i.test(service.replaceAll("input.password", "")), "不得明文比较密码");
-  // 世界绑定：owner-only 校验 + 加入同事务写 membership（幂等）。
+  // 世界绑定：owner-only 校验 + 加入同事务经 capability 窄通道写
+  // membership（0053；幂等 insert-if-absent）。直连 DML 不得回归。
   assert.match(service, /AND role = 'owner'/);
   assert.match(service, /NOT_WORLD_OWNER/);
-  assert.match(service, /INSERT INTO player_world_memberships/);
-  assert.match(service, /ON CONFLICT \(workspace_id, world_id, principal_id\) DO NOTHING/);
+  assert.match(service, /grantMembershipWithCapability\(client, \{/);
+  assert.match(service, /op: "join_player"/);
+  // 会话证明来自服务端认证 scope（路由注入 sessionProof），不由客户端给。
+  assert.match(service, /sessionProof: scope\.sessionProof \?\? ""/);
+  assert.doesNotMatch(service, /INSERT INTO player_world_memberships/);
+  assert.doesNotMatch(service, /UPDATE player_world_memberships/);
   // 成员计数必须走单次聚合 JOIN，不退回逐房相关子查询。
   assert.match(service, /COALESCE\(member_counts\.member_count/);
   assert.match(service, /GROUP BY member\.workspace_id, member\.room_id/);

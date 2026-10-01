@@ -1,12 +1,13 @@
 /**
  * 批次 T11-G——restricted/secret qualification gate（T11-F 冻结契约）。
- * 真实临时 PG 库（t.after 强制拆库，迁移 0001–0027 全链）：
- * deferred constraint trigger（非 public Revision 无 audience 提交即败）；
+ * 通过 test-postgres-runtime scratch cluster 运行；本测试另建独立数据库，
+ * 应用 MIGRATIONS 列出的依赖集并由 t.after 强制拆库：不等同完整迁移链。
+ * 覆盖：deferred constraint trigger（非 public Revision 无 audience 提交即败）；
  * public 向后兼容；unsupported propagate 值 400；非 owner 409；audience
  * 形状/未知/失效/跨世界线拒绝；secret 非 private_letter 拒绝；recipient
  * 映射零/多拒绝；成功路径同事务 Revision+audience+Campaign+Packet+Job
  * 且 Job input 冻结 securityClass/revision/audienceDigest；失败整体回滚。
- * 门禁开启（REALM_ACCESS_TOKEN）+ 会话 cookie 驱动多 principal 角色矩阵。
+ * REALM_RUNTIME_DATABASE_URL 门禁 + 登录签发的 HMAC session cookie 驱动角色矩阵。
  * 零开发库污染。
  */
 import assert from "node:assert/strict";
@@ -14,16 +15,22 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
+import { POST as accountLoginPOST } from "../app/api/auth/login/route.ts";
 import { POST as canonPOST } from "../app/api/canon/route.ts";
+import { POST as worldKnowledgePOST } from "../app/api/world-knowledge/route.ts";
 import {
   POSTGRES_DEMO_IDS,
+  createPostgresCanonRepository,
   createPostgresWorldKnowledgeRepository,
   seedPostgresDemo,
   seedPostgresDemoPropagationTopology,
 } from "../database/postgres/public.ts";
-import { endSharedRuntimePools } from "../app/api/world-scope.ts";
-import { createSessionValue } from "../modules/identity/auth.ts";
+import { endSharedRuntimePools, resolveMembershipRole } from "../app/api/world-scope.ts";
+import { createSessionValue, principalIdForDisplayName } from "../modules/identity/auth.ts";
+import { CanonError } from "../modules/worldline/canon.ts";
 import { createWorldKnowledgeService } from "../modules/world-knowledge/public.ts";
+import { installTestSessionSecret, seedCapabilitySessionKey } from "./helpers/session-proof.ts";
+installTestSessionSecret();
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -59,6 +66,8 @@ const MIGRATIONS = [
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
   "0028_propagation_node_audiences_owner_append.sql",
+  "0051_account_password_hash.sql",
+  "0053_membership_capability.sql",
 ];
 
 const SCOPE = {
@@ -67,7 +76,8 @@ const SCOPE = {
   worldlineId: POSTGRES_DEMO_IDS.worldline,
 };
 const OWNER = POSTGRES_DEMO_IDS.principal;
-const PLAYER = "principal_t11g_player";
+const PLAYER = principalIdForDisplayName("T11G 玩家");
+const sessionCookies = new Map<string, string>();
 
 function requireLoopbackUrl(value: string): URL {
   const url = new URL(value);
@@ -85,12 +95,28 @@ function newId(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
 }
 
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function canonRequest(body: Record<string, unknown>, principalId: string): Request {
+  const cookie = sessionCookies.get(principalId)
+    ?? `realm_session=${createSessionValue(principalId)}`;
   return new Request("http://localhost/api/canon", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      cookie: `realm_session=${createSessionValue(principalId)}`,
+      cookie,
     },
     body: JSON.stringify(body),
   });
@@ -113,6 +139,7 @@ test(
     const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 3 });
     const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
     runtimeUrl.pathname = `/${databaseName}`;
+    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 3 });
 
     const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
     const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
@@ -121,6 +148,7 @@ test(
 
     t.after(async () => {
       await endSharedRuntimePools();
+      await runtimePool.end();
       if (previousAccessToken === undefined) {
         delete process.env.REALM_ACCESS_TOKEN;
       } else {
@@ -147,22 +175,86 @@ test(
     }
     await seedPostgresDemo(ownerPool);
     await seedPostgresDemoPropagationTopology(ownerPool);
-    // 非 owner 成员（player 角色，用于 403/409 角色矩阵）。
-    await ownerPool.query(
-      `INSERT INTO accounts (workspace_id, principal_id, display_name)
-       VALUES ($1, $2, 'T11G 玩家')`,
+    // 0053：HTTP 登录的 membership 写入要求库里已有会话密钥副本
+    // （测试夹具以 admin 身份种子，与 installTestSessionSecret 同值）。
+    await seedCapabilitySessionKey(ownerPool, SCOPE.workspaceId);
+    // 真实首次登录建立账号 + 默认世界 membership + HttpOnly session。
+    const playerLogin = await accountLoginPOST(new Request(
+      "http://localhost/api/auth/login",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "T11G 玩家", password: "" }),
+      },
+    ));
+    const playerLoginBody = await playerLogin.clone().text();
+    const accountRow = await ownerPool.query(
+      `SELECT count(*)::int AS count FROM accounts WHERE workspace_id = $1 AND principal_id = $2`,
       [SCOPE.workspaceId, PLAYER],
     );
-    await ownerPool.query(
-      `INSERT INTO player_world_memberships (
-         workspace_id, world_id, principal_id, role
-       ) VALUES ($1, $2, $3, 'player')`,
+    const membershipRow = await ownerPool.query(
+      `SELECT role FROM player_world_memberships
+       WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
       [SCOPE.workspaceId, SCOPE.worldId, PLAYER],
     );
+    assert.equal(
+      playerLogin.status,
+      200,
+      `login HTTP failed body=${playerLoginBody}; accountRows=${accountRow.rows[0]?.count}; membershipRole=${membershipRow.rows[0]?.role ?? "missing"}`,
+    );
+    const playerSession = playerLogin.headers.get("set-cookie");
+    assert.ok(playerSession, "login must issue a signed session cookie");
+    sessionCookies.set(PLAYER, playerSession.split(";", 1)[0]!);
+    const playerMembership = await ownerPool.query(
+      `SELECT role FROM player_world_memberships
+       WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+      [SCOPE.workspaceId, SCOPE.worldId, PLAYER],
+    );
+    assert.equal(playerMembership.rows[0]?.role, "player");
 
     const knowledge = createWorldKnowledgeService(
       createPostgresWorldKnowledgeRepository(ownerPool),
     );
+
+    const elevatedEntityId = newId("entity");
+    await knowledge.upsertEntity(SCOPE, {
+      id: elevatedEntityId,
+      entityKind: "setting",
+      name: "提权边界样本",
+      summary: "",
+      validFromTick: 0,
+      validToTick: null,
+    });
+    for (const truthStatus of ["story_canon", "world_canon"]) {
+      const response = await worldKnowledgePOST(new Request(
+        "http://localhost/api/world-knowledge",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            cookie: sessionCookies.get(PLAYER)!,
+          },
+          body: JSON.stringify({
+            action: "appendClaim",
+            worldId: SCOPE.worldId,
+            subjectEntityId: elevatedEntityId,
+            predicate: "authorized",
+            objectValue: truthStatus,
+            scope: "world",
+            truthStatus,
+          }),
+        },
+      ));
+      assert.equal(response.status, 400, `${truthStatus} must use the owner-gated canon decision path`);
+    }
+    const elevatedClaims = await ownerPool.query(
+      `SELECT count(*)::int AS count FROM world_claims
+       WHERE workspace_id = $1 AND world_id = $2 AND subject_entity_id = $3
+         AND truth_status IN ('story_canon', 'world_canon')`,
+      [SCOPE.workspaceId, SCOPE.worldId, elevatedEntityId],
+    );
+    assert.equal(elevatedClaims.rows[0].count, 0, "rejected requests must not append elevated claims");
+
     const propagationCounts = async () => {
       const [campaigns, packets, jobs] = await Promise.all([
         ownerPool.query(`SELECT count(*)::int AS c FROM information_campaigns`),
@@ -289,11 +381,15 @@ test(
     );
     assert.equal(bogusProposal.rows[0].status, "pending", "400 不得吞掉 merge");
 
-    // 3. 非 owner attest non-public → 409 PROPAGATION_SECURITY_UNAVAILABLE。
+    // 3. 非 owner 即使在 body.decidedBy 伪造 owner principal，也不能 merge non-public Canon。
     const playerProposal = await seedProposal("玩");
     const playerMerge = await merge(
       playerProposal,
-      { propagate: "restricted", audienceContinuityIds: ["continuity_player"] },
+      {
+        propagate: "restricted",
+        audienceContinuityIds: ["continuity_player"],
+        decidedBy: OWNER,
+      },
       PLAYER,
     );
     assert.equal(playerMerge.status, 409);
@@ -301,7 +397,90 @@ test(
       ((await playerMerge.json()) as { error: { code: string } }).error.code,
       "PROPAGATION_SECURITY_UNAVAILABLE",
     );
+    const playerProposalState = await ownerPool.query(
+      `SELECT status FROM canon_proposals WHERE id = $1`,
+      [playerProposal],
+    );
+    assert.equal(playerProposalState.rows[0]?.status, "pending", "forged owner must not mutate the proposal");
     assert.deepEqual(await propagationCounts(), { campaigns: 1, packets: 1, jobs: 1 });
+
+    // 3b. TOCTOU：真实 route preflight 曾读到 owner；role 随后被降级，
+    //     runtime merge repository 必须在写事务内重验并锁定 membership。
+    {
+      const staleOwnerProposal = await seedProposal("owner-stale");
+      assert.equal(
+        await resolveMembershipRole(runtimePool, {
+          workspaceId: SCOPE.workspaceId,
+          worldId: SCOPE.worldId,
+          principalId: OWNER,
+        }),
+        "owner",
+      );
+      await ownerPool.query(
+        `UPDATE player_world_memberships SET role = 'player'
+         WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+        [SCOPE.workspaceId, SCOPE.worldId, OWNER],
+      );
+      const revisionId = newId("revision");
+      const canonRepository = createPostgresCanonRepository(runtimePool);
+      try {
+        await assert.rejects(
+          canonRepository.mergeProposal(SCOPE, {
+            proposalId: staleOwnerProposal,
+            decidedBy: OWNER,
+            promotedClaims: [],
+            article: null,
+            revision: {
+              id: revisionId,
+              parentRevisionId: null,
+              effectiveTick: 1,
+              effectiveOrdinal: 1,
+              acceptedProposalId: staleOwnerProposal,
+              contentHash: "stale-owner-check",
+              committedAt: new Date().toISOString(),
+              securityClass: "restricted",
+            },
+            propagation: {
+              async enqueue(client) {
+                const db = client as {
+                  query(sql: string, values: unknown[]): Promise<unknown>;
+                };
+                await db.query(
+                  `INSERT INTO canon_revision_audiences (
+                     workspace_id, world_id, worldline_id, revision_id, continuity_id
+                   ) VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    SCOPE.workspaceId,
+                    SCOPE.worldId,
+                    SCOPE.worldlineId,
+                    revisionId,
+                    "continuity_player",
+                  ],
+                );
+              },
+            },
+          }),
+          (error: unknown) => error instanceof CanonError
+            && error.code === "PROPAGATION_SECURITY_UNAVAILABLE",
+        );
+        const staleProposalState = await ownerPool.query(
+          `SELECT status FROM canon_proposals WHERE id = $1`,
+          [staleOwnerProposal],
+        );
+        assert.equal(staleProposalState.rows[0]?.status, "pending");
+        const staleRevisionCount = await ownerPool.query(
+          `SELECT count(*)::int AS count FROM canon_revisions WHERE id = $1`,
+          [revisionId],
+        );
+        assert.equal(staleRevisionCount.rows[0]?.count, 0);
+      } finally {
+        await ownerPool.query(
+          `UPDATE player_world_memberships SET role = 'owner'
+           WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+          [SCOPE.workspaceId, SCOPE.worldId, OWNER],
+        );
+      }
+    }
 
     // 4. audience 形状：缺失/空数组 → 400。
     const noAudienceId = await seedProposal("缺");
@@ -572,5 +751,93 @@ test(
     const finalCounts = await propagationCounts();
     assert.equal(finalCounts.campaigns, 3);
     assert.equal(finalCounts.jobs, 3);
+
+    // 9. 并发 role change 必须等待同事务的 non-public merge 完成。
+    const lockingProposal = await seedProposal("owner-lock");
+    const lockingRevisionId = newId("revision");
+    let enterEnqueue!: () => void;
+    const enqueueEntered = new Promise<void>((resolve) => { enterEnqueue = resolve; });
+    let releaseMerge!: () => void;
+    const mergeBarrier = new Promise<void>((resolve) => { releaseMerge = resolve; });
+    let mergeTask: Promise<void> | undefined;
+    let roleChangeTask: Promise<unknown> | undefined;
+    try {
+      assert.equal(
+        await resolveMembershipRole(runtimePool, {
+          workspaceId: SCOPE.workspaceId,
+          worldId: SCOPE.worldId,
+          principalId: OWNER,
+        }),
+        "owner",
+      );
+      mergeTask = createPostgresCanonRepository(runtimePool).mergeProposal(SCOPE, {
+        proposalId: lockingProposal,
+        decidedBy: OWNER,
+        promotedClaims: [],
+        article: null,
+        revision: {
+          id: lockingRevisionId,
+          parentRevisionId: null,
+          effectiveTick: 2,
+          effectiveOrdinal: 2,
+          acceptedProposalId: lockingProposal,
+          contentHash: "owner-lock-linearization",
+          committedAt: new Date().toISOString(),
+          securityClass: "restricted",
+        },
+        propagation: {
+          async enqueue(client) {
+            const db = client as { query(sql: string, values: unknown[]): Promise<unknown> };
+            await db.query(
+              `INSERT INTO canon_revision_audiences (
+                 workspace_id, world_id, worldline_id, revision_id, continuity_id
+               ) VALUES ($1, $2, $3, $4, $5)`,
+              [
+                SCOPE.workspaceId,
+                SCOPE.worldId,
+                SCOPE.worldlineId,
+                lockingRevisionId,
+                "continuity_player",
+              ],
+            );
+            enterEnqueue();
+            await mergeBarrier;
+          },
+        },
+      });
+      assert.equal(await settlesWithin(enqueueEntered, 5_000), true, "merge should reach its transaction barrier");
+      roleChangeTask = ownerPool.query(
+        `UPDATE player_world_memberships SET role = 'player'
+         WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+        [SCOPE.workspaceId, SCOPE.worldId, OWNER],
+      );
+      assert.equal(
+        await settlesWithin(roleChangeTask, 150),
+        false,
+        "concurrent demotion must wait for the protected merge transaction",
+      );
+      releaseMerge();
+      await mergeTask;
+      await roleChangeTask;
+      const committedProposal = await ownerPool.query(
+        `SELECT status FROM canon_proposals WHERE id = $1`,
+        [lockingProposal],
+      );
+      assert.equal(committedProposal.rows[0]?.status, "merged");
+      const committedRevision = await ownerPool.query(
+        `SELECT security_class FROM canon_revisions WHERE id = $1`,
+        [lockingRevisionId],
+      );
+      assert.equal(committedRevision.rows[0]?.security_class, "restricted");
+    } finally {
+      releaseMerge();
+      await mergeTask?.catch(() => undefined);
+      await roleChangeTask?.catch(() => undefined);
+      await ownerPool.query(
+        `UPDATE player_world_memberships SET role = 'owner'
+         WHERE workspace_id = $1 AND world_id = $2 AND principal_id = $3`,
+        [SCOPE.workspaceId, SCOPE.worldId, OWNER],
+      );
+    }
   },
 );

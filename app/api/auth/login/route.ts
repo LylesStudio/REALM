@@ -1,9 +1,10 @@
 import {
   POSTGRES_DEMO_IDS,
-  createLocalPostgresPool,
   createPostgresAccountRepository,
 } from "../../../../database/postgres/public.ts";
+import { getSharedRuntimePool } from "../../world-scope.ts";
 import {
+  createSessionValue,
   sessionCookieHeader,
 } from "../../../../modules/identity/auth.ts";
 import {
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     );
   }
   const accountRepository = createPostgresAccountRepository(
-    createLocalPostgresPool(connectionString),
+    getSharedRuntimePool(connectionString),
   );
   try {
     const account = await accountRepository.loginWithCredentials(
@@ -49,9 +50,13 @@ export async function POST(request: Request) {
       password,
     );
     // 登录即加入默认世界：新身份立即可见全部 demo 数据（幂等）。
+    // 0053：membership 写入需 DB 可验证会话证明——用刚签发的会话值
+    // （与 cookie 同值），DB 独立重算 HMAC 并从证明推导 actor。
+    const sessionProof = createSessionValue(account.principalId);
     await accountRepository.ensureDefaultWorldMembership(
       POSTGRES_DEMO_IDS.workspace,
       account.principalId,
+      sessionProof,
     );
     return Response.json(
       {

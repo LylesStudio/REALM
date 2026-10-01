@@ -5,6 +5,13 @@ import { readdirSync } from "node:fs";
 import test from "node:test";
 import pg from "pg";
 import {
+  installTestSessionSecret,
+  seedCapabilitySessionKey,
+  sessionProofFor,
+} from "./helpers/session-proof.ts";
+
+installTestSessionSecret();
+import {
   POSTGRES_DEMO_IDS,
   createPostgresActionAffordanceCatalog,
   createPostgresCharacterMemoryRepository,
@@ -97,6 +104,8 @@ test(
       "0040_scene_display_time_snapshot.sql",
       // branch 命令创建 timeline_kind='branch' 的可玩拓扑（0044 枚举）。
       "0044_record_branch_timeline_kind.sql",
+      // 0053：membership 写入走 capability 窄通道（自包含 pgcrypto）。
+      "0053_membership_capability.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -105,6 +114,7 @@ test(
       await owner.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
 
     // 当前账号的 displayName 是新记录人类玩家名的唯一权威来源。
     await ownerPool.query(
@@ -118,6 +128,7 @@ test(
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
     };
     const initial = await service.list(scope);
     assert.equal(initial.worlds.length, 1);
@@ -1040,10 +1051,95 @@ test(
       .records.find((record) => record.title === "守夜人")!.id;
 
     // Record 删除：隐藏列表、保留 append-only Events、清空最近打开记忆，且重复请求幂等。
+    // retryable Turn 是暂停态，不是仍在运行的 provider；它不应阻塞删除。
+    const retryableTurnIds = {
+      command: "library-retryable-command",
+      turn: "library-retryable-turn",
+    };
+    const retryableWorldline = await ownerPool.query<{ worldline_id: string }>(
+      `SELECT worldline_id FROM records WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, createdRecordId],
+    );
+    const retryableWorldlineId = retryableWorldline.rows[0]?.worldline_id;
+    assert.ok(retryableWorldlineId);
+    await ownerPool.query(
+      `INSERT INTO command_inbox (
+         workspace_id, world_id, worldline_id, record_id, id,
+         idempotency_key, request_fingerprint, command_kind, payload,
+         expected_record_version, state, started_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'player-message', '{}'::jsonb,
+                 1, 'processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        retryableWorldlineId,
+        createdRecordId,
+        retryableTurnIds.command,
+        "library-retryable-idempotency",
+        "library-retryable-fingerprint",
+      ],
+    );
+    await ownerPool.query(
+      `INSERT INTO turn_runs (
+         workspace_id, world_id, worldline_id, record_id, command_id, id,
+         state, run_checkpoint, last_error_code
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'retryable', $7::jsonb,
+                 'MODEL_PROVIDER_STEP_FAILED')`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        retryableWorldlineId,
+        createdRecordId,
+        retryableTurnIds.command,
+        retryableTurnIds.turn,
+        JSON.stringify({ turnId: retryableTurnIds.turn }),
+      ],
+    );
     const eventCountBeforeDelete = await ownerPool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM events
        WHERE workspace_id = $1 AND record_id = $2`,
       [LOCAL_RECORD_SCOPE.workspaceId, createdRecordId],
+    );
+    // H2：崩溃/强杀遗留的 stale 活动 Turn（planning，updated_at 两小时前）
+    // 不得永久阻塞删除；删除时由删除路径收口为 failed（不冒充运行中）。
+    const staleTurnIds = {
+      command: "library-stale-command",
+      turn: "library-stale-turn",
+    };
+    await ownerPool.query(
+      `INSERT INTO command_inbox (
+         workspace_id, world_id, worldline_id, record_id, id,
+         idempotency_key, request_fingerprint, command_kind, payload,
+         expected_record_version, state, started_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'player-message', '{}'::jsonb,
+                 1, 'processing', CURRENT_TIMESTAMP - interval '2 hours',
+                 CURRENT_TIMESTAMP - interval '2 hours')`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        retryableWorldlineId,
+        createdRecordId,
+        staleTurnIds.command,
+        "library-stale-idempotency",
+        "library-stale-fingerprint",
+      ],
+    );
+    await ownerPool.query(
+      `INSERT INTO turn_runs (
+         workspace_id, world_id, worldline_id, record_id, command_id, id,
+         state, run_checkpoint, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'planning', $7::jsonb,
+                 CURRENT_TIMESTAMP - interval '2 hours',
+                 CURRENT_TIMESTAMP - interval '2 hours')`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        retryableWorldlineId,
+        createdRecordId,
+        staleTurnIds.command,
+        staleTurnIds.turn,
+        JSON.stringify({ turnId: staleTurnIds.turn }),
+      ],
     );
     await ownerPool.query(
       `UPDATE accounts SET last_record_id = $2
@@ -1060,6 +1156,22 @@ test(
       [LOCAL_RECORD_SCOPE.workspaceId, createdRecordId],
     );
     assert.equal(deletedStatus.rows[0]?.status, "archived");
+    // H2：stale 活动行被收口为 failed（未删除、可审计）；retryable 行不动。
+    const staleTurnAfter = await ownerPool.query<{
+      state: string;
+      last_error_code: string | null;
+    }>(
+      `SELECT state, last_error_code FROM turn_runs
+       WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, staleTurnIds.turn],
+    );
+    assert.equal(staleTurnAfter.rows[0]?.state, "failed");
+    assert.equal(staleTurnAfter.rows[0]?.last_error_code, "TURN_STALE_SWEPT");
+    const retryableTurnAfter = await ownerPool.query<{ state: string }>(
+      `SELECT state FROM turn_runs WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, retryableTurnIds.turn],
+    );
+    assert.equal(retryableTurnAfter.rows[0]?.state, "retryable");
     const eventCountAfterDelete = await ownerPool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM events
        WHERE workspace_id = $1 AND record_id = $2`,
@@ -1106,6 +1218,74 @@ test(
       worldId: createdWorld!.id,
       recordId: createdRecordId,
     });
+
+    // H2 对照：fresh 活动 Turn（updated_at 为当前）必须仍然阻塞删除——
+    // 清扫绝不能误伤仍在运行的正常回合。
+    const freshTurnIds = {
+      command: "library-fresh-command",
+      turn: "library-fresh-turn",
+    };
+    const siblingWorldline = await ownerPool.query<{ worldline_id: string }>(
+      `SELECT worldline_id FROM records WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, siblingRecordId],
+    );
+    const siblingWorldlineId = siblingWorldline.rows[0]?.worldline_id;
+    assert.ok(siblingWorldlineId);
+    await ownerPool.query(
+      `INSERT INTO command_inbox (
+         workspace_id, world_id, worldline_id, record_id, id,
+         idempotency_key, request_fingerprint, command_kind, payload,
+         expected_record_version, state, started_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'player-message', '{}'::jsonb,
+                 1, 'processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        siblingWorldlineId,
+        siblingRecordId,
+        freshTurnIds.command,
+        "library-fresh-idempotency",
+        "library-fresh-fingerprint",
+      ],
+    );
+    await ownerPool.query(
+      `INSERT INTO turn_runs (
+         workspace_id, world_id, worldline_id, record_id, command_id, id,
+         state, run_checkpoint
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'planning', $7::jsonb)`,
+      [
+        LOCAL_RECORD_SCOPE.workspaceId,
+        createdWorld!.id,
+        siblingWorldlineId,
+        siblingRecordId,
+        freshTurnIds.command,
+        freshTurnIds.turn,
+        JSON.stringify({ turnId: freshTurnIds.turn }),
+      ],
+    );
+    await assert.rejects(
+      service.create(scope, {
+        kind: "delete-record",
+        worldId: createdWorld!.id,
+        recordId: siblingRecordId,
+      }),
+      (error: unknown) =>
+        error instanceof LibraryServiceError && error.code === "RECORD_TURN_ACTIVE",
+    );
+    const siblingStatus = await ownerPool.query<{ status: string }>(
+      `SELECT status FROM records WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, siblingRecordId],
+    );
+    assert.notEqual(
+      siblingStatus.rows[0]?.status,
+      "archived",
+      "fresh 活动 Turn 阻塞时 Record 不得被归档",
+    );
+    const freshTurnAfter = await ownerPool.query<{ state: string }>(
+      `SELECT state FROM turn_runs WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, freshTurnIds.turn],
+    );
+    assert.equal(freshTurnAfter.rows[0]?.state, "planning", "fresh 活动行不得被清扫");
 
     // 未知世界 fail-closed。
     await assert.rejects(
@@ -1167,6 +1347,7 @@ test(
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await seedPostgresDemo(ownerPool);
+    await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
 
     const service = createPostgresLibraryService(ownerPool);
     const scope = {

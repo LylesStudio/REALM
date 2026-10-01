@@ -14,6 +14,8 @@
 import type { RecordRuntimeScopeRepository } from "../../database/postgres/public.ts";
 import type { RecordRuntimeScope } from "../../database/postgres/public.ts";
 import type { SceneImageStore } from "../../database/postgres/scene-image-store.ts";
+import { SceneImageFenceError, type SceneImageFence } from "../../database/postgres/scene-image-store.ts";
+import type { SceneImageQueue } from "../../database/postgres/scene-image-queue.ts";
 import {
   composeScenePrompt,
   ComfyUiError,
@@ -82,6 +84,8 @@ export function createSceneImageService(options: {
   createComfyUiClient?: (settings: ComfyUiSettings) => ComfyUiClient;
   /** 落库所需：生成台账 store（database/postgres/scene-image-store.ts）。 */
   sceneImageStore?: SceneImageStore;
+  /** worker 模式必需：请求队列（fence 终态与 generation 同事务结算）。 */
+  sceneImageQueue?: SceneImageQueue;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
@@ -149,6 +153,21 @@ export function createSceneImageService(options: {
     return (options.createComfyUiClient ?? createComfyUiClient)(settings);
   }
 
+  /** fence 存在时走原子 settle（generation failed + request failed 同事务）。 */
+  async function settleGenerationFailed(
+    workspaceId: string,
+    generationId: string,
+    errorCode: string,
+    fence?: SceneImageFence,
+  ): Promise<void> {
+    const store = options.sceneImageStore!;
+    if (fence) {
+      await store.failGenerationAndSettle({ workspaceId, id: generationId }, errorCode, fence);
+    } else {
+      await store.failGeneration({ workspaceId, id: generationId }, errorCode);
+    }
+  }
+
   return {
     async prepareSceneImageWorkflow(
       scope: SceneImageScope,
@@ -180,30 +199,40 @@ export function createSceneImageService(options: {
     async dispatchAndStoreSceneImage(
       scope: SceneImageScope,
       overrides: { seed?: number } = {},
+      run: { fence?: SceneImageFence } = {},
     ): Promise<SceneImageRunResult> {
       if (!options.sceneImageStore) {
         throw new SceneWorkflowError("COMFYUI_DISABLED", "图像生成存储未配置。");
       }
+      // worker 模式必须携带 fence（缺失即 fail-closed）；用户显式 dispatch
+      // 是独立授权路径（无 request 行，不走 worker fence）。
+      if (run.fence && !options.sceneImageQueue) {
+        throw new SceneWorkflowError(
+          "SCENE_IMAGE_FENCE_REQUIRED",
+          "worker dispatch requires the scene image queue for fencing.",
+        );
+      }
       const client = await enabledComfyUiClient();
       const store = options.sceneImageStore;
-      // 先解析真实 Record scope：非成员/未知 Record 在任何 active 查询或
-      // provider 调用前就 fail-closed，避免已知 recordId 触发/复用生成。
+      // 授权边界在 route 层（authorizeRecordViewer：membership + viewer
+      // projection）；本 service 只解析 Record scope（未知/已归档 Record
+      // → null fail-closed），membership 判定不在此层。
       const resolved = await resolveScope(scope);
       const prepared = prepareResolved(resolved, overrides);
-      const claimed = await store.claimOrCreateGeneration({
-        workspaceId: resolved.workspaceId,
-        worldId: resolved.worldId,
-        recordId: resolved.recordId,
-        sceneId: resolved.sceneId,
-        queuePrompt: async () => (await client.queuePrompt(prepared.patchedGraph)).promptId,
-      });
+      const claimed = await store.claimOrCreateGeneration(
+        {
+          workspaceId: resolved.workspaceId,
+          worldId: resolved.worldId,
+          recordId: resolved.recordId,
+          sceneId: resolved.sceneId,
+          queuePrompt: async () => (await client.queuePrompt(prepared.patchedGraph)).promptId,
+        },
+        run.fence ? { fence: run.fence } : undefined,
+      );
       const generationId = claimed.generation.id;
       const promptId = claimed.generation.promptId;
       if (!promptId || claimed.generation.worldId !== resolved.worldId) {
-        await store.failGeneration(
-          { workspaceId: scope.workspaceId, id: generationId },
-          "GENERATION_SCOPE_MISMATCH",
-        );
+        await settleGenerationFailed(scope.workspaceId, generationId, "GENERATION_SCOPE_MISMATCH", run.fence);
         return { status: "failed", errorCode: "GENERATION_SCOPE_MISMATCH" };
       }
       const generationWorldId = resolved.worldId;
@@ -212,23 +241,30 @@ export function createSceneImageService(options: {
       for (;;) {
         const history = await client.history(promptId);
         if (history.status === "failed") {
-          await store.failGeneration(
-            { workspaceId: scope.workspaceId, id: generationId },
-            "GENERATION_FAILED",
-          );
+          await settleGenerationFailed(scope.workspaceId, generationId, "GENERATION_FAILED", run.fence);
           return { status: "failed", errorCode: "GENERATION_FAILED" };
         }
         if (history.status === "ready") {
           try {
             const image = await client.viewImage(history.image);
-            const { fileId } = await store.completeGeneration(
-              { workspaceId: scope.workspaceId, worldId: generationWorldId, id: generationId },
-              {
-                contentType: image.contentType,
-                filename: history.image.filename,
-                data: image.data,
-              },
-            );
+            const { fileId } = run.fence
+              ? await store.completeGenerationAndSettle(
+                { workspaceId: scope.workspaceId, worldId: generationWorldId, id: generationId },
+                {
+                  contentType: image.contentType,
+                  filename: history.image.filename,
+                  data: image.data,
+                },
+                run.fence,
+              )
+              : await store.completeGeneration(
+                { workspaceId: scope.workspaceId, worldId: generationWorldId, id: generationId },
+                {
+                  contentType: image.contentType,
+                  filename: history.image.filename,
+                  data: image.data,
+                },
+              );
             return {
               status: "ready",
               generationId,
@@ -236,11 +272,9 @@ export function createSceneImageService(options: {
               fileUrl: `/api/files/${fileId}`,
             };
           } catch (error) {
+            if (error instanceof SceneImageFenceError) throw error;
             const code = error instanceof ComfyUiError ? error.code : "GENERATION_FAILED";
-            await store.failGeneration(
-              { workspaceId: scope.workspaceId, id: generationId },
-              code,
-            );
+            await settleGenerationFailed(scope.workspaceId, generationId, code, run.fence);
             return { status: "failed", errorCode: code };
           }
         }

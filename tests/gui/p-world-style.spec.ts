@@ -32,9 +32,10 @@ test.describe("P. 世界文风系统", () => {
 
     // 司卷问答提问语：modern 措辞。
     await openLibrary(page);
-    await page.locator(".guided-entry").click();
+    await page.locator('.library-create > [data-creation-focus-return="create-guided"]').click();
+    // modern 文风问句；切到 classical 不得串入古风文案。
     await expect(page.locator(".guided-question")).toContainText(
-      "先给这个世界起个名字吧",
+      "先给这个世界起个名字吧——你希望它叫什么？",
     );
     await expect(page.locator(".guided-question")).not.toContainText("当以何名传世");
     await page.getByRole("button", { name: "退出引导" }).click();
@@ -43,10 +44,10 @@ test.describe("P. 世界文风系统", () => {
   test("P2 司卷问答文风步：点选入卷，跳过不留条目", async ({ page }) => {
     await openDemoRecord(page);
     await openLibrary(page);
-    await page.locator(".guided-entry").click();
+    await page.locator('.library-create > [data-creation-focus-return="create-guided"]').click();
 
     // 世界之名 → 纪元基调（跳过）→ 文风步。
-    await page.getByRole("textbox", { name: "世界之名输入" }).fill("P2 风格试验场");
+    await page.getByRole("textbox", { name: "世界名称输入" }).fill("P2 风格试验场");
     await page.locator(".guided-confirm").click();
     await page.locator(".guided-skip").click();
 
@@ -55,9 +56,11 @@ test.describe("P. 世界文风系统", () => {
     await expect(options).toHaveCount(4);
     // 点选「西幻」：立即进入下一步，已定之卷浮现文风条目。
     await options.filter({ hasText: "西幻" }).click();
-    await expect(page.locator(".guided-heading h2")).toHaveText("世界底色");
+    await expect(page.locator(".guided-heading h2")).toHaveText("世界概述");
     // 文风步之后的提问语切换为西幻笔调。
-    await expect(page.locator(".guided-question")).toContainText("立传");
+    await expect(page.locator(".guided-question")).toContainText(
+      "若要为此地立传，开篇第一句当如何写？",
+    );
     const scroll = page.locator(".guided-scroll");
     await expect(
       scroll.locator(".scroll-entry", { hasText: "文风" }),
@@ -66,13 +69,13 @@ test.describe("P. 世界文风系统", () => {
     // 退出重开验证跳过路径：文风步跳过 → 卷上不现条目。
     await page.getByRole("button", { name: "退出引导" }).click();
     await openLibrary(page);
-    await page.locator(".guided-entry").click();
-    await page.getByRole("textbox", { name: "世界之名输入" }).fill("P2 跳过组");
+    await page.locator('.library-create > [data-creation-focus-return="create-guided"]').click();
+    await page.getByRole("textbox", { name: "世界名称输入" }).fill("P2 跳过组");
     await page.locator(".guided-confirm").click();
     await page.locator(".guided-skip").click();
     await expect(page.locator(".guided-heading h2")).toHaveText("文风");
     await page.locator(".guided-skip").click();
-    await expect(page.locator(".guided-heading h2")).toHaveText("世界底色");
+    await expect(page.locator(".guided-heading h2")).toHaveText("世界概述");
     await expect(page.locator(".guided-scroll")).not.toContainText("文风");
   });
 
