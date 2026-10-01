@@ -4,8 +4,27 @@
 
 ## [Unreleased]
 
-- 准备首个公开源码发布快照。
-- 补齐公开安装、贡献、安全和数据边界文档。
+## [0.4.0] - 2026-10-01
+
+### Added
+
+- 引导式创世（Guided Genesis）与 onboarding 旅程完整闭环。
+- 世界库预设世界入口与一键创建。
+- 角色在场（presence）回合外自主发声。
+- 大厅（lobby）房间、邀请链接与世界绑定。
+- 场景图自动生成队列与确定性离线 fixture。
+- 身份/operator 门禁、session proof 与 capability 安全边界。
+
+### Changed
+
+- 大量 GUI 旅程契约测试与 fake provider 阶段注册表对齐。
+- 改进世界管理、归档/删除与信息密度体验。
+
+### Fixed
+
+- onboarding S3/S4 selector 与 observer 只读姿态测试流。
+- genesis-entry fallback payload 传递不变式。
+- 角色在场标记在 fake provider 新建记录下的实例 id 解析。
 
 ## [0.1.0] - 2026-09-06
 
