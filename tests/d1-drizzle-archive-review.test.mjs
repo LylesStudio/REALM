@@ -43,7 +43,10 @@ const REMOVED_PATHS = [
 const PG_MIGRATION_DIR = "database/postgres/migrations";
 const PG_ONLY_CONSTRUCT = /CREATE POLICY|ENABLE ROW LEVEL SECURITY|GRANT\s+\w+\s+ON|realm_runtime/i;
 
-test("the archive unit is complete at its post-retirement location; original paths are gone", () => {
+test(
+  "the archive unit is complete at its post-retirement location; original paths are gone",
+  { skip: !existsSync(join(projectRoot, ARCHIVE_DIR)) },
+  () => {
   for (const name of ARCHIVE_SQL) {
     assert.ok(existsSync(join(projectRoot, ARCHIVE_DIR, name)), `${ARCHIVE_DIR}/${name} 应在位`);
   }
@@ -70,7 +73,10 @@ test("legacy tooling is retired from package records (post-retirement designated
   assert.ok(!existsSync(join(projectRoot, "db/index.ts")), "db/index.ts 应已删除");
 });
 
-test("archive provenance chain is intact, SQLite-only, and carries config provenance", () => {
+test(
+  "archive provenance chain is intact, SQLite-only, and carries config provenance",
+  { skip: !existsSync(join(projectRoot, ARCHIVE_DIR)) },
+  () => {
   const journal = JSON.parse(
     readFileSync(join(projectRoot, ARCHIVE_DIR, "meta", "_journal.json"), "utf8"),
   );

@@ -272,8 +272,14 @@ export function mergeEnvText(text, values) {
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
-function npmCommand(platform = process.platform) {
-  return platform === "win32" ? "npm.cmd" : "npm";
+export function npmCommand(platform = process.platform) {
+  if (platform !== "win32") return "npm";
+  // Do not let Windows resolve a project-local npm.cmd/npm shim first. A
+  // damaged node_modules/npm was the source of npm-prefix.js/npm-cli.js
+  // failures during setup. The npm shipped with the active Node executable is
+  // the authoritative package manager for this process.
+  const adjacent = join(dirname(process.execPath), "npm.cmd");
+  return existsSync(adjacent) ? adjacent : "npm.cmd";
 }
 
 function runCommand(command, args, options = {}) {

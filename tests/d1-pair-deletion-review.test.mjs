@@ -102,7 +102,10 @@ const references = collectAllSources().flatMap((file) =>
   })),
 );
 
-test("the deleted pair and retired deferred files are gone; archive, portable types and Core stay", () => {
+test(
+  "the deleted pair and retired deferred files are gone; archive, portable types and Core stay",
+  { skip: !existsSync(join(projectRoot, "docs/archive/d1-drizzle")) },
+  () => {
   for (const path of [...DELETED_PAIR, ...RETIRED_PATHS]) {
     assert.ok(!existsSync(join(projectRoot, path)), `${path} 应已删除/退役`);
   }

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const installer = readFileSync(join(projectRoot, "scripts/install.sh"), "utf8");
+const windowsInstaller = readFileSync(join(projectRoot, "scripts/install.ps1"), "utf8");
 
 test("install.sh is defensive by default", () => {
   assert.match(installer, /set -euo pipefail/);
@@ -44,6 +45,14 @@ test("install.sh fetches source without git when possible", () => {
   // 支持 tar 包直链与分支覆盖。
   assert.match(installer, /REALM_INSTALL_REF/);
   assert.match(installer, /tar -xJ?z?f?/);
+});
+
+test("installers refresh codeload installs and avoid project-local npm", () => {
+  assert.match(installer, /refreshing existing non-git source/);
+  assert.match(installer, /preserve_tmp/);
+  assert.match(windowsInstaller, /refreshing existing non-git source/);
+  assert.match(windowsInstaller, /Resolve-NpmCommand/);
+  assert.match(windowsInstaller, /Join-Path \(Split-Path -Parent \$nodePath\) 'npm\.cmd'/);
 });
 
 test("install.sh carries no credentials", () => {

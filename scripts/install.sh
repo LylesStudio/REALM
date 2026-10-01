@@ -139,7 +139,47 @@ if [[ -d "$APP_DIR/.git" ]]; then
   git -C "$APP_DIR" fetch --depth 1 origin "$REF"
   git -C "$APP_DIR" checkout -q FETCH_HEAD
 elif [[ -d "$APP_DIR" && -f "$APP_DIR/package.json" ]]; then
-  log "using existing source at $APP_DIR (not a git clone; skipping update)"
+  # codeload fallback installs have no .git. Do not freeze them forever at the
+  # first downloaded version: refresh source into a temporary directory, then
+  # replace only the application files while preserving local config/data.
+  case "$SOURCE_URL" in
+    https://github.com/*/*)
+      slug="${SOURCE_URL#https://github.com/}"
+      slug="${slug%.git}"
+      tarball_url="https://codeload.github.com/${slug}/tar.gz/refs/heads/${REF}"
+      source_tmp="$(mktemp -d "${TMPDIR:-/tmp}/realm-source.XXXXXX")"
+      source_tar="$source_tmp/source.tar.gz"
+      source_extract="$source_tmp/extract"
+      preserve_tmp="$source_tmp/preserve"
+      trap 'rm -rf "$source_tmp"' EXIT
+      log "refreshing existing non-git source from $tarball_url (max 5 min)"
+      mkdir -p "$source_extract" "$preserve_tmp"
+      curl -fSL --max-time 300 --progress-bar "$tarball_url" -o "$source_tar" \
+        || die "failed to refresh source (timeout or network error)"
+      tar -xzf "$source_tar" -C "$source_extract"
+      source_dir="$(find "$source_extract" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+      [[ -n "$source_dir" && -f "$source_dir/package.json" ]] \
+        || die "downloaded source archive has no package.json"
+      for preserve in .env.local .env.owner.local .local; do
+        if [[ -e "$APP_DIR/$preserve" ]]; then
+          mkdir -p "$preserve_tmp/$(dirname "$preserve")"
+          mv "$APP_DIR/$preserve" "$preserve_tmp/$preserve"
+        fi
+      done
+      find "$APP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      cp -a "$source_dir"/. "$APP_DIR"/
+      for preserve in .env.local .env.owner.local .local; do
+        if [[ -e "$preserve_tmp/$preserve" ]]; then
+          mv "$preserve_tmp/$preserve" "$APP_DIR/$preserve"
+        fi
+      done
+      rm -rf "$source_tmp"
+      trap - EXIT
+      ;;
+    *)
+      log "using existing source at $APP_DIR (custom non-git source; skipping refresh)"
+      ;;
+  esac
 elif [[ "$SOURCE_URL" == http* && "$SOURCE_URL" != *.git ]]; then
   # tarball URL (e.g. a release asset or codeload archive)
   confirm "Download and extract $SOURCE_URL into $APP_DIR?" || die "aborted"

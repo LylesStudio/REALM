@@ -8,6 +8,7 @@ import {
   chooseDockerPort,
   chooseWebPort,
   mergeEnvText,
+  npmCommand,
   parseNodeVersion,
   versionAtLeast,
 } from "../scripts/setup-web.mjs";
@@ -17,6 +18,14 @@ import {
   assert.equal(versionAtLeast("22.13.0", [22, 13, 0]), true);
   assert.equal(versionAtLeast("22.12.9", [22, 13, 0]), false);
   assert.equal(versionAtLeast("21.99.0", [22, 13, 0]), false);
+});
+
+test("Windows bootstrap uses npm next to the active Node executable", () => {
+  assert.equal(npmCommand("linux"), "npm");
+  const setup = readFileSync(new URL("../scripts/setup-web.mjs", import.meta.url), "utf8");
+  assert.match(setup, /dirname\(process\.execPath\)/);
+  assert.match(setup, /join\(dirname\(process\.execPath\), "npm\.cmd"\)/);
+  assert.doesNotMatch(setup, /return platform === "win32" \? "npm\.cmd" : "npm"/);
 });
 
 test("database plan prefers an already complete local toolchain", () => {

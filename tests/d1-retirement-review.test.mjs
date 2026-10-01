@@ -108,7 +108,10 @@ function isProductionPath(relativePath) {
   return PRODUCTION_DIRS.some((dir) => relativePath.startsWith(`${dir}/`));
 }
 
-test("retired D1 chain files are gone; archive, portable types and Core contract stay", () => {
+test(
+  "retired D1 chain files are gone; archive, portable types and Core contract stay",
+  { skip: !existsSync(join(projectRoot, "docs/archive/d1-drizzle")) },
+  () => {
   for (const path of [...RETIRED_PATHS, ...DELETED_PAIR]) {
     assert.ok(!existsSync(join(projectRoot, path)), `${path} 应已退役/删除`);
   }

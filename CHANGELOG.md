@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-01
+
+### Fixed
+
+- 重新运行 Windows 安装器时，codeload（无 `.git`）安装目录现在会刷新源码，不再冻结在首次下载的旧版本。
+- Windows bootstrap 固定使用当前 Node 安装目录旁的 `npm.cmd`，绕过项目内损坏的 npm shim。
+- 保留升级过程中的 `.env.local`、`.env.owner.local` 与 `.local/` 本地配置和数据。
+- public staging 的内部 archive 审计在缺少私有 `docs/archive` 时显式跳过；public 文档布局测试不再要求私有 `AGENT.md`/`STATUS.md`，也不将这些被排除的内部链接误报为断链。
+
 ## [0.4.1] - 2026-10-01
 
 ### Fixed

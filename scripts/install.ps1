@@ -46,6 +46,21 @@ function Test-Node22 {
   }
 }
 
+function Resolve-NpmCommand {
+  $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+  if ($nodeCommand) {
+    $nodePath = if ($nodeCommand.Source) { $nodeCommand.Source } else { $nodeCommand.Path }
+    $candidate = Join-Path (Split-Path -Parent $nodePath) 'npm.cmd'
+    if (Test-Path $candidate) { return $candidate }
+  }
+  $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if ($npmCommand) {
+    if ($npmCommand.Source) { return $npmCommand.Source }
+    return $npmCommand.Path
+  }
+  throw 'npm.cmd is missing next to node; install Node.js 22.13+ properly'
+}
+
 # --- 1. Node 22.13+ ------------------------------------------------------------
 if (-not (Test-Node22)) {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -59,9 +74,7 @@ if (-not (Test-Node22)) {
   exit 0
 }
 
-if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-  throw "npm is missing next to node; install Node.js $MinNode+ properly"
-}
+$NpmCommand = Resolve-NpmCommand
 
 # --- 2. Source ------------------------------------------------------------------
 if (-not $SourceUrl) {
@@ -82,7 +95,44 @@ if (Test-Path (Join-Path $AppDir '.git')) {
   & git -C $AppDir fetch --depth 1 origin $Ref | Out-Host
   & git -C $AppDir checkout -q FETCH_HEAD | Out-Host
 } elseif ((Test-Path $AppDir) -and (Test-Path (Join-Path $AppDir 'package.json'))) {
-  Write-RealmLog "using existing source at $AppDir (not a git clone; skipping update)"
+  # codeload fallback installs have no .git. Refresh them instead of freezing
+  # forever at the first downloaded version. Local config/data is preserved.
+  if ($SourceUrl -match '^https://github\.com/([^/]+/[^/]+?)(\.git)?$') {
+    $slug = $Matches[1]
+    $zipUrl = "https://codeload.github.com/$slug/zip/refs/heads/$Ref"
+    $sourceTmp = Join-Path ([IO.Path]::GetTempPath()) ("realm-src-refresh-" + [Guid]::NewGuid().ToString('N'))
+    $zipTmp = Join-Path $sourceTmp 'source.zip'
+    $extractTmp = Join-Path $sourceTmp 'extract'
+    $preserveTmp = Join-Path $sourceTmp 'preserve'
+    try {
+      New-Item -ItemType Directory -Force -Path $extractTmp, $preserveTmp | Out-Null
+      Write-RealmLog "refreshing existing non-git source from $zipUrl (max 5 min)"
+      Invoke-WebRequest -UseBasicParsing -Uri $zipUrl -OutFile $zipTmp -TimeoutSec 300
+      Expand-Archive -Force -Path $zipTmp -DestinationPath $extractTmp
+      $sourceDir = Get-ChildItem -Path $extractTmp -Directory -Force | Select-Object -First 1
+      if (-not $sourceDir -or -not (Test-Path (Join-Path $sourceDir.FullName 'package.json'))) {
+        throw 'downloaded source archive has no package.json'
+      }
+      foreach ($preserve in @('.env.local', '.env.owner.local', '.local')) {
+        $sourcePath = Join-Path $AppDir $preserve
+        if (Test-Path $sourcePath) {
+          Move-Item -Force -Path $sourcePath -Destination $preserveTmp
+        }
+      }
+      Get-ChildItem -Path $AppDir -Force | Remove-Item -Recurse -Force
+      Get-ChildItem -Path $sourceDir.FullName -Force | Copy-Item -Destination $AppDir -Recurse -Force
+      foreach ($preserve in @('.env.local', '.env.owner.local', '.local')) {
+        $preservedPath = Join-Path $preserveTmp $preserve
+        if (Test-Path $preservedPath) {
+          Move-Item -Force -Path $preservedPath -Destination $AppDir
+        }
+      }
+    } finally {
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $sourceTmp
+    }
+  } else {
+    Write-RealmLog "using existing source at $AppDir (custom non-git source; skipping refresh)"
+  }
 } else {
   $cloneOk = $false
   if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -136,7 +186,7 @@ if (Test-Path $nodeModules) {
 Write-RealmLog 'installing npm dependencies (ci); this may take a few minutes'
 Push-Location $AppDir
 try {
-  & npm ci
+  & $NpmCommand ci
   if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
 } finally {
   Pop-Location

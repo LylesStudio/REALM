@@ -5,8 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-const requiredRootMarkdown = [
-  "AGENT.md",
+const publicRootMarkdown = [
   "CHANGELOG.md",
   "CODE_OF_CONDUCT.md",
   "CONTRIBUTING.md",
@@ -14,8 +13,12 @@ const requiredRootMarkdown = [
   "README.ja.md",
   "README.md",
   "SECURITY.md",
-  "STATUS.md",
 ];
+const optionalRootDocs = new Set(["AGENT.md", "STATUS.md"]);
+const requiredRootMarkdown = [
+  ...publicRootMarkdown,
+  ...[...optionalRootDocs].filter((name) => existsSync(join(projectRoot, name))),
+].sort();
 
 function collectMarkdown(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -56,7 +59,8 @@ test("documentation has no broken local Markdown links or legacy root paths", ()
       const target = match[1].split("#", 1)[0];
       if (!target || /^(?:https?:|mailto:)/.test(target)) continue;
       const resolved = resolve(dirname(file), decodeURIComponent(target));
-      if (!existsSync(resolved)) {
+      const targetName = target.split("/").pop();
+      if (!existsSync(resolved) && !optionalRootDocs.has(targetName)) {
         broken.push(`${relative(projectRoot, file)} -> ${target}`);
       }
     }
