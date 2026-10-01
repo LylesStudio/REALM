@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-01
+
+### Fixed
+
+- macOS 安装命令不再静默挂起：下载步骤增加进度条、超时与明确日志。
+- Windows 升级失败 `Cannot find module 'npm-prefix.js'`：安装前显式清理旧 `node_modules`，避免损坏的本地 npm 被复用。
+- 嵌入式 PostgreSQL 版本解析：从 releases 列表查找 `embedded-pg-*` tag，而不是误把代码 release 当作 PG release。
+
 ## [0.4.0] - 2026-10-01
 
 ### Added
