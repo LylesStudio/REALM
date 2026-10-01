@@ -126,7 +126,14 @@ if ($env:REALM_INSTALL_SKIP_NPM -eq '1') {
   Write-RealmLog 'REALM_INSTALL_SKIP_NPM=1 -> stopping before npm ci'
   exit 0
 }
-Write-RealmLog 'installing npm dependencies (ci)'
+# 旧安装器可能在 node_modules 里留下损坏的本地 npm；npm ci 自身运行时无法
+# 删除正在使用的自身目录，因此先显式清掉再安装。
+$nodeModules = Join-Path $AppDir 'node_modules'
+if (Test-Path $nodeModules) {
+  Write-RealmLog 'cleaning stale node_modules before npm ci'
+  Remove-Item -Recurse -Force $nodeModules
+}
+Write-RealmLog 'installing npm dependencies (ci); this may take a few minutes'
 Push-Location $AppDir
 try {
   & npm ci
@@ -144,11 +151,13 @@ if ($EmbeddedPg -and -not $PgArtifact) {
   if ($arch -ne 'AMD64') {
     throw "-EmbeddedPg: no prebuilt artifact for Windows/$arch (available: windows-x64; ARM64 请用本地 PostgreSQL 17 + pgvector 或 Docker)"
   }
-  # 目标版本：显式 REALM_PG_VERSION > GitHub latest release API（静默失败回落内置）。
+  # 目标版本：显式 REALM_PG_VERSION > 从 releases 列表找最新的 embedded-pg-* tag
+  #（releases/latest 可能是代码 release vX.Y.Z，不能指望它含 pg- 前缀）。
   if (-not $pgArtVersion) {
     try {
-      $release = Invoke-RestMethod -TimeoutSec 8 -Uri 'https://api.github.com/repos/Silver-Aurora/REALM/releases/latest' -Headers @{ 'User-Agent' = 'realm-installer' }
-      if ($release.tag_name -match '^pg-(.+)$') { $pgArtVersion = $Matches[1] }
+      $releases = Invoke-RestMethod -TimeoutSec 15 -Uri 'https://api.github.com/repos/Silver-Aurora/REALM/releases?per_page=30' -Headers @{ 'User-Agent' = 'realm-installer' }
+      $pgRelease = $releases | Where-Object { $_.tag_name -match '^embedded-pg-' } | Sort-Object { [DateTime]$_.created_at } -Descending | Select-Object -First 1
+      if ($pgRelease -and $pgRelease.tag_name -match '^embedded-pg-(.+)$') { $pgArtVersion = $Matches[1] }
     } catch { }
     if (-not $pgArtVersion) { $pgArtVersion = '17.10' }
   }
@@ -202,11 +211,11 @@ if ($PgArtifact) {
     $pgTmp = $PgArtifact
     if ($PgArtifact -like 'http*') {
       $pgTmp = Join-Path ([IO.Path]::GetTempPath()) 'realm-embedded-pg.tar.gz'
-      Write-RealmLog "downloading $PgArtifact"
-      Invoke-WebRequest -UseBasicParsing -Uri $PgArtifact -OutFile $pgTmp
+      Write-RealmLog "downloading $PgArtifact (max 5 min)"
+      Invoke-WebRequest -UseBasicParsing -Uri $PgArtifact -OutFile $pgTmp -TimeoutSec 300
       if ($pgShaUrl) {
         $sumsTmp = Join-Path ([IO.Path]::GetTempPath()) 'realm-pg-sha256sums.txt'
-        Invoke-WebRequest -UseBasicParsing -Uri $pgShaUrl -OutFile $sumsTmp
+        Invoke-WebRequest -UseBasicParsing -Uri $pgShaUrl -OutFile $sumsTmp -TimeoutSec 60
         $expected = (Select-String -Path $sumsTmp -Pattern " $($PgArtifact.Split('/')[-1])`$").Line.Split(' ')[0]
         $actual = (Get-FileHash -Algorithm SHA256 $pgTmp).Hash.ToLowerInvariant()
         if ($expected -ne $actual) { throw "artifact checksum mismatch (expected $expected, got $actual)" }

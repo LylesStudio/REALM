@@ -103,7 +103,9 @@ if [[ "$node_ok" != 1 ]]; then
     mkdir -p "$REALM_HOME"
     tmp_tarball="$(mktemp)"
     trap 'rm -f "$tmp_tarball"' EXIT
-    curl -fsSL "$url" -o "$tmp_tarball" || die "failed to download $url"
+    log "downloading $url (max 3 min)"
+    curl -fSL --max-time 180 --progress-bar "$url" -o "$tmp_tarball" \
+      || die "failed to download $url (timeout or network error)"
     rm -rf "$NODE_DIR"
     mkdir -p "$NODE_DIR"
     tar -xJf "$tmp_tarball" -C "$NODE_DIR" --strip-components=1
@@ -176,7 +178,13 @@ if [[ "${REALM_INSTALL_SKIP_NPM:-0}" == 1 ]]; then
   log "REALM_INSTALL_SKIP_NPM=1 → stopping before npm ci"
   exit 0
 fi
-log "installing npm dependencies (ci)"
+# 旧安装器可能在 node_modules 里留下损坏的本地 npm；npm ci 自身运行时无法
+# 删除正在使用的自身目录（尤其 Windows），因此先显式清掉再安装。
+if [[ -d "$APP_DIR/node_modules" ]]; then
+  log "cleaning stale node_modules before npm ci"
+  rm -rf "$APP_DIR/node_modules"
+fi
+log "installing npm dependencies (ci); this may take a few minutes"
 npm --prefix "$APP_DIR" ci
 
 # --- 4. Embedded PostgreSQL（--embedded-pg 自动解析 / --pg-artifact 显式指定） ---
@@ -195,11 +203,13 @@ if [[ "$EMBEDDED_PG" == 1 && -z "$PG_ARTIFACT" ]]; then
       PG_PLATFORM="darwin-arm64" ;;
     *) die "--embedded-pg: unsupported OS: $(uname -s)" ;;
   esac
-  # 目标版本：显式 REALM_PG_VERSION > GitHub latest release API（静默失败回落内置）。
+  # 目标版本：显式 REALM_PG_VERSION > 从 releases 列表找最新的 embedded-pg-* tag
+  #（releases/latest 可能是代码 release vX.Y.Z，不能指望它含 pg- 前缀）。
   if [[ -z "$PG_ART_VERSION" ]]; then
-    api_version="$(curl -fsSL --max-time 8 \
-      "https://api.github.com/repos/Silver-Aurora/REALM/releases/latest" 2>/dev/null \
-      | grep -m1 '"tag_name"' | sed -E 's/.*"pg-([^"]+)".*/\1/')"
+    api_version="$(curl -fsSL --max-time 15 \
+      "https://api.github.com/repos/Silver-Aurora/REALM/releases?per_page=30" 2>/dev/null \
+      | grep -o '"tag_name": *"embedded-pg-[^"]*"' | head -n 1 \
+      | sed -E 's/.*"embedded-pg-([^"]+)".*/\1/')"
     PG_ART_VERSION="${api_version:-17.10}"
   fi
   PG_BASE="${REALM_PG_RELEASE_BASE:-https://github.com/Silver-Aurora/REALM/releases/download/embedded-pg-${PG_ART_VERSION}}"
@@ -222,11 +232,13 @@ if [[ -n "$PG_ARTIFACT" ]]; then
     if [[ "$PG_ARTIFACT" == http* ]]; then
       pg_tmp="$(mktemp "${TMPDIR:-/tmp}/realm-pg-artifact.XXXXXX.tar.gz")"
       trap 'rm -f "$pg_tmp"' EXIT
-      log "downloading $PG_ARTIFACT"
-      curl -fsSL "$PG_ARTIFACT" -o "$pg_tmp" || die "failed to download $PG_ARTIFACT"
+      log "downloading $PG_ARTIFACT (max 5 min)"
+      curl -fSL --max-time 300 --progress-bar "$PG_ARTIFACT" -o "$pg_tmp" \
+        || die "failed to download $PG_ARTIFACT (timeout or network error)"
       if [[ -n "$PG_SHA_URL" ]]; then
         sums_tmp="$(mktemp)"
-        curl -fsSL "$PG_SHA_URL" -o "$sums_tmp" || die "failed to download $PG_SHA_URL"
+        curl -fSL --max-time 60 --progress-bar "$PG_SHA_URL" -o "$sums_tmp" \
+          || die "failed to download $PG_SHA_URL"
         ( cd "$(dirname "$pg_tmp")" \
             && grep " $(basename "$PG_ARTIFACT")\$" "$sums_tmp" | sed "s| .*$|  $(basename "$pg_tmp")|" | sha256sum -c - ) \
           || die "artifact checksum mismatch"
