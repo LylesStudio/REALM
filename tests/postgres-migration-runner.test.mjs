@@ -81,7 +81,9 @@ test("migration checksums are line-ending stable and historical exceptions stay 
     runner,
     /89e694af2c732a27f3e31c7aafcebc8efc4586094c686a6cc0e4576c4deba361/,
   );
-  assert.match(runner, /legacyChecksums\.current === checksum/);
+  assert.match(runner, /migration checksum inventory \(all unresolved mismatches\)/);
+  assert.match(runner, /unresolvedMismatches/);
+  assert.match(runner, /legacyLineEndingChecksum/);
   assert.match(runner, /Applied migration was modified/);
 });
 

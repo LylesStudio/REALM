@@ -2,6 +2,13 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.7] - 2026-10-02
+
+### Fixed
+
+- migration runner 在 fail-closed 之前先 inventory 所有已应用但未识别的 checksum mismatch，避免旧数据库升级时每次只暴露一个文件。
+- inventory 同时显示 stored、当前 LF 与当前 CRLF checksum；只读诊断不修改 ledger 或业务数据。
+
 ## [0.4.6] - 2026-10-02
 
 ### Fixed

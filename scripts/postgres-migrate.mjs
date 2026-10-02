@@ -47,6 +47,31 @@ const LEGACY_MIGRATION_CHECKSUMS = new Map([
   ],
 ]);
 
+function readMigrationChecksums(filename) {
+  const sql = readFileSync(resolve(migrationDirectory, filename), "utf8");
+  const normalizedSql = sql.replace(/\r\n/g, "\n");
+  const checksum = createHash("sha256").update(normalizedSql).digest("hex");
+  const legacyLineEndingChecksum = createHash("sha256")
+    .update(normalizedSql.replace(/\n/g, "\r\n"))
+    .digest("hex");
+  return { sql, checksum, legacyLineEndingChecksum };
+}
+
+function classifyAppliedChecksum(filename, storedChecksum, checksums) {
+  const legacyChecksums = LEGACY_MIGRATION_CHECKSUMS.get(filename);
+  const acceptedLineEnding = storedChecksum === checksums.legacyLineEndingChecksum;
+  const acceptedHistorical =
+    legacyChecksums?.accepted.has(storedChecksum)
+    && legacyChecksums.current === checksums.checksum;
+  return {
+    acceptedHistorical,
+    acceptedLineEnding,
+    unresolved: storedChecksum !== checksums.checksum
+      && !acceptedLineEnding
+      && !acceptedHistorical,
+  };
+}
+
 if (!connectionString) {
   throw new Error("DATABASE_URL is required. Copy .env.example to .env.local.");
 }
@@ -131,18 +156,45 @@ try {
     .filter((filename) => filename.endsWith(".sql"))
     .sort();
 
+  const appliedRows = await client.query(
+    `SELECT filename, checksum FROM realm_schema_migrations ORDER BY filename`,
+  );
+  const appliedByFilename = new Map(
+    appliedRows.rows.map((row) => [row.filename, row.checksum]),
+  );
+  const unresolvedMismatches = [];
+  for (const filename of filenames) {
+    const storedChecksum = appliedByFilename.get(filename);
+    if (!storedChecksum) {
+      continue;
+    }
+    const checksums = readMigrationChecksums(filename);
+    const classification = classifyAppliedChecksum(filename, storedChecksum, checksums);
+    if (classification.unresolved) {
+      unresolvedMismatches.push({
+        filename,
+        storedChecksum,
+        currentChecksum: checksums.checksum,
+        legacyLineEndingChecksum: checksums.legacyLineEndingChecksum,
+      });
+    }
+  }
+  if (unresolvedMismatches.length > 0) {
+    console.error("migration checksum inventory (all unresolved mismatches):");
+    for (const mismatch of unresolvedMismatches) {
+      console.error(
+        `  ${mismatch.filename}: stored ${mismatch.storedChecksum}, current ${mismatch.currentChecksum}, CRLF ${mismatch.legacyLineEndingChecksum}`,
+      );
+    }
+  }
+
   // v37 C4 drain：应用 0043（capability 最终 body）时 runner 先以
   // lock_timeout=30s 持 pg_advisory_lock(7200043)——阻塞即 capability
   // 在途 → no-go；持锁期间新 admission（pg_advisory_xact_lock 同 key）阻塞，
   // 解锁后以 0043 新 catalog 继续；runner 崩溃 → session 级锁随连接释放。
 
   for (const filename of filenames) {
-    const sql = readFileSync(resolve(migrationDirectory, filename), "utf8");
-    const normalizedSql = sql.replace(/\r\n/g, "\n");
-    const checksum = createHash("sha256").update(normalizedSql).digest("hex");
-    const legacyLineEndingChecksum = createHash("sha256")
-      .update(normalizedSql.replace(/\n/g, "\r\n"))
-      .digest("hex");
+    const { sql, checksum, legacyLineEndingChecksum } = readMigrationChecksums(filename);
     await client.query("BEGIN");
     try {
       const existing = await client.query(
