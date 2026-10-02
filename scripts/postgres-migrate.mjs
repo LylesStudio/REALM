@@ -8,19 +8,10 @@ const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const migrationDirectory = resolve(projectRoot, "database/postgres/migrations");
 const connectionString = process.env.DATABASE_URL;
 
-// A compatibility entry is allowed only for an exact, known historical
-// checksum. The current checksum must still match the immutable source below;
-// every other historical edit fails closed.
+// Migration checksums are canonicalized to LF so source checkout line endings
+// do not alter the ledger. The historical map below is only for exact known
+// semantic checkpoints; every other content edit fails closed.
 const LEGACY_MIGRATION_CHECKSUMS = new Map([
-  [
-    "0014_scene_crystallization_grants.sql",
-    {
-      // Windows installs before newline canonicalization could record the
-      // exact CRLF form while the public source ships LF.
-      accepted: new Set(["128be6d2fb33f0fcec623aed88c183adba5aad382e5ae46f5f5475406a17bce6"]),
-      current: "d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9",
-    },
-  ],
   [
     "0030_character_instance_state.sql",
     {
@@ -128,8 +119,10 @@ try {
 
   for (const filename of filenames) {
     const sql = readFileSync(resolve(migrationDirectory, filename), "utf8");
-    const checksum = createHash("sha256")
-      .update(sql.replace(/\r\n/g, "\n"))
+    const normalizedSql = sql.replace(/\r\n/g, "\n");
+    const checksum = createHash("sha256").update(normalizedSql).digest("hex");
+    const legacyLineEndingChecksum = createHash("sha256")
+      .update(normalizedSql.replace(/\n/g, "\r\n"))
       .digest("hex");
     await client.query("BEGIN");
     try {
@@ -139,16 +132,21 @@ try {
       );
       if (existing.rowCount === 1) {
         if (existing.rows[0].checksum !== checksum) {
+          const storedChecksum = existing.rows[0].checksum;
           const legacyChecksums = LEGACY_MIGRATION_CHECKSUMS.get(filename);
-          if (
-            !legacyChecksums?.accepted.has(existing.rows[0].checksum)
-            || legacyChecksums.current !== checksum
-          ) {
+          const acceptedLineEnding = storedChecksum === legacyLineEndingChecksum;
+          const acceptedHistorical =
+            legacyChecksums?.accepted.has(storedChecksum)
+            && legacyChecksums.current === checksum;
+          if (!acceptedLineEnding && !acceptedHistorical) {
             throw new Error(
-              `Applied migration was modified: ${filename} (stored ${existing.rows[0].checksum}, current ${checksum})`,
+              `Applied migration was modified: ${filename} (stored ${storedChecksum}, current ${checksum})`,
             );
           }
-          console.warn(`accept legacy checksum for ${filename}; current SQL is immutable`);
+          const compatibilityKind = acceptedLineEnding ? "line-ending" : "historical";
+          console.warn(
+            `accept legacy ${compatibilityKind} checksum for ${filename}; current SQL is immutable`,
+          );
         }
         await client.query("COMMIT");
         console.log(`skip  ${filename}`);

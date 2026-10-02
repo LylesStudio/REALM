@@ -13,8 +13,8 @@ function readProjectFile(relativePath) {
 
 const runner = readProjectFile("scripts/postgres-migrate.mjs");
 const lifecycle = readProjectFile("scripts/local-postgres.mjs");
-const sceneMigration = readProjectFile(
-  "database/postgres/migrations/0014_scene_crystallization_grants.sql",
+const runtimeContractMigration = readProjectFile(
+  "database/postgres/migrations/0001_runtime_contract.sql",
 );
 
 function sha256(value) {
@@ -42,24 +42,18 @@ test("each migration and its ledger receipt share one locked transaction", () =>
   assert.match(runner, /await client\.query\("ROLLBACK"\)/);
 });
 
-test("known historical checksums are narrowly compatible and line-ending stable", () => {
+test("migration checksums are line-ending stable and historical exceptions stay narrow", () => {
   assert.match(runner, /LEGACY_MIGRATION_CHECKSUMS/);
-  assert.match(runner, /0014_scene_crystallization_grants\.sql/);
-  assert.match(
-    runner,
-    /128be6d2fb33f0fcec623aed88c183adba5aad382e5ae46f5f5475406a17bce6/,
-  );
-  assert.match(
-    runner,
-    /d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9/,
+  assert.match(runner, /normalizedSql\.replace\(\/\\n\/g, "\\r\\n"\)/);
+  assert.match(runner, /acceptedLineEnding/);
+  assert.match(runner, /acceptedHistorical/);
+  assert.equal(
+    sha256(runtimeContractMigration),
+    "0f7245e65b776f54163f0e9cede44fe0f20df21cbb54108865f670f94265c679",
   );
   assert.equal(
-    sha256(sceneMigration),
-    "d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9",
-  );
-  assert.equal(
-    sha256(sceneMigration.replace(/\n/g, "\r\n")),
-    "128be6d2fb33f0fcec623aed88c183adba5aad382e5ae46f5f5475406a17bce6",
+    sha256(runtimeContractMigration.replace(/\n/g, "\r\n")),
+    "62f4b0802be301f3fbc26c325a44564ca3298ecbb1111c616e65d1100e75d84e",
   );
   assert.match(runner, /0030_character_instance_state\.sql/);
   assert.match(
@@ -75,8 +69,7 @@ test("known historical checksums are narrowly compatible and line-ending stable"
     runner,
     /89e694af2c732a27f3e31c7aafcebc8efc4586094c686a6cc0e4576c4deba361/,
   );
-  assert.match(runner, /replace\(\/\\r\\n\/g, "\\n"\)/);
-  assert.match(runner, /legacyChecksums\.current !== checksum/);
+  assert.match(runner, /legacyChecksums\.current === checksum/);
   assert.match(runner, /Applied migration was modified/);
 });
 

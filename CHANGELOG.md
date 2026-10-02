@@ -2,6 +2,12 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.4] - 2026-10-02
+
+### Fixed
+
+- 将 Windows 旧 ledger 的 CRLF 兼容从单个 `0014` migration 扩展为所有 migration：只接受当前 SQL 的精确 CRLF checksum，任何实际内容漂移仍拒绝。
+
 ## [0.4.3] - 2026-10-02
 
 ### Fixed
