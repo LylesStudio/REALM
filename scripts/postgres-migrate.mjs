@@ -16,9 +16,18 @@ const LEGACY_MIGRATION_CHECKSUMS = new Map([
   [
     "0014_scene_crystallization_grants.sql",
     {
-      // Pre-public internal draft observed in an existing Windows database.
+      // Historical variant observed in an existing Windows database.
       accepted: new Set(["d339e9d58db0e118a5361fa4c401367c7a5a4c95f349e95372962fdc5e754d46"]),
       current: "d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9",
+      reapply: true,
+    },
+  ],
+  [
+    "0015_account_ui_language.sql",
+    {
+      // Historical variant observed in an existing Windows database.
+      accepted: new Set(["68d3786e29566d8bc3810ae498f9c31a81039808e1335823f1fdd7836c70e603"]),
+      current: "6fb3380d464d033ab64e71cb180b6482951dacb5dab7729d942e63aaee0a2b14",
       reapply: true,
     },
   ],

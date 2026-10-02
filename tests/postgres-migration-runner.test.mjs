@@ -62,6 +62,11 @@ test("migration checksums are line-ending stable and historical exceptions stay 
   );
   assert.match(runner, /reapply: true/);
   assert.match(runner, /ledger converged to current SQL/);
+  assert.match(runner, /0015_account_ui_language\.sql/);
+  assert.match(
+    runner,
+    /68d3786e29566d8bc3810ae498f9c31a81039808e1335823f1fdd7836c70e603/,
+  );
   assert.match(runner, /0030_character_instance_state\.sql/);
   assert.match(
     runner,

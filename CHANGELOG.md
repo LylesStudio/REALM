@@ -2,6 +2,13 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.6] - 2026-10-02
+
+### Fixed
+
+- 兼容现有 Windows 数据库中 `0015_account_ui_language.sql` 的精确历史 checksum；升级时幂等重放当前语言字段、约束与权限定义，并将 ledger 收敛到当前 checksum。
+- `0014` 与 `0015` 的历史兼容均限定为精确 hash，其他未知 migration checksum 继续 fail-closed。
+
 ## [0.4.5] - 2026-10-02
 
 ### Fixed
