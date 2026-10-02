@@ -2,6 +2,14 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.9] - 2026-10-02
+
+### Fixed
+
+- 为公开发布前 snapshot `53e9f5a0b0eafca24659bf877f27c205912250ab` 的 15 条 comment-only migration 同时加入精确 LF 与 CRLF 历史 checksum；macOS/Linux 与 Windows 旧 ledger 均可只收敛 ledger，不重放 SQL。
+- 为 `0014`、`0015` 的已验证历史版本补充 LF checksum，保留幂等重放当前 SQL 与精确 hash 白名单。
+- 未知内容漂移仍一次性 inventory 并 fail-closed，不因平台或换行格式自动放行。
+
 ## [0.4.8] - 2026-10-02
 
 ### Fixed
