@@ -8,11 +8,19 @@ const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const migrationDirectory = resolve(projectRoot, "database/postgres/migrations");
 const connectionString = process.env.DATABASE_URL;
 
-// 0030 briefly shipped in checkpoint 8e1912f with the same state grant plus
-// activity grants. Accept that one exact historical checksum so a database
-// that applied the checkpoint can continue to the immutable follow-up
-// migrations; every other historical edit still fails closed.
+// A compatibility entry is allowed only for an exact, known historical
+// checksum. The current checksum must still match the immutable source below;
+// every other historical edit fails closed.
 const LEGACY_MIGRATION_CHECKSUMS = new Map([
+  [
+    "0014_scene_crystallization_grants.sql",
+    {
+      // Windows installs before newline canonicalization could record the
+      // exact CRLF form while the public source ships LF.
+      accepted: new Set(["128be6d2fb33f0fcec623aed88c183adba5aad382e5ae46f5f5475406a17bce6"]),
+      current: "d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9",
+    },
+  ],
   [
     "0030_character_instance_state.sql",
     {
@@ -120,7 +128,9 @@ try {
 
   for (const filename of filenames) {
     const sql = readFileSync(resolve(migrationDirectory, filename), "utf8");
-    const checksum = createHash("sha256").update(sql).digest("hex");
+    const checksum = createHash("sha256")
+      .update(sql.replace(/\r\n/g, "\n"))
+      .digest("hex");
     await client.query("BEGIN");
     try {
       const existing = await client.query(
@@ -134,7 +144,9 @@ try {
             !legacyChecksums?.accepted.has(existing.rows[0].checksum)
             || legacyChecksums.current !== checksum
           ) {
-            throw new Error(`Applied migration was modified: ${filename}`);
+            throw new Error(
+              `Applied migration was modified: ${filename} (stored ${existing.rows[0].checksum}, current ${checksum})`,
+            );
           }
           console.warn(`accept legacy checksum for ${filename}; current SQL is immutable`);
         }

@@ -2,6 +2,14 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.3] - 2026-10-02
+
+### Fixed
+
+- Windows 旧安装目录的 PostgreSQL migration ledger 若记录了 `0014` 的 CRLF checksum，升级时现在会按明确白名单兼容，不会误报迁移文件被修改。
+- PostgreSQL migration checksum 统一按 LF 计算，避免 Windows 换行格式让后续升级再次产生跨平台漂移；未知 checksum 仍 fail-closed。
+- migration checksum 错误现在同时报告已存储与当前 checksum，便于定位真实的历史漂移。
+
 ## [Unreleased]
 
 ## [0.4.2] - 2026-10-01
