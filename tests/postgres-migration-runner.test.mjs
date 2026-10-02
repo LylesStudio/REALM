@@ -55,6 +55,13 @@ test("migration checksums are line-ending stable and historical exceptions stay 
     sha256(runtimeContractMigration.replace(/\n/g, "\r\n")),
     "62f4b0802be301f3fbc26c325a44564ca3298ecbb1111c616e65d1100e75d84e",
   );
+  assert.match(runner, /0014_scene_crystallization_grants\.sql/);
+  assert.match(
+    runner,
+    /d339e9d58db0e118a5361fa4c401367c7a5a4c95f349e95372962fdc5e754d46/,
+  );
+  assert.match(runner, /reapply: true/);
+  assert.match(runner, /ledger converged to current SQL/);
   assert.match(runner, /0030_character_instance_state\.sql/);
   assert.match(
     runner,

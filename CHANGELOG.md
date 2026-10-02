@@ -2,6 +2,13 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.5] - 2026-10-02
+
+### Fixed
+
+- 兼容公开发布前 Windows 安装留下的 `0014_scene_crystallization_grants.sql` 精确历史 checksum；升级时幂等重放当前授权 SQL，并将 ledger 收敛到当前 checksum。
+- 其他未知 migration checksum 仍 fail-closed，不会被宽泛放行。
+
 ## [0.4.4] - 2026-10-02
 
 ### Fixed

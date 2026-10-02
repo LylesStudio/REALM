@@ -10,8 +10,18 @@ const connectionString = process.env.DATABASE_URL;
 
 // Migration checksums are canonicalized to LF so source checkout line endings
 // do not alter the ledger. The historical map below is only for exact known
-// semantic checkpoints; every other content edit fails closed.
+// semantic checkpoints; selected entries may request an idempotent reconciliation
+// before their ledger receipt is converged. Every other content edit fails closed.
 const LEGACY_MIGRATION_CHECKSUMS = new Map([
+  [
+    "0014_scene_crystallization_grants.sql",
+    {
+      // Pre-public internal draft observed in an existing Windows database.
+      accepted: new Set(["d339e9d58db0e118a5361fa4c401367c7a5a4c95f349e95372962fdc5e754d46"]),
+      current: "d2ad52bb658f00767c30cbada27a85eb9b407685998288967001c399f810e9c9",
+      reapply: true,
+    },
+  ],
   [
     "0030_character_instance_state.sql",
     {
@@ -131,6 +141,7 @@ try {
         [filename],
       );
       if (existing.rowCount === 1) {
+        let reconciled = false;
         if (existing.rows[0].checksum !== checksum) {
           const storedChecksum = existing.rows[0].checksum;
           const legacyChecksums = LEGACY_MIGRATION_CHECKSUMS.get(filename);
@@ -143,13 +154,25 @@ try {
               `Applied migration was modified: ${filename} (stored ${storedChecksum}, current ${checksum})`,
             );
           }
-          const compatibilityKind = acceptedLineEnding ? "line-ending" : "historical";
-          console.warn(
-            `accept legacy ${compatibilityKind} checksum for ${filename}; current SQL is immutable`,
-          );
+          if (acceptedHistorical && legacyChecksums.reapply) {
+            await client.query(sql);
+            await client.query(
+              `UPDATE realm_schema_migrations SET checksum = $2 WHERE filename = $1`,
+              [filename, checksum],
+            );
+            reconciled = true;
+            console.warn(
+              `reapply legacy migration ${filename}; ledger converged to current SQL`,
+            );
+          } else {
+            const compatibilityKind = acceptedLineEnding ? "line-ending" : "historical";
+            console.warn(
+              `accept legacy ${compatibilityKind} checksum for ${filename}; current SQL is immutable`,
+            );
+          }
         }
         await client.query("COMMIT");
-        console.log(`skip  ${filename}`);
+        console.log(`${reconciled ? "reconcile" : "skip"}  ${filename}`);
         continue;
       }
 
