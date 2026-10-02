@@ -17,6 +17,69 @@ const runtimeContractMigration = readProjectFile(
   "database/postgres/migrations/0001_runtime_contract.sql",
 );
 
+const legacyPublicSnapshotCommentMigrations = {
+  "0016_world_files.sql": {
+    stored: "4d8bdd10b5f965fcd9d18fe263110a78edaf91d39a00f04f37af0a5ed8b07cf3",
+    current: "be40c8821a57658377132407a7625e9b923b504c269076c1df314f7c9d83df41",
+  },
+  "0017_account_last_opened.sql": {
+    stored: "7d27d5410811590e8bc8883d678c0a4608a5d0519c141f347229b8dce76d6cb1",
+    current: "f4411501cd31d9bd6e0eeffe30d23a5d81c01e352e05f365b113fcba15516233",
+  },
+  "0019_record_first_nights.sql": {
+    stored: "339a0a87acdb44181de00c3b0afe8221adb83e8d9bc7688bdb20efad6f0552ef",
+    current: "b5269f93fabce262ab25ba4f90cacd28a76643bf420068c30f065c8cc3ee0742",
+  },
+  "0020_record_self_play_sessions.sql": {
+    stored: "6442d0a079d6a8c563946991006494d5d4a9ff2056436231813274de8c741e98",
+    current: "2f5dc0caeb16a9e414fd991b3b7e6ec26dbd79ad7942afcaf8ab067988cf93a3",
+  },
+  "0021_world_admin.sql": {
+    stored: "983169670dc587bb8eb20c722f43101b46bdbe671c67db70295803f1777776e5",
+    current: "f649ee8195fc2308f8156d149dda60b71af0af568a22a3721276e28047f410dc",
+  },
+  "0022_worldline_merge_grants.sql": {
+    stored: "de36c3a3fe3c97b2df4ac98e1980827ea13719307d54a7c4e4f30b6c2f943b01",
+    current: "60d237169f34a796aedad9004a08ec9ecb9fed9b17f300211bef507cd9297d9f",
+  },
+  "0023_library_runtime_grants.sql": {
+    stored: "ea905c5b54589cddd6da4b615697af94bfbfbcc49db4c511bc4a080bd639dab5",
+    current: "871f4d45f39fb87569ec2a9129d5beb88e13c54af0fb946a45a116888354cc2a",
+  },
+  "0024_graph_invalidation_events.sql": {
+    stored: "ff2f6a9a81e7b14dbee372cfbaa724211eac74f3cf0ca5c2145ed2189afd49a3",
+    current: "3c25e8ce130ee20c8f8f23364752be9dcb4a041c03a69044dda58c8097139cbb",
+  },
+  "0025_propagation_topology_semantic_scope.sql": {
+    stored: "b2639e3ffb3b28ccbdfd1711590536cd91ba91dca38ba7894f5e6924121cb68d",
+    current: "fa5c88a163ccdfc419cb23cdef11b11b169021c7190055784b75354136e05119",
+  },
+  "0026_canon_security_audience.sql": {
+    stored: "bd529dfb2a2c1b4e0ca9663ee7309091e5945569f0d5ea64cac1a02d5ffacb33",
+    current: "d28fa4bf367fe7100538831f5b9b7f88853301bfdc89979808e1cfce6a94795b",
+  },
+  "0039_scene_weather_snapshot.sql": {
+    stored: "4cf5d99bd7d066e14b7d9b3f0e37ed8713ba0c2e8c114a595646cd5edacdb0f1",
+    current: "68277ddeed43eb85a05f3b045b694d22543f8f04bd55dbcfe220d81a2a889a2f",
+  },
+  "0040_scene_display_time_snapshot.sql": {
+    stored: "2d82ca8f4e8b5dd5cd3db934151e389b1c65c9017ea9a87e6d17e36c554ddc3e",
+    current: "c4ea868de7a7fd6f0d87100d7c84d57739e8702487c5d4ef1313bbe2d2a45c50",
+  },
+  "0045_lobby_rooms.sql": {
+    stored: "14955ba1817d0a78487c13c4b7aecebbf4974b1ec4eb74d820dbd3d2aa7b4c6d",
+    current: "739bd2a3b262b66d878b34d82300c3c4ce976d44a2c52b7ded929a2f0c745adc",
+  },
+  "0046_lobby_room_world_link.sql": {
+    stored: "6178fc7078cda1322de257281fff0915919fa02e3bc692781938ad7eab066ae0",
+    current: "67d11c044e50ea29a931153c34e2645818b065c27e3c68b0e399a91dfb83f1e1",
+  },
+  "0047_lobby_host_lease.sql": {
+    stored: "019957003d45d126fd56db511a74e75569fffef88e6dc43de61b2da7d8bf1771",
+    current: "6bc8db5d17a0cc478931bc78adfc58eabcc300a0ae92686a2330ca5753e0d5bb",
+  },
+};
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -85,6 +148,16 @@ test("migration checksums are line-ending stable and historical exceptions stay 
   assert.match(runner, /unresolvedMismatches/);
   assert.match(runner, /legacyLineEndingChecksum/);
   assert.match(runner, /Applied migration was modified/);
+  assert.match(runner, /53e9f5a0b0eafca24659bf877f27c205912250ab/);
+  assert.match(runner, /convergeLedger: true/);
+  for (const [filename, checksums] of Object.entries(legacyPublicSnapshotCommentMigrations)) {
+    assert.ok(runner.includes(filename));
+    assert.ok(runner.includes(checksums.stored));
+    assert.equal(
+      sha256(readProjectFile(`database/postgres/migrations/${filename}`)),
+      checksums.current,
+    );
+  }
 });
 
 test("local lifecycle checks both project ownership and socket readiness", () => {

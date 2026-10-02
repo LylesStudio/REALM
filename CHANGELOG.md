@@ -2,6 +2,13 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [0.4.8] - 2026-10-02
+
+### Fixed
+
+- 识别公开发布前 snapshot `53e9f5a0b0eafca24659bf877f27c205912250ab` 中 15 条已应用 migration 的精确 CRLF checksum；这些历史版本只改了文档注释，升级时只收敛 ledger，不重放 SQL。
+- 未知内容漂移仍一次性 inventory 并 fail-closed；兼容清单只在当前 SQL checksum 与已验证版本完全匹配时生效。
+
 ## [0.4.7] - 2026-10-02
 
 ### Fixed
