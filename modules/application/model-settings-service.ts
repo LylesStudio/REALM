@@ -5,6 +5,7 @@ import {
   jsonOutputInstruction,
   requestStructuredObject,
   type ModelGateway,
+  type ModelBilling,
   type ModelProviderSettings,
   type ModelSettingsStore,
   type PublicModelProviderSettings,
@@ -32,6 +33,7 @@ export interface ModelSettingsService {
   get(): Promise<PublicModelSettingsSnapshot>;
   save(draft: ModelSettingsDraft): Promise<PublicModelSettingsSnapshot>;
   discover(draft: ModelSettingsDraft): Promise<PublicModelSettingsSnapshot>;
+  billing(draft: ModelSettingsDraft): Promise<ModelBilling>;
   test(draft: ModelSettingsDraft): Promise<{
     settings: PublicModelProviderSettings;
     model: string;
@@ -139,6 +141,18 @@ export function createModelSettingsService(options: {
       }, clock()), true);
       invalidateGatewayCache();
       return snapshot();
+    },
+
+    async billing(draft) {
+      const candidate = await settingsFromDraft(draft);
+      const models = await gatewayFactory(candidate).discoverModels();
+      const selected = models.find((model) => model.id === candidate.selectedModel);
+      return {
+        providerId: candidate.providerId,
+        modelId: candidate.selectedModel,
+        pricing: selected?.pricing ?? null,
+        costClass: selected?.costClass ?? "unknown",
+      };
     },
 
     async test(draft) {

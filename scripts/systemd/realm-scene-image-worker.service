@@ -18,12 +18,12 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/lyle/works/REALM
+WorkingDirectory=%h/works/REALM
 # 环境经 .env.local 装载（loopback runtime 连接串；不落任何凭据到本文件）。
 # node 用绝对路径（与 realm-dev.service 同源运行时）：user manager 的 PATH
 # 会经 mise shims 解析到其他主版本，/usr/bin/env node 不可靠。
 # supervisor 自身是纯 .mjs；worker 子进程由它带 --experimental-strip-types 启动。
-ExecStart=/home/lyle/.hermes/node/bin/node --env-file-if-exists=.env.local launcher/scene-image-worker-host.mjs
+ExecStart=/usr/bin/env node --env-file-if-exists=.env.local launcher/scene-image-worker-host.mjs
 Restart=on-failure
 RestartSec=5s
 

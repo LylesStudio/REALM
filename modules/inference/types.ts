@@ -88,6 +88,14 @@ export type ModelPricing = {
   internalReasoningUsdPerToken: number | null;
 };
 
+/** 当前供应商对选定模型返回的计费快照；pricing=null 必须显示为未知。 */
+export type ModelBilling = {
+  providerId: ModelProviderId;
+  modelId: string;
+  pricing: ModelPricing | null;
+  costClass: ModelCostClass;
+};
+
 export type DiscoveredModel = {
   id: string;
   name: string;

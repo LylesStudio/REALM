@@ -95,7 +95,7 @@ test("operator fixture selector requires the exact positional spec target (false
     ["tests/gui/../gui/f-comfyui-operator.spec.ts"],
     ["./tests/gui/f-comfyui-operator.spec.ts"],
     ["f-comfyui-operator.spec.ts"],                          // 裸 basename
-    ["/home/lyle/works/REALM/tests/gui/f-comfyui-operator.spec.ts"], // 绝对路径
+    ["/workspace/REALM/tests/gui/f-comfyui-operator.spec.ts"], // 绝对路径
     ["tests/gui/deep/f-comfyui-operator.spec.ts"],
     ["--grep=tests/gui/f-comfyui-operator.spec.ts"],          // --opt=value 形态
   ];
@@ -161,7 +161,7 @@ test("operator fixture selector is fail-closed across the full Playwright CLI va
   for (const args of [
     ["unrelated/f-comfyui-operator.spec.ts"],
     ["f-comfyui-operator.spec.ts"],
-    ["/home/lyle/works/REALM/tests/gui/f-comfyui-operator.spec.ts"],
+    ["/workspace/REALM/tests/gui/f-comfyui-operator.spec.ts"],
     ["./tests/gui/f-comfyui-operator.spec.ts"],
     ["tests/gui/../gui/f-comfyui-operator.spec.ts"],
     ["tests/gui/deep/f-comfyui-operator.spec.ts"],

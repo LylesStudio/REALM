@@ -50,6 +50,12 @@ export async function POST(request: Request) {
         settings: await getModelSettingsService().discover(body),
       }, { headers: { "Cache-Control": "no-store" } });
     }
+    if (action === "billing") {
+      return Response.json({
+        ok: true as const,
+        billing: await getModelSettingsService().billing(body),
+      }, { headers: { "Cache-Control": "no-store" } });
+    }
     if (action === "test") {
       return Response.json({
         ok: true as const,

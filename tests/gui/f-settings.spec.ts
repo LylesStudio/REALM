@@ -35,6 +35,8 @@ test.describe("F. 模型设置页（离线 fake provider）", () => {
     const modelList = page.locator(".model-list");
     await expect(modelList).toContainText(FAKE_PROVIDER_MODEL, { timeout: 30_000 });
     await expect(page.locator(".settings-notice.is-success")).toContainText("已发现");
+    await page.getByRole("button", { name: "查询当前费率" }).click();
+    await expect(page.locator('[data-testid="model-billing"]')).toContainText("费率未知", { timeout: 30_000 });
   });
 
   test("F3 连接测试：fake 探针返回成功", async ({ page }) => {

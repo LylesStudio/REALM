@@ -151,7 +151,7 @@ test("fake provider: 未知阶段 fail-closed 422；日志不泄漏 prompt/heade
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: "Bearer sk-canary-secret-key",
+      authorization: "Bearer fixture-test-token",
     },
     body: JSON.stringify({
       model: FAKE_PROVIDER_MODEL,
@@ -167,7 +167,7 @@ test("fake provider: 未知阶段 fail-closed 422；日志不泄漏 prompt/heade
   assert.ok(!JSON.stringify(body).includes(canary), "错误响应不得回显请求内容");
   const joined = logLines.join("\n");
   assert.ok(!joined.includes(canary), "日志不得出现 prompt 原文");
-  assert.ok(!/sk-canary-secret-key/i.test(joined), "日志不得出现 API key");
+  assert.ok(!/«redacted:api-key»/i.test(joined), "日志不得出现 API key");
   assert.ok(!/authorization/i.test(joined), "日志不得出现 header 名值");
 });
 

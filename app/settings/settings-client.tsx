@@ -12,6 +12,8 @@ import {
 import {
   MODEL_PROVIDER_CATALOG,
   type DiscoveredModel,
+  type ModelBilling,
+  type ModelPricing,
   type ModelProviderId,
   type ModelThinkingMode,
   type PublicModelProviderSettings,
@@ -33,7 +35,7 @@ type SettingsState = {
   maxTokens: number;
 };
 
-type Operation = "save" | "discover" | "test" | null;
+type Operation = "save" | "discover" | "billing" | "test" | null;
 const MODEL_PAGE_SIZE = 20;
 
 type ComfyDraft = {
@@ -56,6 +58,7 @@ export function ModelSettingsClient() {
   const [modelQuery, setModelQuery] = useState("");
   const [freeOnly, setFreeOnly] = useState(false);
   const [modelPage, setModelPage] = useState(0);
+  const [billing, setBilling] = useState<ModelBilling | null>(null);
   const [comfy, setComfy] = useState<ComfyDraft | null>(null);
   const [comfySnapshot, setComfySnapshot] = useState<ComfySnapshot | null>(null);
   const [comfyBusy, setComfyBusy] = useState<"save" | "test" | null>(null);
@@ -141,6 +144,7 @@ export function ModelSettingsClient() {
     setOperation(action);
     setError(null);
     setNotice(null);
+    if (action === "billing") setBilling(null);
     try {
       const response = await fetch("/api/settings/model-provider", {
         method: action === "save" ? "PUT" : "POST",
@@ -152,7 +156,12 @@ export function ModelSettingsClient() {
       });
       const body: unknown = await response.json();
       if (!response.ok) throw new Error(readError(body, uiText("ui.settings.errOperation", uiLanguage)));
-      if (action === "test") {
+      if (action === "billing") {
+        const result = parseBillingEnvelope(body);
+        if (!result) throw new Error(uiText("ui.settings.errInvalidBilling", uiLanguage));
+        setBilling(result);
+        setNotice(uiText("ui.settings.billingOk", uiLanguage, { model: result.modelId }));
+      } else if (action === "test") {
         const result = parseTestEnvelope(body);
         if (!result) throw new Error(uiText("ui.settings.errInvalidProbe", uiLanguage));
         setNotice(uiText("ui.settings.testOk", uiLanguage, {
@@ -168,6 +177,7 @@ export function ModelSettingsClient() {
         );
         if (!activeProfile) throw new Error(uiText("ui.settings.errMissingProfile", uiLanguage));
         setDraft(toDraft(activeProfile));
+        setBilling(null);
         if (action === "discover") setModelPage(0);
         setNotice(action === "discover"
           ? uiText("ui.settings.discoverOk", uiLanguage, {
@@ -258,6 +268,7 @@ export function ModelSettingsClient() {
     const profile = settings.providers.find((item) => item.providerId === providerId);
     if (!profile) return;
     setDraft(toDraft(profile));
+    setBilling(null);
     setNotice(null);
     setError(null);
     setModelQuery("");
@@ -303,6 +314,26 @@ export function ModelSettingsClient() {
     visibleModelPage * MODEL_PAGE_SIZE,
     (visibleModelPage + 1) * MODEL_PAGE_SIZE,
   );
+  const selectedCachedModel = activeProfile.availableModels.find(
+    (model) => model.id === draft.selectedModel,
+  );
+  const canUseCachedBilling = draft.baseUrl === activeProfile.baseUrl && !draft.apiKey.trim();
+  const currentBilling: ModelBilling = billing?.providerId === draft.providerId
+    && billing.modelId === draft.selectedModel
+    ? billing
+    : canUseCachedBilling
+      ? {
+          providerId: draft.providerId,
+          modelId: draft.selectedModel,
+          pricing: selectedCachedModel?.pricing ?? null,
+          costClass: selectedCachedModel?.costClass ?? "unknown",
+        }
+      : {
+          providerId: draft.providerId,
+          modelId: draft.selectedModel,
+          pricing: null,
+          costClass: "unknown",
+        };
 
   return (
     <div className="settings-shell">
@@ -400,7 +431,10 @@ export function ModelSettingsClient() {
                 <span>API Base URL</span>
                 <input
                   value={draft.baseUrl}
-                  onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
+                  onChange={(event) => {
+                    setDraft({ ...draft, baseUrl: event.target.value });
+                    setBilling(null);
+                  }}
                   spellCheck={false}
                 />
               </label>
@@ -412,7 +446,10 @@ export function ModelSettingsClient() {
                   type="password"
                   autoComplete="new-password"
                   value={draft.apiKey}
-                  onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })}
+                  onChange={(event) => {
+                    setDraft({ ...draft, apiKey: event.target.value });
+                    setBilling(null);
+                  }}
                   placeholder={activeProfile.apiKeyConfigured
                     ? uiText("ui.settings.apiKeyKeepPlaceholder", uiLanguage)
                     : uiText("ui.settings.apiKeyEnterPlaceholder", uiLanguage)}
@@ -462,7 +499,10 @@ export function ModelSettingsClient() {
                     name="selected-model"
                     value={model.id}
                     checked={draft.selectedModel === model.id}
-                    onChange={() => setDraft({ ...draft, selectedModel: model.id })}
+                    onChange={() => {
+                      setDraft({ ...draft, selectedModel: model.id });
+                      setBilling(null);
+                    }}
                   />
                   <span>
                     <strong>{modelName(model)}</strong>
@@ -500,6 +540,23 @@ export function ModelSettingsClient() {
                 type="button"
               >
                 {uiText("ui.settings.nextPage", uiLanguage)}
+              </button>
+            </div>
+            <div className="model-billing" data-testid="model-billing">
+              <div>
+                <span className="eyebrow">{uiText("ui.settings.billingLabel", uiLanguage)}</span>
+                <strong>{billingRate(currentBilling, uiLanguage)}</strong>
+                <small>{currentBilling.modelId}</small>
+              </div>
+              <button
+                className="button-secondary"
+                disabled={operation !== null}
+                onClick={() => void run("billing")}
+                type="button"
+              >
+                {operation === "billing"
+                  ? uiText("ui.settings.billingBusy", uiLanguage)
+                  : uiText("ui.settings.billingAction", uiLanguage)}
               </button>
             </div>
             <div className="settings-form-grid model-options">
@@ -785,6 +842,41 @@ function parseTestEnvelope(value: unknown): { model: string; latencyMs: number }
     : null;
 }
 
+function parseBillingEnvelope(value: unknown): ModelBilling | null {
+  if (!isObject(value) || value.ok !== true || !isObject(value.billing)) return null;
+  const billing = value.billing;
+  if (
+    !isProviderId(billing.providerId)
+    || typeof billing.modelId !== "string"
+    || !billing.modelId.trim()
+    || (billing.costClass !== "free" && billing.costClass !== "paid" && billing.costClass !== "unknown")
+  ) return null;
+  if (billing.pricing !== null && !isModelPricing(billing.pricing)) return null;
+  return {
+    providerId: billing.providerId,
+    modelId: billing.modelId,
+    pricing: billing.pricing,
+    costClass: billing.costClass,
+  };
+}
+
+function isModelPricing(value: unknown): value is ModelPricing {
+  if (!isObject(value)) return false;
+  return isNonNegativeNumber(value.promptUsdPerToken)
+    && isNonNegativeNumber(value.completionUsdPerToken)
+    && isNullableNonNegativeNumber(value.requestUsdPerRequest)
+    && isNullableNonNegativeNumber(value.imageUsdPerImage)
+    && isNullableNonNegativeNumber(value.internalReasoningUsdPerToken);
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || isNonNegativeNumber(value);
+}
+
 function readError(value: unknown, fallback: string): string {
   return isObject(value) && isObject(value.error) && typeof value.error.message === "string"
     ? value.error.message
@@ -834,7 +926,14 @@ function modelName(model: DiscoveredModel): string {
 }
 
 function modelRate(model: DiscoveredModel, language: UiLanguage): string {
-  if (model.costClass === "free") return uiText("ui.settings.rate.free", language);
+  return billingRate(model, language);
+}
+
+function billingRate(
+  model: Pick<DiscoveredModel, "costClass" | "pricing"> | ModelBilling,
+  language: UiLanguage,
+): string {
+  if (model.costClass === "free" && model.pricing) return uiText("ui.settings.rate.free", language);
   if (!model.pricing) return uiText("ui.settings.rate.unknown", language);
   return uiText("ui.settings.rate.priced", language, {
     input: formatUsdPerMillion(model.pricing.promptUsdPerToken),

@@ -153,6 +153,129 @@ test("OpenRouter discovery parses per-token pricing and free-model status", asyn
   );
 });
 
+test("OpenAI-compatible discovery preserves advertised pricing for non-OpenRouter providers", async () => {
+  const gateway = createOpenAICompatibleGateway({
+    settings: { ...lmstudioSettings, selectedModel: "vendor/paid" },
+    async fetch() {
+      return Response.json({
+        data: [{
+          id: "vendor/paid",
+          name: "Vendor paid model",
+          pricing: { prompt: "0.000003", completion: "0.000005" },
+        }],
+      });
+    },
+  });
+
+  const models = await gateway.discoverModels();
+  assert.equal(models[0]?.pricing?.promptUsdPerToken, 0.000003);
+  assert.equal(models[0]?.pricing?.completionUsdPerToken, 0.000005);
+  assert.equal(models[0]?.costClass, "paid");
+});
+
+test("billing lookup returns the selected model pricing without exposing provider settings", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "realm-model-billing-"));
+  try {
+    const store = createLocalModelSettingsStore({
+      filePath: join(directory, "model-providers.json"),
+      environment: {},
+    });
+    await store.saveProfile(openrouterSettings, true);
+    const service = createModelSettingsService({
+      store,
+      createGateway: () => ({
+        providerId: "openrouter",
+        async discoverModels() {
+          return [{
+            id: openrouterSettings.selectedModel,
+            name: "Selected model",
+            ownedBy: "test",
+            contextLength: null,
+            pricing: {
+              promptUsdPerToken: 0.000001,
+              completionUsdPerToken: 0.000002,
+              requestUsdPerRequest: null,
+              imageUsdPerImage: null,
+              internalReasoningUsdPerToken: null,
+            },
+            costClass: "paid",
+            supportsTools: null,
+            supportsStructuredOutputs: null,
+          }];
+        },
+        async chat() {
+          throw new Error("not used");
+        },
+      }),
+    });
+
+    const billing = await service.billing({
+      providerId: "openrouter",
+      selectedModel: openrouterSettings.selectedModel,
+    });
+    assert.deepEqual(billing, {
+      providerId: "openrouter",
+      modelId: openrouterSettings.selectedModel,
+      pricing: {
+        promptUsdPerToken: 0.000001,
+        completionUsdPerToken: 0.000002,
+        requestUsdPerRequest: null,
+        imageUsdPerImage: null,
+        internalReasoningUsdPerToken: null,
+      },
+      costClass: "paid",
+    });
+    assert.equal("apiKey" in billing, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("billing lookup returns unknown when the provider omits pricing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "realm-model-billing-unknown-"));
+  try {
+    const store = createLocalModelSettingsStore({
+      filePath: join(directory, "model-providers.json"),
+      environment: {},
+    });
+    await store.saveProfile(openrouterSettings, true);
+    const service = createModelSettingsService({
+      store,
+      createGateway: () => ({
+        providerId: "openrouter",
+        async discoverModels() {
+          return [{
+            id: openrouterSettings.selectedModel,
+            name: "Selected model",
+            ownedBy: "test",
+            contextLength: null,
+            pricing: null,
+            costClass: "unknown",
+            supportsTools: null,
+            supportsStructuredOutputs: null,
+          }];
+        },
+        async chat() {
+          throw new Error("not used");
+        },
+      }),
+    });
+
+    const billing = await service.billing({
+      providerId: "openrouter",
+      selectedModel: openrouterSettings.selectedModel,
+    });
+    assert.deepEqual(billing, {
+      providerId: "openrouter",
+      modelId: openrouterSettings.selectedModel,
+      pricing: null,
+      costClass: "unknown",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("OpenRouter uses json_object without the LM Studio token floor", async () => {
   let requestBody: Record<string, unknown> = {};
   const gateway = createOpenAICompatibleGateway({

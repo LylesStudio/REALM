@@ -260,9 +260,7 @@ function parseDiscoveredModel(
   const supportedParameters = Array.isArray(raw.supported_parameters)
     ? raw.supported_parameters.filter((value): value is string => typeof value === "string")
     : null;
-  const pricing = settings.providerId === "openrouter"
-    ? parseOpenRouterPricing(raw.pricing)
-    : null;
+  const pricing = parseAdvertisedPricing(raw.pricing);
   return {
     id,
     name,
@@ -279,7 +277,7 @@ function parseDiscoveredModel(
   };
 }
 
-function parseOpenRouterPricing(raw: unknown): ModelPricing | null {
+function parseAdvertisedPricing(raw: unknown): ModelPricing | null {
   if (!isObject(raw)) return null;
   const prompt = priceNumber(raw.prompt);
   const completion = priceNumber(raw.completion);

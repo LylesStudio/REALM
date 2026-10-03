@@ -2656,6 +2656,42 @@ button:disabled {
   justify-content: flex-start;
 }
 
+.model-billing {
+  align-items: center;
+  border: 1px solid var(--line-dark);
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  margin: 10px 20px 4px;
+  padding: 12px;
+}
+
+.model-billing > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.model-billing .eyebrow {
+  margin-bottom: 4px;
+}
+
+.model-billing strong {
+  color: var(--moss);
+  font-family: var(--font-serif);
+  font-size: 13px;
+}
+
+.model-billing small {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-list {
   display: grid;
   gap: 10px;
@@ -2902,6 +2938,13 @@ button:disabled {
   .model-list-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .model-billing {
+    align-items: stretch;
+    flex-direction: column;
+    margin-left: 16px;
+    margin-right: 16px;
   }
 
   .model-list-pager {
