@@ -74,7 +74,7 @@ function reactPlan(
   }[],
 ): M2TurnPlan {
   return {
-    goal: "回应玩家",
+    turnIntent: "回应玩家",
     constraints: [],
     activatedCharacters: characters,
     narratorEnabled: false,
@@ -466,7 +466,7 @@ test("committed turn persists recipientId in the formal event payload", { timeou
       dmController: {
         async plan({ availableCharacters }) {
           return {
-            goal: "回应玩家",
+            turnIntent: "回应玩家",
             constraints: [],
             activatedCharacters: availableCharacters.slice(0, 1),
             narratorEnabled: false,

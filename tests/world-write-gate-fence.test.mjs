@@ -47,7 +47,6 @@ const METHOD_PLANES = [
   ["database/postgres/propagation-repository.ts", "saveRun", "C", "gateWorldWrite"],
   ["database/postgres/canon-propagation.ts", "planAndEnqueue", "C", "gateWorldWrite"],
   ["database/postgres/worldline-merge-repository.ts", "insertMerge", "C", "gateWorldWrite"],
-  ["database/postgres/worldline-merge-repository.ts", "createMergedTopology", "C", "gateWorldWrite"],
   ["database/postgres/worldline-merge-repository.ts", "createMergedTopologyAndAudit", "C", "gateWorldWrite"],
   ["database/postgres/world-knowledge-repository.ts", "upsertEntity", "C", "gateWorldWrite"],
   ["database/postgres/world-knowledge-repository.ts", "appendClaim", "C", "gateWorldWrite"],

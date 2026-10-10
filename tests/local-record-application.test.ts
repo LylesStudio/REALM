@@ -432,7 +432,7 @@ test("the formal mapper creates a restricted policy and hides non-audience obser
       plan: {
         planId: "plan-secret",
         body: {
-          goal: "只让塞娜听见",
+          turnIntent: "只让塞娜听见",
           constraints: [],
           activatedCharacters: [],
           narratorEnabled: false,

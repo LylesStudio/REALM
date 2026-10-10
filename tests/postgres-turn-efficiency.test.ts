@@ -162,7 +162,7 @@ test(
         }
         if (system.includes("DM Controller")) {
           return json({
-            goal: "回应玩家",
+            turnIntent: "回应玩家",
             activatedCharacterInstanceIds: [POSTGRES_DEMO_IDS.scoutInstance],
             narratorEnabled: true,
           });
@@ -174,7 +174,7 @@ test(
           return json({ action: "塞娜点头。", dialogue: "“嗯。”" });
         }
         if (system.includes("DM output reviewer")) {
-          return json({ accepted: true, goalSatisfied: true, worldCompatible: true });
+          return json({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
         }
         return {
           model: "fake-model",
@@ -309,6 +309,9 @@ test(
     // records FOR UPDATE 锁内重读）带来确定性 +42 查询
     // （acceptCommand/advance×4/beginStageAttempt×4/commitRelease/crystallization
     // 各自两拍 gate；无新事务、无全投影重读）。预算 172 → ≤214。
-    assert.ok(counts.total <= 214, `回合总查询预算 172→≤214（v37 写入 gate），实际 ${counts.total}`);
+    // Goal runtime materialization：commitRelease 同事务扫描一次该 Record
+    // 的 active goal_instances（无 Goal 零写入、+1 查询 +0 事务）。预算
+    // ≤214 → ≤215。
+    assert.ok(counts.total <= 215, `回合总查询预算 172→≤215（v37 写入 gate + Goal active 扫描），实际 ${counts.total}`);
   },
 );

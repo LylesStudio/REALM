@@ -3,6 +3,8 @@ import {
 } from "../../../../database/postgres/public.ts";
 import {
   WorldlineMergeError,
+  WorldlineMergeSourceChangedError,
+  WorldlineMergeUnsupportedError,
   createWorldlineMergeService,
 } from "../../../../modules/worldline/merge.ts";
 import { LOCAL_RECORD_SCOPE } from "../../../../modules/application/local-record-service.ts";
@@ -90,6 +92,17 @@ export async function POST(request: Request) {
       return Response.json(
         { ok: false as const, error: { code: error.code, message: error.message } },
         { status: 404 },
+      );
+    }
+    // 稳定业务错误：拒绝原因只暴露机器码（审计行已落库，重放同码），
+    // 不泄露 SQL/路径/源数据原文。
+    if (
+      error instanceof WorldlineMergeUnsupportedError
+      || error instanceof WorldlineMergeSourceChangedError
+    ) {
+      return Response.json(
+        { ok: false as const, error: { code: error.code, message: error.message } },
+        { status: 409 },
       );
     }
     // 批次 T10-B3：内部故障脱敏结构化诊断（业务 404 已在上方分流，不伪报）。

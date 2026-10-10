@@ -316,7 +316,7 @@ test("T3 Core: presence react drafts action+dialogue with optional relationship 
     getGateway: async () => fakeGateway,
   });
   const plan: M2TurnPlan = {
-    goal: "让弥洛对刚发生的素材作出简短反应。",
+    turnIntent: "让弥洛对刚发生的素材作出简短反应。",
     constraints: [],
     activatedCharacters: [scholar],
     narratorEnabled: false,
@@ -381,7 +381,7 @@ test("T3 Core: presence react drops invalid relationship output fail-closed", as
     getGateway: async () => fakeGateway,
   });
   const plan: M2TurnPlan = {
-    goal: "在场反应。",
+    turnIntent: "在场反应。",
     constraints: [],
     activatedCharacters: [scholar],
     narratorEnabled: false,

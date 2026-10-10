@@ -503,7 +503,7 @@ async function commitSystemCorrection(
     plan: {
       planId: "plan_crystal",
       body: {
-        goal: "场景晶化",
+        turnIntent: "场景晶化",
         constraints: [],
         activatedCharacters: [],
         narratorEnabled: false,
@@ -536,7 +536,7 @@ async function commitSystemCorrection(
       validationId: "validation_crystal",
       body: {
         accepted: true,
-        goalSatisfied: true,
+        turnIntentSatisfied: true,
         worldCompatible: true,
         actionTransactionsComplete: true,
         narratorChecked: true,
@@ -649,7 +649,7 @@ test("T10-A self-play 共享复核路径：三连否决降级接受，拍落库�
         return {
           model: "fake",
           content: JSON.stringify({
-            goal: "世界自演一拍",
+            turnIntent: "世界自演一拍",
             activatedCharacterInstanceIds: ["char_inst_scout"],
             narratorEnabled: true,
           }),
@@ -663,7 +663,7 @@ test("T10-A self-play 共享复核路径：三连否决降级接受，拍落库�
           model: "fake",
           content: JSON.stringify({
             accepted: false,
-            goalSatisfied: false,
+            turnIntentSatisfied: false,
             worldCompatible: false,
           }),
           toolCalls: [],

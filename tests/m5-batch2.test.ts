@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createWorldlineMergeService,
+  planMergeMaterialization,
   planWorldlineMerge,
+  WorldlineMergeUnsupportedError,
   type MergeEventRef,
+  type MergeSourceEvent,
+  type MergeSourceSnapshot,
+  type MergeTopologyPlan,
   type WorldlineMergeRepository,
   type WorldlineMergeRow,
 } from "../modules/worldline/merge.ts";
@@ -91,6 +96,66 @@ test("merge planner dedupes identical, reschedules bridgeable, blocks hard", () 
 
 function stubMergeRepository(events: Map<string, MergeEventRef[]>) {
   const rows: WorldlineMergeRow[] = [];
+  const topologies: MergeTopologyPlan[] = [];
+  const snapshotFor = (worldlineId: string): MergeSourceSnapshot => ({
+    worldlineId,
+    records: [{
+      id: `r-${worldlineId}`,
+      title: "第一段",
+      status: "active",
+      worldVersion: "0.0.0-local",
+      unsupported: [],
+    }],
+    continuities: [],
+    scenes: [{
+      id: `scene-${worldlineId}`,
+      recordId: `r-${worldlineId}`,
+      title: "场景",
+      status: "active",
+      location: "",
+      objective: "",
+      tension: "",
+      weather: "",
+      displayTime: "",
+      startTick: 0,
+      startOrdinal: 0,
+      endTick: null,
+      endOrdinal: null,
+    }],
+    instances: [],
+    participants: [],
+    visibilityPolicies: [{
+      id: `policy-${worldlineId}`,
+      recordId: `r-${worldlineId}`,
+      policyKey: "public",
+      policyVersion: 1,
+      policyKind: "public",
+      sceneId: null,
+      restrictedDomainId: null,
+      privateCharacterInstanceId: null,
+      audienceCharacterInstanceIds: [],
+    }],
+    skills: [],
+    assets: [],
+    actionReceipts: [],
+    characterEffects: [],
+    observations: [],
+    events: (events.get(worldlineId) ?? []).map((entry): MergeSourceEvent => ({
+      ...entry,
+      recordId: `r-${worldlineId}`,
+      eventKind: "narration.committed",
+      recordVersion: 1,
+      recordOrdinal: entry.ordinal,
+      batchIndex: 0,
+      actorParticipantId: null,
+      content: "",
+      payload: {},
+      sceneId: `scene-${worldlineId}`,
+      visibilityPolicyId: `policy-${worldlineId}`,
+      calendarId: "cal",
+      displayTime: "",
+    })),
+  });
   const repository: WorldlineMergeRepository = {
     async findMergeByIdempotencyKey(_workspaceId, key) {
       return rows.find((row) => row.idempotencyKey === key) ?? null;
@@ -98,18 +163,18 @@ function stubMergeRepository(events: Map<string, MergeEventRef[]>) {
     async insertMerge(_scope, row) {
       rows.push({ ...row, createdAt: new Date().toISOString() });
     },
-    async listWorldlineEvents(scope) {
-      return events.get(scope.worldlineId) ?? [];
+    async loadMergeSource(scope) {
+      return snapshotFor(scope.worldlineId);
     },
-    async listWorldlineRecordTitles() {
-      return [{ id: "r1", title: "第一段" }];
+    async createMergedTopologyAndAudit(_scope, topology, row) {
+      topologies.push(topology);
+      rows.push({ ...row, createdAt: new Date().toISOString() });
     },
-    async createMergedTopology() {},
     async worldlineExists() {
       return true;
     },
   };
-  return { repository, rows };
+  return { repository, rows, topologies };
 }
 
 test("merge service replays idempotently and keeps audit on rejection", async () => {
@@ -159,6 +224,315 @@ test("merge service replays idempotently and keeps audit on rejection", async ()
   assert.equal(rejected.report.conflicts[0]?.severity, "hard");
   assert.equal(hardRows.length, 1);
   assert.equal(hardRows[0]?.status, "rejected");
+});
+
+function mergeSnapshot(overrides: Partial<MergeSourceSnapshot> = {}): MergeSourceSnapshot {
+  return {
+    worldlineId: "line-a",
+    records: [{
+      id: "r1",
+      title: "第一段",
+      status: "active",
+      worldVersion: "0.0.0-local",
+      unsupported: [],
+    }],
+    continuities: [{
+      id: "cont-1",
+      definitionId: "def-1",
+      continuityKey: "player",
+      status: "active",
+      bornTick: 0,
+      bornOrdinal: 0,
+      endedTick: null,
+      endedOrdinal: null,
+    }],
+    scenes: [{
+      id: "scene-1",
+      recordId: "r1",
+      title: "场景",
+      status: "active",
+      location: "灰鲸港",
+      objective: "",
+      tension: "",
+      weather: "",
+      displayTime: "",
+      startTick: 0,
+      startOrdinal: 0,
+      endTick: null,
+      endOrdinal: null,
+    }],
+    instances: [{
+      id: "inst-1",
+      recordId: "r1",
+      continuityId: "cont-1",
+      predecessorInstanceId: null,
+      controllerMode: "human",
+      status: "present",
+      instantiatedTick: 0,
+      instantiatedOrdinal: 0,
+      inheritanceCutoffTick: 0,
+      inheritanceCutoffOrdinal: 0,
+      retiredTick: null,
+      retiredOrdinal: null,
+      state: {},
+    }],
+    participants: [{
+      id: "participant-1",
+      recordId: "r1",
+      participantKind: "character",
+      characterInstanceId: "inst-1",
+      principalId: "principal-1",
+      controllerMode: "human",
+      isActive: true,
+      speakingOrder: 0,
+      sharedControlEnabled: false,
+    }],
+    visibilityPolicies: [{
+      id: "policy-1",
+      recordId: "r1",
+      policyKey: "public",
+      policyVersion: 1,
+      policyKind: "public",
+      sceneId: null,
+      restrictedDomainId: null,
+      privateCharacterInstanceId: null,
+      audienceCharacterInstanceIds: [],
+    }],
+    skills: [],
+    assets: [],
+    actionReceipts: [],
+    characterEffects: [],
+    observations: [],
+    events: [{
+      ...event({ eventId: "a1" }),
+      eventKind: "utterance.committed",
+      recordVersion: 1,
+      recordOrdinal: 1,
+      batchIndex: 0,
+      actorParticipantId: "participant-1",
+      content: "你好。",
+      payload: { recipientId: "participant-1", text: "你好。" },
+      sceneId: "scene-1",
+      visibilityPolicyId: "policy-1",
+      calendarId: "cal",
+      displayTime: "",
+    }],
+    ...overrides,
+  };
+}
+
+test("merge materialization remaps topology ids and fails closed on unmappable state", () => {
+  const report = planWorldlineMerge({
+    sourceA: "line-a",
+    sourceB: "line-b",
+    eventsA: [event({ eventId: "a1" })],
+    eventsB: [],
+  });
+  let sequence = 0;
+  const idFactory = () => `t-${++sequence}`;
+  const ok = planMergeMaterialization({
+    worldlineId: "worldline_merge_x",
+    label: "合并",
+    storyId: "story_merge_x",
+    storyTitle: "合并时间线",
+    sources: [mergeSnapshot(), mergeSnapshot({ worldlineId: "line-b", records: [], events: [] })],
+    manifest: report.manifest,
+    dedupedEventIds: new Set(),
+    idFactory,
+  });
+  assert.equal(ok.status, "ok");
+  if (ok.status !== "ok") return;
+  const [record] = ok.topology.records;
+  assert.ok(record);
+  assert.equal(record.sourceRecordId, "r1");
+  assert.equal(record.events.length, 1);
+  const copied = record.events[0]!;
+  // 目标事件不复用源 ID；外键全部指向目标 scope；游标与 manifest 一致。
+  assert.notEqual(copied.id, "a1");
+  assert.equal(ok.manifest[0]?.targetEventId, copied.id);
+  assert.equal(copied.worldTick, ok.manifest[0]?.tick);
+  assert.equal(copied.worldOrdinal, ok.manifest[0]?.worldOrdinal);
+  assert.equal(copied.sceneId, record.scenes[0]?.id);
+  assert.notEqual(copied.sceneId, "scene-1");
+  assert.equal(copied.visibilityPolicyId, record.visibilityPolicies[0]?.id);
+  assert.equal(copied.actorParticipantId, record.participants[0]?.id);
+  // payload 顶层 recipientId 重映射到目标参与者。
+  assert.equal(
+    (copied.payload as { recipientId: string }).recipientId,
+    record.participants[0]?.id,
+  );
+  assert.equal(
+    (copied.payload as { text: string }).text,
+    "你好。",
+  );
+  // record head 与最后一条目标事件一致。
+  assert.equal(record.head.lastEventId, copied.id);
+  assert.equal(record.head.nextRecordOrdinal, 2);
+  assert.equal(record.head.lastWorldTick, copied.worldTick);
+  assert.equal(record.head.lastWorldOrdinal, copied.worldOrdinal);
+  // continuity 定义复用 world 级行。
+  assert.equal(ok.topology.continuities.length, 1);
+  assert.equal(ok.topology.continuities[0]?.definitionId, "def-1");
+  assert.equal(record.instances[0]?.continuityId, ok.topology.continuities[0]?.id);
+  // 源指纹随拓扑进入写事务防漂。
+  assert.deepEqual(ok.topology.sourceFingerprints, [{
+    recordId: "r1",
+    eventCount: 1,
+    maxRecordOrdinal: 1,
+  }]);
+
+  // 双侧同 continuity_key 折成一行。
+  const mergedContinuity = planMergeMaterialization({
+    worldlineId: "worldline_merge_y",
+    label: "合并",
+    storyId: "story_merge_y",
+    storyTitle: "合并时间线",
+    sources: [
+      mergeSnapshot(),
+      mergeSnapshot({
+        worldlineId: "line-b",
+        records: [{ id: "r2", title: "第二段", status: "active", worldVersion: "0.0.0-local", unsupported: [] }],
+        continuities: [{
+          id: "cont-b",
+          definitionId: "def-1",
+          continuityKey: "player",
+          status: "active",
+          bornTick: 1,
+          bornOrdinal: 0,
+          endedTick: null,
+          endedOrdinal: null,
+        }],
+        scenes: [],
+        instances: [{
+          id: "inst-b",
+          recordId: "r2",
+          continuityId: "cont-b",
+          predecessorInstanceId: null,
+          controllerMode: "human",
+          status: "present",
+          instantiatedTick: 1,
+          instantiatedOrdinal: 0,
+          inheritanceCutoffTick: 1,
+          inheritanceCutoffOrdinal: 0,
+          retiredTick: null,
+          retiredOrdinal: null,
+          state: {},
+        }],
+        participants: [],
+        visibilityPolicies: [],
+        events: [],
+      }),
+    ],
+    manifest: report.manifest,
+    dedupedEventIds: new Set(),
+    idFactory,
+  });
+  assert.equal(mergedContinuity.status, "ok");
+  if (mergedContinuity.status !== "ok") return;
+  assert.equal(mergedContinuity.topology.continuities.length, 1);
+  assert.equal(mergedContinuity.topology.records.length, 2);
+  assert.equal(
+    mergedContinuity.topology.records[1]?.instances[0]?.continuityId,
+    mergedContinuity.topology.continuities[0]?.id,
+  );
+
+  // fail-closed：未支持的运行态/不可重映射引用一律 unsupported。
+  const withGoal = planMergeMaterialization({
+    worldlineId: "worldline_merge_z",
+    label: "合并",
+    storyId: "story_merge_z",
+    storyTitle: "合并时间线",
+    sources: [
+      mergeSnapshot({
+        records: [{
+          id: "r1",
+          title: "第一段",
+          status: "active",
+          worldVersion: "0.0.0-local",
+          unsupported: ["goal_instances"],
+        }],
+      }),
+      mergeSnapshot({ worldlineId: "line-b", records: [], events: [] }),
+    ],
+    manifest: report.manifest,
+    dedupedEventIds: new Set(),
+    idFactory,
+  });
+  assert.equal(withGoal.status, "unsupported");
+  if (withGoal.status !== "unsupported") return;
+  assert.deepEqual(withGoal.records, [{
+    worldlineId: "line-a",
+    recordId: "r1",
+    reasons: ["goal_instances"],
+  }]);
+
+  const withActionEvent = planMergeMaterialization({
+    worldlineId: "worldline_merge_w",
+    label: "合并",
+    storyId: "story_merge_w",
+    storyTitle: "合并时间线",
+    sources: [
+      mergeSnapshot({
+        events: [{
+          ...mergeSnapshot().events[0]!,
+          eventKind: "action.transaction.committed",
+        }],
+      }),
+      mergeSnapshot({ worldlineId: "line-b", records: [], events: [] }),
+    ],
+    manifest: report.manifest,
+    dedupedEventIds: new Set(),
+    idFactory,
+  });
+  assert.equal(withActionEvent.status, "unsupported");
+  if (withActionEvent.status !== "unsupported") return;
+  assert.deepEqual(withActionEvent.records[0]?.reasons, ["unsupported_event_kind"]);
+});
+
+test("merge service rejects unsupported sources with an audit row and replays the rejection", async () => {
+  const { repository, rows, topologies } = stubMergeRepository(new Map([
+    ["line-a", [event({ eventId: "a1" })]],
+    ["line-b", []],
+  ]));
+  const original = repository.loadMergeSource;
+  repository.loadMergeSource = async (scope) => {
+    const snapshot = await original(scope);
+    return scope.worldlineId === "line-a"
+      ? {
+          ...snapshot,
+          records: snapshot.records.map((record) => ({
+            ...record,
+            unsupported: ["memory_conclusions" as const],
+          })),
+        }
+      : snapshot;
+  };
+  let sequence = 0;
+  const service = createWorldlineMergeService({
+    repository,
+    idFactory: () => `id-${++sequence}`,
+  });
+  const input = {
+    workspaceId: "ws",
+    worldId: "world",
+    sourceA: "line-a",
+    sourceB: "line-b",
+    idempotencyKey: "merge-unsupported-1",
+    operator: "user",
+  };
+  await assert.rejects(service.merge(input), WorldlineMergeUnsupportedError);
+  // rejected 审计已落库、零拓扑写入。
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.status, "rejected");
+  assert.equal(topologies.length, 0);
+  // 幂等重放同一业务错误，不重复写审计。
+  await assert.rejects(service.merge(input), WorldlineMergeUnsupportedError);
+  assert.equal(rows.length, 1);
+  // dry-run 预览在同键之前不消费幂等键，也不写库。
+  const preview = await service.merge({ ...input, idempotencyKey: "dry-u", dryRun: true });
+  assert.equal(preview.status, "preview");
+  assert.equal(preview.report.unsupported?.[0]?.reasons[0], "memory_conclusions");
+  assert.equal(rows.length, 1);
 });
 
 function fakeGateway(content: string | Error): ModelGateway {

@@ -245,7 +245,7 @@ test("character propose: no respondOnly in prompt; no tool call means no action"
     }
     if (system.includes("DM Controller")) {
       return jsonResponse({
-        goal: "回应玩家的自然询问",
+        turnIntent: "回应玩家的自然询问",
         activatedCharacterInstanceIds: ["scout-instance"],
         narratorEnabled: false,
       });
@@ -255,7 +255,7 @@ test("character propose: no respondOnly in prompt; no tool call means no action"
       return jsonResponse({ action: "塞娜侧耳。", dialogue: "我在听。" });
     }
     if (system.includes("DM output reviewer")) {
-      return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+      return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
     }
     throw new Error("Unexpected model call");
   });

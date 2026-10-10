@@ -44,7 +44,7 @@ const fakeGateway = {
     });
     if (system.includes("DM Controller")) {
       return jsonResponse({
-        goal: "呈现玩家观察密函的公开结果",
+        turnIntent: "呈现玩家观察密函的公开结果",
         activatedCharacterInstanceIds: ["scout-instance"],
         narratorEnabled: true,
       });
@@ -64,7 +64,7 @@ const fakeGateway = {
       return jsonResponse({ action: "塞娜收回触碰蜡封的手。", dialogue: "“这封蜡不对劲。”", recipientId: null });
     }
     if (system.includes("DM output reviewer")) {
-      return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+      return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
     }
     throw new Error(`Unexpected model call: ${system.slice(0, 120).replaceAll("\n", " ⏎ ")}`);
   },

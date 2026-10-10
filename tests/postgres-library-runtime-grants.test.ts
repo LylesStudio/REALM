@@ -84,6 +84,13 @@ const CURRENT_MIGRATIONS = [
   // 窄通道）；0041 提供 pgcrypto 依赖。
   "0041_article_qualification_and_import_entries.sql",
   "0053_membership_capability.sql",
+  // Phase 1B：library list 读模型显式 SELECT worlds.world_version（0054 列）。
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0056_runtime_save_restore_grants.sql",
+  // Phase 4D：records.world_version（Record 级 binding）+ 切换审计台账；
+  // library 的 records INSERT 现在显式携带该列。
+  "0057_realmworld_record_binding.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

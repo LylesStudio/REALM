@@ -11,7 +11,10 @@ import type {
   SemanticSegment,
   SemanticSegmentKind,
 } from "../presentation/semantic-segments.ts";
-import { FatalTurnError } from "../runtime/public.ts";
+import {
+  FatalTurnError,
+  RuntimeInvariantError,
+} from "../runtime/public.ts";
 import type { PresenceTurnContext } from "./presence.ts";
 
 export type ActivatedCharacter = ActionActor;
@@ -30,7 +33,7 @@ export type TurnVisibilityAssessment = {
 };
 
 export type M2TurnPlan = {
-  goal: string;
+  turnIntent: string;
   constraints: readonly string[];
   activatedCharacters: readonly ActivatedCharacter[];
   narratorEnabled: boolean;
@@ -133,7 +136,7 @@ export type M2TurnCandidate = {
 
 export type M2TurnValidation = {
   accepted: boolean;
-  goalSatisfied: boolean;
+  turnIntentSatisfied: boolean;
   worldCompatible: boolean;
   actionTransactionsComplete: boolean;
   narratorChecked: boolean;
@@ -149,6 +152,113 @@ export type M2TurnValidation = {
     reason: string;
   };
 };
+
+type CheckpointArtifact = {
+  body: unknown;
+};
+
+type M2TurnCheckpoint = {
+  plan?: CheckpointArtifact;
+  validation?: CheckpointArtifact;
+};
+
+/**
+ * Reads the renamed DM turn-intent field at the one checkpoint hydration seam.
+ * The old key is accepted only for persisted in-flight checkpoints; normalized
+ * values never carry it forward into a new write.
+ */
+export function normalizeM2TurnPlanBody(body: unknown): M2TurnPlan {
+  const record = checkpointRecord(body, "TURN_INTENT_CHECKPOINT_INVALID");
+  const turnIntent = renamedCheckpointField(
+    record,
+    "turnIntent",
+    "goal",
+    "TURN_INTENT_CHECKPOINT_INVALID",
+  );
+  if (typeof turnIntent !== "string" || !turnIntent.trim() || turnIntent.length > 320) {
+    throw new RuntimeInvariantError(
+      "TURN_INTENT_CHECKPOINT_INVALID",
+      "The persisted Turn intent is invalid.",
+    );
+  }
+  const rest = { ...record };
+  delete rest.goal;
+  delete rest.turnIntent;
+  return { ...rest, turnIntent: turnIntent.trim() } as M2TurnPlan;
+}
+
+/** See {@link normalizeM2TurnPlanBody}; applies the validation-side rename. */
+export function normalizeM2TurnValidationBody(body: unknown): M2TurnValidation {
+  const record = checkpointRecord(body, "TURN_INTENT_CHECKPOINT_INVALID");
+  const turnIntentSatisfied = renamedCheckpointField(
+    record,
+    "turnIntentSatisfied",
+    "goalSatisfied",
+    "TURN_INTENT_CHECKPOINT_INVALID",
+  );
+  if (typeof turnIntentSatisfied !== "boolean") {
+    throw new RuntimeInvariantError(
+      "TURN_INTENT_CHECKPOINT_INVALID",
+      "The persisted Turn intent assessment is invalid.",
+    );
+  }
+  const rest = { ...record };
+  delete rest.goalSatisfied;
+  delete rest.turnIntentSatisfied;
+  return { ...rest, turnIntentSatisfied } as M2TurnValidation;
+}
+
+/**
+ * Normalizes both M2 artifacts after a durable repository has hydrated a
+ * checkpoint. No database write occurs here; the next repository mutation
+ * persists the canonical new keys.
+ */
+export function normalizeM2TurnCheckpoint<T extends M2TurnCheckpoint>(run: T): T {
+  const normalized = { ...run } as {
+    plan?: CheckpointArtifact;
+    validation?: CheckpointArtifact;
+  };
+  if (run.plan) {
+    normalized.plan = {
+      ...run.plan,
+      body: normalizeM2TurnPlanBody(run.plan.body),
+    };
+  }
+  if (run.validation) {
+    normalized.validation = {
+      ...run.validation,
+      body: normalizeM2TurnValidationBody(run.validation.body),
+    };
+  }
+  return normalized as T;
+}
+
+function checkpointRecord(value: unknown, code: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new RuntimeInvariantError(code, "The persisted Turn checkpoint is invalid.");
+  }
+  return value as Record<string, unknown>;
+}
+
+function renamedCheckpointField(
+  record: Record<string, unknown>,
+  currentKey: string,
+  legacyKey: string,
+  code: string,
+): unknown {
+  const hasCurrent = Object.hasOwn(record, currentKey);
+  const hasLegacy = Object.hasOwn(record, legacyKey);
+  if (!hasCurrent && !hasLegacy) {
+    throw new RuntimeInvariantError(code, "The persisted Turn checkpoint is missing a required field.");
+  }
+  if (hasCurrent && hasLegacy && !Object.is(record[currentKey], record[legacyKey])) {
+    throw new RuntimeInvariantError(
+      "TURN_INTENT_CHECKPOINT_CONFLICT",
+      "The persisted Turn checkpoint contains conflicting field names.",
+    );
+  }
+  return hasCurrent ? record[currentKey] : record[legacyKey];
+}
 
 export interface DMController {
   plan(input: {
@@ -327,7 +437,7 @@ export function createRuleBasedDMController(): DMController {
   return {
     async plan({ availableCharacters }) {
       return {
-        goal: "Advance one coherent public scene without assigning a character's stance.",
+        turnIntent: "Advance one coherent public scene without assigning a character's stance.",
         constraints: [
           "Activate only characters needed for this Turn.",
           "Require characters to declare material actions through Actor Tools.",
@@ -438,7 +548,7 @@ export function createRuleBasedDMController(): DMController {
       }
       return {
         accepted: true,
-        goalSatisfied: true,
+        turnIntentSatisfied: true,
         worldCompatible: true,
         actionTransactionsComplete: true,
         narratorChecked: narratorValid,

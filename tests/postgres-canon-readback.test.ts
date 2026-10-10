@@ -112,6 +112,12 @@ const MIGRATIONS = [
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
   "0053_membership_capability.sql",
+  // Phase 1B：library list 读模型显式 SELECT worlds.world_version（0054 列）。
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0056_runtime_save_restore_grants.sql",
+  // Phase 4D：records.world_version（branch/genesis 写路径显式携带）。
+  "0057_realmworld_record_binding.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

@@ -62,6 +62,12 @@ const MIGRATIONS = [
   // 0053 依赖 0041 的 pgcrypto；world/创世写入经 capability 通道。
   "0041_article_qualification_and_import_entries.sql",
   "0053_membership_capability.sql",
+  // Phase 1B：library list 读模型显式 SELECT worlds.world_version（0054 列）。
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0056_runtime_save_restore_grants.sql",
+  // Phase 4D：records.world_version（branch/duplicate/genesis 写路径显式携带）。
+  "0057_realmworld_record_binding.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

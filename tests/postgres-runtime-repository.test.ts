@@ -12,6 +12,17 @@ import {
   type TurnRuntimeDependencies,
 } from "../modules/runtime/public.ts";
 import { createPostgresRuntimeRepository } from "../database/postgres/public.ts";
+import {
+  createPostgresGoalAssessmentJobQueue,
+  GoalRuntimeRepositoryError,
+} from "../database/postgres/public.ts";
+import {
+  enqueueGoalAssessmentJobsForCommittedEvents,
+} from "../database/postgres/goal-runtime-materialization.ts";
+import {
+  goalAssessmentJobIdFor,
+  goalInstanceIdFor,
+} from "../modules/goals/public.ts";
 
 type CommandPayload = readonly JsonValue[];
 type PlanBody = { objective: string };
@@ -267,6 +278,438 @@ test(
   },
 );
 
+test(
+  "commitRelease enqueues durable Goal assessment jobs for active Goals in the same transaction",
+  { skip: !adminConnectionString, timeout: 120_000 },
+  async (t) => {
+    const adminUrl = requireLoopbackUrl(adminConnectionString!);
+    const databaseName = `realm_repository_test_${randomUUID().replaceAll("-", "")}`;
+    const maintenanceUrl = new URL(adminUrl);
+    maintenanceUrl.pathname = "/postgres";
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.href });
+    await maintenance.connect();
+    await maintenance.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+
+    const ownerUrl = new URL(adminUrl);
+    ownerUrl.pathname = `/${databaseName}`;
+    const owner = new pg.Client({ connectionString: ownerUrl.href });
+    const runtimeUrl = new URL(ownerUrl);
+    runtimeUrl.username = "realm_runtime";
+    runtimeUrl.password = "";
+    const pool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
+
+    t.after(async () => {
+      await pool.end();
+      await owner.end();
+      await maintenance.query(
+        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+      );
+      await maintenance.end();
+    });
+
+    await owner.connect();
+    for (const filename of [
+      "0001_runtime_contract.sql",
+      "0002_runtime_contract_hardening.sql",
+      "0003_runtime_repository.sql",
+      // Goal runtime（0055）与 Record binding（0054/0057）：commitRelease 的
+      // Goal assessment enqueue 依赖 goal_instances/goal_assessment_jobs。
+      "0054_world_version_identity.sql",
+      "0055_goal_runtime.sql",
+      "0057_realmworld_record_binding.sql",
+    ]) {
+      const sql = await readFile(
+        new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
+        "utf8",
+      );
+      await owner.query("BEGIN");
+      try {
+        await owner.query(sql);
+        await owner.query("COMMIT");
+      } catch (error) {
+        await owner.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    const workspaceId = `workspace_${randomUUID()}`;
+    const ids = {
+      world: `world_${randomUUID()}`,
+      worldline: `worldline_${randomUUID()}`,
+      story: `story_${randomUUID()}`,
+      record: `record_${randomUUID()}`,
+      scene: `scene_${randomUUID()}`,
+      definition: `definition_${randomUUID()}`,
+      continuity: `continuity_${randomUUID()}`,
+      instance: `instance_${randomUUID()}`,
+      visibility: `visibility_${randomUUID()}`,
+    };
+    await seedRuntimeScope(pool, workspaceId, ids);
+
+    const goalScope = {
+      workspaceId,
+      worldId: ids.world,
+      worldlineId: ids.worldline,
+      recordId: ids.record,
+    };
+    const activeGoalId = goalInstanceIdFor(goalScope, "ack-tide");
+    const secondActiveGoalId = goalInstanceIdFor(goalScope, "harbor-omen");
+    const completedGoalId = goalInstanceIdFor(goalScope, "settled-past");
+
+    // Record binding（records.world_version='1.2.0'）与世界创建身份
+    //（worlds.world_version='9.9.9'）刻意分叉：claim 必须以 Record binding
+    // 为准，绝不把 worlds.world_version 冒充 Record binding。
+    await inWorkspace(pool, workspaceId, async (client) => {
+      await client.query(
+        "UPDATE worlds SET world_version = '9.9.9' WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, ids.world],
+      );
+      await client.query(
+        "UPDATE records SET world_version = '1.2.0' WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, ids.record],
+      );
+      await client.query(
+        `INSERT INTO goal_instances (
+           workspace_id, world_id, worldline_id, record_id, id, goal_key,
+           state, revision, progress, outcome, policy_version, completed_at
+         ) VALUES
+           ($1, $2, $3, $4, $5, 'ack-tide', 'active', 0, '{}'::jsonb, NULL, 'v1', NULL),
+           ($1, $2, $3, $4, $6, 'harbor-omen', 'active', 0, '{}'::jsonb, NULL, 'v2', NULL),
+           ($1, $2, $3, $4, $7, 'settled-past', 'completed', 1, '{}'::jsonb,
+            '{"result":"done"}'::jsonb, 'v1', CURRENT_TIMESTAMP)`,
+        [workspaceId, ids.world, ids.worldline, ids.record,
+          activeGoalId, secondActiveGoalId, completedGoalId],
+      );
+    });
+
+    // 同一 record id 的另一 Workspace 各有一个 active Goal：workspace 隔离
+    // 不得串写（RLS + scope 谓词双重兜底）。
+    const foreignWorkspaceId = `workspace_${randomUUID()}`;
+    await seedRuntimeScope(pool, foreignWorkspaceId, ids);
+    await inWorkspace(pool, foreignWorkspaceId, async (client) => {
+      await client.query(
+        `INSERT INTO goal_instances (
+           workspace_id, world_id, worldline_id, record_id, id, goal_key,
+           state, revision, progress, outcome, policy_version
+         ) VALUES ($1, $2, $3, $4, $5, 'foreign-goal', 'active', 0, '{}'::jsonb, NULL, 'v1')`,
+        [
+          foreignWorkspaceId,
+          ids.world,
+          ids.worldline,
+          ids.record,
+          goalInstanceIdFor(
+            { workspaceId: foreignWorkspaceId, worldId: ids.world, worldlineId: ids.worldline, recordId: ids.record },
+            "foreign-goal",
+          ),
+        ],
+      );
+    });
+
+    let sequence = 0;
+    const dependenciesFor = (
+      targetIds: { scene: string; visibility: string },
+      onFormalEventsCommitted?: (
+        client: pg.PoolClient,
+        committed: {
+          workspaceId: string;
+          worldId: string;
+          worldlineId: string;
+          recordId: string;
+          eventIds: readonly string[];
+        },
+      ) => Promise<void>,
+    ): TurnRuntimeDependencies<
+      CommandPayload,
+      PlanBody,
+      CandidateBody,
+      ValidationBody,
+      EventPayload,
+      OutboxPayload
+    > => ({
+      repository: createPostgresRuntimeRepository<
+        CommandPayload,
+        PlanBody,
+        CandidateBody,
+        ValidationBody,
+        EventPayload,
+        OutboxPayload
+      >({
+        pool,
+        workspaceId,
+        mapFormalEvent({ draft }) {
+          return {
+            sceneId: targetIds.scene,
+            visibilityPolicyId: targetIds.visibility,
+            eventKind: "utterance.committed",
+            speakerName: "塞娜",
+            content: draft.payload.content,
+          };
+        },
+        ...(onFormalEventsCommitted ? { onFormalEventsCommitted } : {}),
+      }),
+      planner: { async plan() { return { objective: "respond" }; } },
+      drafter: { async draft() { return { text: "蜡封仍有余温。" }; } },
+      validator: { async validate() { return { accepted: true }; } },
+      releaseBuilder: {
+        async build(context) {
+          // 一批两条正式事件：每条都应触发每个 active Goal 的 durable job。
+          const firstEventId = `${context.turnId}-event-a`;
+          const secondEventId = `${context.turnId}-event-b`;
+          return {
+            formalEvents: [
+              { eventId: firstEventId, kind: "utterance.committed", payload: { content: context.candidate.body.text } },
+              { eventId: secondEventId, kind: "narration.committed", payload: { content: "潮声渐近。" } },
+            ],
+            outbox: [],
+          };
+        },
+      },
+      idFactory: () => `goal-runtime-${++sequence}`,
+      clock: tickingClock(),
+    });
+    const goalEnqueueHook = async (
+      client: pg.PoolClient,
+      committed: {
+        workspaceId: string;
+        worldId: string;
+        worldlineId: string;
+        recordId: string;
+        eventIds: readonly string[];
+      },
+    ) => {
+      await enqueueGoalAssessmentJobsForCommittedEvents(client, committed);
+    };
+    const dependencies = dependenciesFor(
+      { scene: ids.scene, visibility: ids.visibility },
+      goalEnqueueHook,
+    );
+
+    const command: RuntimeCommand<CommandPayload> = {
+      commandType: "player.utterance",
+      recordId: ids.record,
+      expectedRecordVersion: 0,
+      idempotencyKey: "goal-enqueue-turn",
+      actorId: null,
+      payload: ["检查蜡封"],
+    };
+    const completed = await executeTurn(command, dependencies);
+    assert.equal(completed.state, "completed");
+    const committedEventIds = completed.release?.eventIds ?? [];
+    assert.equal(committedEventIds.length, 2);
+
+    const jobs = await inWorkspace(pool, workspaceId, async (client) => {
+      const result = await client.query<{
+        id: string;
+        workspace_id: string;
+        world_id: string;
+        worldline_id: string;
+        record_id: string;
+        goal_instance_id: string;
+        source_event_id: string;
+        state: string;
+      }>(
+        `SELECT id, workspace_id, world_id, worldline_id, record_id,
+                goal_instance_id, source_event_id, state
+         FROM goal_assessment_jobs
+         WHERE record_id = $1
+         ORDER BY goal_instance_id, source_event_id`,
+        [ids.record],
+      );
+      return result.rows;
+    });
+    // 2 个 active Goal × 2 条正式事件 = 4 条 durable job；completed Goal 无
+    // job；source_event_id 必须是本次真实提交的事件 id。
+    assert.equal(jobs.length, 4);
+    for (const jobRow of jobs) {
+      assert.equal(jobRow.workspace_id, workspaceId);
+      assert.equal(jobRow.world_id, ids.world);
+      assert.equal(jobRow.worldline_id, ids.worldline);
+      assert.equal(jobRow.record_id, ids.record);
+      assert.ok(committedEventIds.includes(jobRow.source_event_id));
+      assert.ok(
+        jobRow.goal_instance_id === activeGoalId
+          || jobRow.goal_instance_id === secondActiveGoalId,
+        "terminal Goal 不得获得 assessment job",
+      );
+      assert.equal(jobRow.state, "pending");
+      assert.equal(
+        jobRow.id,
+        goalAssessmentJobIdFor(workspaceId, jobRow.goal_instance_id, jobRow.source_event_id),
+        "job id 必须是确定性派生（稳定 dedupe）",
+      );
+    }
+
+    // release replay（同幂等键同 fingerprint）：幂等早返回，不重复 enqueue。
+    const replay = await executeTurn(command, dependencies);
+    assert.equal(replay.turnId, completed.turnId);
+    const jobsAfterReplay = await inWorkspace(pool, workspaceId, async (client) => {
+      const result = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM goal_assessment_jobs WHERE record_id = $1",
+        [ids.record],
+      );
+      return result.rows[0]!.count;
+    });
+    assert.equal(jobsAfterReplay, "4");
+
+    // workspace/RLS mismatch must fail closed rather than treating the hidden
+    // Goal set as an ordinary no-op.
+    await assert.rejects(
+      inWorkspace(pool, workspaceId, (client) =>
+        enqueueGoalAssessmentJobsForCommittedEvents(client, {
+          workspaceId: foreignWorkspaceId,
+          worldId: ids.world,
+          worldlineId: ids.worldline,
+          recordId: ids.record,
+          eventIds: [committedEventIds[0]!],
+        }),
+      ),
+      (error: unknown) => error instanceof GoalRuntimeRepositoryError
+        && error.code === "GOAL_SCOPE_MISMATCH",
+    );
+
+    // A pre-existing natural-key row with a non-derived id is corruption, not
+    // an idempotent replay: the enqueue must abort instead of silently merging.
+    const corruptedJobId = `corrupt-goal-job-${randomUUID()}`;
+    await inWorkspace(pool, workspaceId, async (client) => {
+      const result = await client.query(
+        `UPDATE goal_assessment_jobs
+         SET id = $1
+         WHERE workspace_id = $2 AND goal_instance_id = $3 AND source_event_id = $4`,
+        [corruptedJobId, workspaceId, activeGoalId, committedEventIds[0]],
+      );
+      assert.equal(result.rowCount, 1);
+    });
+    await assert.rejects(
+      inWorkspace(pool, workspaceId, (client) =>
+        enqueueGoalAssessmentJobsForCommittedEvents(client, {
+          workspaceId,
+          worldId: ids.world,
+          worldlineId: ids.worldline,
+          recordId: ids.record,
+          eventIds: [committedEventIds[0]!],
+        }),
+      ),
+      (error: unknown) => error instanceof GoalRuntimeRepositoryError
+        && error.code === "GOAL_JOB_IDENTITY_CONFLICT",
+    );
+    await inWorkspace(pool, workspaceId, async (client) => {
+      const result = await client.query(
+        `UPDATE goal_assessment_jobs
+         SET id = $1
+         WHERE workspace_id = $2 AND goal_instance_id = $3 AND source_event_id = $4`,
+        [
+          goalAssessmentJobIdFor(workspaceId, activeGoalId, committedEventIds[0]!),
+          workspaceId,
+          activeGoalId,
+          committedEventIds[0],
+        ],
+      );
+      assert.equal(result.rowCount, 1);
+    });
+
+    // workspace 隔离：foreign Workspace 的同 id Record 不得被串写。
+    const foreignJobs = await inWorkspace(pool, foreignWorkspaceId, async (client) => {
+      const result = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM goal_assessment_jobs WHERE record_id = $1",
+        [ids.record],
+      );
+      return result.rows[0]!.count;
+    });
+    assert.equal(foreignJobs, "0");
+
+    // Record binding：claim 读出的 world_version 是 records.world_version
+    //（'1.2.0'），不是 worlds.world_version（'9.9.9'）。
+    const queue = createPostgresGoalAssessmentJobQueue({
+      pool,
+      workspaceId,
+      leaseOwner: "goal-test-worker",
+      leaseDurationMs: 30_000,
+    });
+    const claimed = await queue.claimNext({ now: new Date().toISOString() });
+    assert.ok(claimed);
+    assert.equal(claimed.worldVersion, "1.2.0");
+    assert.ok(committedEventIds.includes(claimed.sourceEventId));
+
+    // 无 Goal 的旧路径：commitRelease 不产生任何 job（hook 已接线）。
+    const goalLessIds = {
+      world: `world_${randomUUID()}`,
+      worldline: `worldline_${randomUUID()}`,
+      story: `story_${randomUUID()}`,
+      record: `record_${randomUUID()}`,
+      scene: `scene_${randomUUID()}`,
+      definition: `definition_${randomUUID()}`,
+      continuity: `continuity_${randomUUID()}`,
+      instance: `instance_${randomUUID()}`,
+      visibility: `visibility_${randomUUID()}`,
+    };
+    await seedRuntimeScope(pool, workspaceId, goalLessIds);
+    const goalLessCommand: RuntimeCommand<CommandPayload> = {
+      commandType: "player.utterance",
+      recordId: goalLessIds.record,
+      expectedRecordVersion: 0,
+      idempotencyKey: "goal-less-turn",
+      actorId: null,
+      payload: ["无目标世界线"],
+    };
+    const goalLessDependencies = dependenciesFor(
+      { scene: goalLessIds.scene, visibility: goalLessIds.visibility },
+      goalEnqueueHook,
+    );
+    const goalLessCompleted = await executeTurn(goalLessCommand, goalLessDependencies);
+    assert.equal(goalLessCompleted.state, "completed");
+    const goalLessJobs = await inWorkspace(pool, workspaceId, async (client) => {
+      const result = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM goal_assessment_jobs WHERE record_id = $1",
+        [goalLessIds.record],
+      );
+      return result.rows[0]!.count;
+    });
+    assert.equal(goalLessJobs, "0");
+
+    // 事务异常 fail-closed：hook 抛错 → 整个 release 回滚——无事件、无
+    // job、head 不推进（不得在事务外补写）。
+    const failingDependencies = dependenciesFor(
+      { scene: goalLessIds.scene, visibility: goalLessIds.visibility },
+      async () => {
+        throw new Error("goal enqueue exploded");
+      },
+    );
+    const failed = await executeTurn(
+      {
+        commandType: "player.utterance",
+        recordId: goalLessIds.record,
+        expectedRecordVersion: 1,
+        idempotencyKey: "goal-enqueue-rollback",
+        actorId: null,
+        payload: ["必须整体回滚"],
+      },
+      failingDependencies,
+    );
+    assert.notEqual(failed.state, "completed");
+    const rollbackState = await inWorkspace(pool, workspaceId, async (client) => {
+      const events = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM events WHERE record_id = $1",
+        [goalLessIds.record],
+      );
+      const jobsResult = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM goal_assessment_jobs WHERE record_id = $1",
+        [goalLessIds.record],
+      );
+      const head = await client.query<{ record_version: string }>(
+        "SELECT record_version::text AS record_version FROM record_heads WHERE workspace_id = $1 AND record_id = $2",
+        [workspaceId, goalLessIds.record],
+      );
+      return {
+        events: events.rows[0]!.count,
+        jobs: jobsResult.rows[0]!.count,
+        recordVersion: head.rows[0]!.record_version,
+      };
+    });
+    // 首回合留下 2 条事件；失败回合零残留、head 停在 1。
+    assert.deepEqual(rollbackState, { events: "2", jobs: "0", recordVersion: "1" });
+  },
+);
+
 function tickingClock() {
   let second = 0;
   return () => new Date(Date.UTC(2026, 7, 13, 5, 0, second++)).toISOString();
@@ -313,7 +756,10 @@ async function seedRuntimeScope(
   ids: Record<string, string>,
 ): Promise<void> {
   await inWorkspace(pool, workspaceId, async (client) => {
-    await client.query("INSERT INTO workspaces (id, name) VALUES ($1, 'Repository Test')", [workspaceId]);
+    await client.query(
+      "INSERT INTO workspaces (id, name) VALUES ($1, 'Repository Test') ON CONFLICT (id) DO NOTHING",
+      [workspaceId],
+    );
     await client.query(
       "INSERT INTO worlds (workspace_id, id, name, calendar_id) VALUES ($1, $2, 'Test World', 'test-calendar')",
       [workspaceId, ids.world],

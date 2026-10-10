@@ -89,7 +89,7 @@ const SCOUT = {
 test("orchestration turn: every system message is English-only, dynamic data stays in user", async () => {
   const captured: ModelChatRequest[] = [];
   const gateway = capturingGateway(captured, {
-    goal: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
+    turnIntent: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
   });
   const orchestrator = createModelPoweredM2TurnOrchestrator({
     characters: [SCOUT],
@@ -183,7 +183,7 @@ test("natural-language chains carry voice rules; dynamic names stay out of syste
     language: "zh-CN",
   });
   const plan = {
-    goal: "回应玩家",
+    turnIntent: "回应玩家",
     constraints: [],
     activatedCharacters: [SCOUT],
     narratorEnabled: true,
@@ -407,7 +407,7 @@ test("connectivity probe is an English-only structured chain with shared schema"
 test("SWM v2: lore excerpts enter user context as background, canon stays binding, crystallization excluded", async () => {
   const captured: ModelChatRequest[] = [];
   const gateway = capturingGateway(captured, {
-    goal: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
+    turnIntent: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
   });
   const loreBrief = {
     ...CHINESE_BRIEF,
@@ -432,7 +432,7 @@ test("SWM v2: lore excerpts enter user context as background, canon stays bindin
   const emptyOrchestrator = createModelPoweredM2TurnOrchestrator({
     characters: [SCOUT],
     getGateway: async () => capturingGateway(emptyCaptured, {
-      goal: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
+      turnIntent: "回应玩家", activatedCharacterInstanceIds: [], narratorEnabled: true,
     }),
     brief: { ...CHINESE_BRIEF, worldLore: "" },
   });
@@ -544,7 +544,7 @@ test("SWM v2: lore consumers are explicit opt-in — classifiers/reviewer never 
       }
       if (system.includes("DM Controller")) {
         return json({
-          goal: "回应玩家",
+          turnIntent: "回应玩家",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: true,
         });
@@ -556,7 +556,7 @@ test("SWM v2: lore consumers are explicit opt-in — classifiers/reviewer never 
         return json({ action: "塞娜点头。", dialogue: "“嗯。”" });
       }
       if (system.includes("DM output reviewer")) {
-        return json({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return json({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("unexpected call");
     },

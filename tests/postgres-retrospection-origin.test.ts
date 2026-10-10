@@ -63,6 +63,22 @@ const MIGRATIONS = [
   "0038_remove_base_skill_hidden_clue.sql",
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0041_article_qualification_and_import_entries.sql",
+  "0042_realm_transfer_and_import_jobs.sql",
+  "0043_propagation_node_audience_archived_guard.sql",
+  "0044_record_branch_timeline_kind.sql",
+  "0045_lobby_rooms.sql",
+  "0046_lobby_room_world_link.sql",
+  "0047_lobby_host_lease.sql",
+  "0048_scene_image_generations.sql",
+  "0049_scene_image_mode.sql",
+  "0050_scene_image_requests.sql",
+  "0051_account_password_hash.sql",
+  "0052_scene_image_queue_lease_fencing.sql",
+  "0053_membership_capability.sql",
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0057_realmworld_record_binding.sql",
 ];
 
 const SCOPE = {

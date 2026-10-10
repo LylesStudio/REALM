@@ -948,8 +948,17 @@ export function classifyFailure(error: unknown): RuntimeFailureClassification {
   };
 }
 
-export interface InMemoryRuntimeRepositoryOptions {
+export interface InMemoryRuntimeRepositoryOptions<
+  TCommandPayload extends JsonValue = JsonValue,
+  TPlan extends JsonValue = JsonValue,
+  TCandidate extends JsonValue = JsonValue,
+  TValidation extends JsonValue = JsonValue,
+> {
   recordHeads?: readonly RuntimeRecordHead[];
+  /** Optional domain checkpoint hydration hook; defaults to identity. */
+  normalizeCheckpoint?: (
+    run: TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>,
+  ) => TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>;
 }
 
 /** Deterministic local adapter used by unit tests and local-only prototypes. */
@@ -961,7 +970,12 @@ export function createInMemoryRuntimeRepository<
   TEvent extends JsonValue = JsonValue,
   TOutbox extends JsonValue = JsonValue,
 >(
-  options: InMemoryRuntimeRepositoryOptions = {},
+  options: InMemoryRuntimeRepositoryOptions<
+    TCommandPayload,
+    TPlan,
+    TCandidate,
+    TValidation
+  > = {},
 ): RuntimeRepository<
   TCommandPayload,
   TPlan,
@@ -981,6 +995,7 @@ export function createInMemoryRuntimeRepository<
   const events = new Map<string, RuntimeCommittedEvent<TEvent>>();
   const outbox = new Map<string, RuntimeOutboxMessage<TOutbox>>();
   const outboxDedupe = new Map<string, string>();
+  const normalizeCheckpoint = options.normalizeCheckpoint ?? ((run) => run);
 
   function getMutableTurn(
     turnId: string,
@@ -989,7 +1004,9 @@ export function createInMemoryRuntimeRepository<
     if (!run) {
       throw new RuntimeInvariantError("TURN_NOT_FOUND", "Turn not found.");
     }
-    return run;
+    const normalized = normalizeCheckpoint(run);
+    if (normalized !== run) turns.set(turnId, normalized);
+    return normalized;
   }
 
   function assertTurnVersion(
@@ -1046,7 +1063,10 @@ export function createInMemoryRuntimeRepository<
 
     async loadTurn(turnId) {
       const run = turns.get(turnId);
-      return run ? clone(run) : null;
+      if (!run) return null;
+      const normalized = normalizeCheckpoint(run);
+      if (normalized !== run) turns.set(turnId, normalized);
+      return clone(normalized);
     },
 
     async advanceTurn(input) {
@@ -1617,6 +1637,8 @@ function canonicalJson(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+
+export * from "./headless-runtime.ts";
 
 function clone<T>(value: T): T {
   return structuredClone(value);

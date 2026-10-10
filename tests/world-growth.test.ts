@@ -530,7 +530,7 @@ function createGrowthFixture(options: {
       dmController: {
         async plan() {
           return {
-            goal: "回应玩家",
+            turnIntent: "回应玩家",
             constraints: [],
             activatedCharacters: [],
             narratorEnabled: false,

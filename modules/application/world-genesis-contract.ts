@@ -13,6 +13,18 @@ import { normalizeWorldStyle, type WorldStyle } from "../style/world-style.ts";
 export const GENESIS_LANGUAGES = ["zh-CN", "en", "ja"] as const;
 export type GenesisLanguage = (typeof GENESIS_LANGUAGES)[number];
 
+/**
+ * RealmWorld 声明式 Goal 的创建期物化声明。只携带 Record-scoped 运行态
+ * 所需的键（goal key + policy version）；定义、rubric 与文案仍留在
+ * RealmWorld 内容层（引擎升级计划 §2.2 硬边界），绝不随草稿落库。
+ * 仅 declarative RealmWorld instantiate 路径设置；模型/表单 genesis
+ * 永远不产生该字段。
+ */
+export interface WorldGenesisGoalDeclaration {
+  goalKey: string;
+  policyVersion: string;
+}
+
 export function normalizeGenesisLanguage(value: unknown): GenesisLanguage | undefined {
   return typeof value === "string"
     && (GENESIS_LANGUAGES as readonly string[]).includes(value)
@@ -21,6 +33,16 @@ export function normalizeGenesisLanguage(value: unknown): GenesisLanguage | unde
 }
 
 export interface WorldGenesisDraft {
+  /** Engine-owned identity override used only by declarative RealmWorld instantiation. */
+  worldIdentity?: { worldId: string; worldVersion: string };
+  /** Stable runtime topology IDs used for idempotent RealmWorld instantiation. */
+  runtimeIdentity?: { worldlineId: string; storyId: string; recordId: string };
+  /**
+   * Declarative RealmWorld Goals to materialize as Record-scoped
+   * goal_instances in the same genesis transaction (and to enqueue opening
+   * assessment jobs for). Absent/empty = legacy path, no behavior change.
+   */
+  goals?: readonly WorldGenesisGoalDeclaration[];
   world: { name: string; era: string; summary: string };
   /** 初始运行内容语言；缺省时由当前账号的系统/界面语言补齐。 */
   language?: GenesisLanguage;
@@ -32,7 +54,7 @@ export interface WorldGenesisDraft {
   playerRole: string;
   /** 契合世界观的本地 AI 同伴，至多两名。 */
   companions: { name: string; role: string; summary: string }[];
-  scene: { location: string; weather: string; tension: string; objective: string };
+  scene: { title?: string; location: string; weather: string; tension: string; displayTime?: string; objective: string };
   /**
    * 批次 S：人类玩家的姿态。player=入局（默认），observer=观察者·执笔者。
    * 旧路径缺省按 player 处理，向后兼容。

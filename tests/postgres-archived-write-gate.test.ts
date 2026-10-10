@@ -309,18 +309,8 @@ test(
       createdAt: new Date().toISOString(),
     };
     await expectArchived("merge insertMerge", () => merges.insertMerge(SCOPE, mergeRow));
-    await expectArchived("merge createMergedTopology", () =>
-      merges.createMergedTopology(SCOPE, {
-        worldlineId: `worldline_${randomUUID().slice(0, 8)}`,
-        label: "merged",
-        storyId: `story_${randomUUID().slice(0, 8)}`,
-        storyTitle: "merged",
-        records: [],
-        headTick: 0,
-        headOrdinal: 0,
-      }));
     await expectArchived("merge createMergedTopologyAndAudit", () =>
-      merges.createMergedTopologyAndAudit!(
+      merges.createMergedTopologyAndAudit(
         SCOPE,
         {
           worldlineId: `worldline_${randomUUID().slice(0, 8)}`,
@@ -328,6 +318,8 @@ test(
           storyId: `story_${randomUUID().slice(0, 8)}`,
           storyTitle: "merged",
           records: [],
+          continuities: [],
+          sourceFingerprints: [],
           headTick: 0,
           headOrdinal: 0,
         },

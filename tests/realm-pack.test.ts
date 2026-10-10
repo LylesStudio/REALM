@@ -854,7 +854,7 @@ test("dual codec round-trip: camel→snake keys and all value kinds", () => {
 // D.7 export-matrix 围栏
 // ---------------------------------------------------------------------------
 
-test("export-matrix fences: 65-table diff / text[] list / scope sets", async () => {
+test("export-matrix fences: runtime table diff / text[] list / scope sets", async () => {
   const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
   const tablePattern = /CREATE TABLE IF NOT EXISTS ([a-z_]+)/g;
   const actual = new Set<string>();
@@ -864,11 +864,12 @@ test("export-matrix fences: 65-table diff / text[] list / scope sets", async () 
       fs.readFile(new URL(filename, migrationDir), "utf8"));
     for (const match of sql.matchAll(tablePattern)) actual.add(match[1]!);
   }
-  // 0042 已入库：5 个规划表成为实有表（56+5=61，planned 集合为空）。
+  // 0042 已入库：5 个规划表成为实有表；0055 Goal runtime 三表与 0057
+  // 版本切换审计表明确作为 excluded 行进入矩阵，planned 集合保持为空。
   const planned: string[] = [];
-  assert.equal(actual.size, 67, `实有表应为 67（56+0042 五表+0045 大厅两表+0048 场景图台账+0050 自动请求队列+0053 capability 两表；0046/0049 不加表），实际 ${actual.size}`);
+  assert.equal(actual.size, 71, `实有表应为 71（67+0055 Goal runtime 三表+0057 realmworld_version_switches；Goal/切换审计在 dedicated 路由前保持 excluded），实际 ${actual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 67, `矩阵应为 67 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 71, `矩阵应为 71 行，实际 ${matrixTables.size}`);
   for (const table of [...actual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }

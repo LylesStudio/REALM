@@ -24,6 +24,26 @@ import {
   type GenesisLanguage,
   type WorldGenesisDraft,
 } from "./world-genesis.ts";
+import {
+  LOCAL_WORLD_VERSION,
+  worldBindingFromWorldIdentity,
+  type WorldBinding,
+} from "../world-transfer/realm-save.ts";
+import type { BaseInstantiationPlan } from "../world-transfer/base-content.ts";
+import { createBaseInstantiationPlan } from "../world-transfer/base-content.ts";
+import {
+  baseGenesisParametersFromDraft,
+  baseInstantiationPlanToGenesisDraft,
+  instantiationPlanToGenesisDraft,
+} from "./genesis-instantiation.ts";
+import type { RealmWorldRuntimeInstantiationPlan } from "../world-transfer/realmworld-runtime-content.ts";
+import {
+  cloneGoalInstancesForBranch,
+  enqueueGoalAssessmentJobsForCommittedEvents,
+  lockGoalInstancesForBranch,
+  materializeGoalInstances,
+  type GoalMaterializationDeclaration,
+} from "../../database/postgres/goal-runtime-materialization.ts";
 
 export interface LibraryScope {
   workspaceId: string;
@@ -74,6 +94,16 @@ export interface LibraryWorld {
   style: string;
   summary: string;
   status: string;
+  /**
+   * Phase 1B：世界内容身份版本（worlds.world_version 显式读出）。
+   * LOCAL_WORLD_VERSION = base / 本地自建世界哨兵。
+   */
+  worldVersion: string;
+  /**
+   * Phase 1B：由 worldId + worldVersion 经 worldBindingFromWorldIdentity
+   * 映射的一级绑定；非法身份在 normalize 处 fail-closed，绝不回退 base。
+   */
+  binding: WorldBinding;
   /** 批次 S：当前 principal 在本世界的 membership.role（姿态开关状态）。 */
   membershipRole: string;
   /** 批次 T8：世界卡信息密度（聚合计数与最近活动时间，无 N+1）。 */
@@ -92,7 +122,13 @@ export interface LibrarySnapshot {
   worlds: LibraryWorld[];
 }
 
-/** branchRecord 输入：fork 缺省 = 源 record 当前 effective head。 */
+/**
+ * branchRecord 输入：fork 缺省 = 源 record 当前 effective head。
+ *
+ * Goal runtime 分支语义（fail-closed）：源 record 持有 goal_instances 时
+ * 只允许 fork == 当前有效 head（Goal 运行态随分支克隆进新 record）；
+ * 历史分叉以 BRANCH_GOAL_STATE_UNAVAILABLE 拒绝，不写任何拓扑行。
+ */
 export interface RecordBranchInput {
   sourceRecordId: string;
   /**
@@ -201,6 +237,30 @@ export interface LibraryService {
     scope: LibraryScope,
     draft: WorldGenesisDraft,
   ): Promise<{ worldId: string; storyId: string; recordId: string }>;
+  /** Materializes a signed declarative RealmWorld plan through the existing genesis transaction. */
+  instantiateRealmWorld(
+    scope: LibraryScope,
+    plan: RealmWorldRuntimeInstantiationPlan,
+    idempotencyKey: string,
+  ): Promise<{
+    worldId: string;
+    worldlineId: string;
+    storyId: string;
+    recordId: string;
+    replayed: boolean;
+  }>;
+  /**
+   * Materializes an engine-owned base instantiation plan through the same
+   * genesis transaction as signed RealmWorld content（引擎升级计划 §6：base
+   * 内置内容复用同一内容解析层与运行内核）。persistence-neutral：不要求
+   * install root/trust-store，不执行安装/网络；binding 恒为
+   * `{ kind: "base" }`（否则 fail-closed），落库 world_version 恒为
+   * LOCAL_WORLD_VERSION 哨兵。
+   */
+  instantiateBaseWorld(
+    scope: LibraryScope,
+    plan: BaseInstantiationPlan,
+  ): Promise<{ worldId: string; storyId: string; recordId: string }>;
 }
 
 export class LibraryServiceError extends Error {
@@ -217,7 +277,10 @@ export class LibraryServiceError extends Error {
     | "RECORD_SELF_PLAY_ACTIVE"
     | "RECORD_TURN_ACTIVE"
     | "WORLD_READ_ONLY"
-    | "INVALID_FORK";
+    | "INVALID_FORK"
+    | "BRANCH_GOAL_STATE_UNAVAILABLE"
+    | "REALMWORLD_INSTANCE_CONFLICT"
+    | "REALMWORLD_IDENTITY_CONFLICT";
 
   constructor(
     code:
@@ -233,7 +296,10 @@ export class LibraryServiceError extends Error {
       | "RECORD_SELF_PLAY_ACTIVE"
       | "RECORD_TURN_ACTIVE"
       | "WORLD_READ_ONLY"
-      | "INVALID_FORK",
+      | "INVALID_FORK"
+      | "BRANCH_GOAL_STATE_UNAVAILABLE"
+      | "REALMWORLD_INSTANCE_CONFLICT"
+      | "REALMWORLD_IDENTITY_CONFLICT",
     message: string,
   ) {
     super(message);
@@ -249,6 +315,7 @@ interface WorldRow extends QueryResultRow {
   style: string;
   summary: string;
   status: string;
+  world_version: string;
   membership_role: string | null;
   story_count: number;
   branch_count: number;
@@ -332,6 +399,7 @@ export function createPostgresLibraryService(
               COALESCE(world.settings->>'style', '') AS style,
               world.summary,
               world.status,
+              world.world_version,
               (
                 SELECT count(*)::int
                 FROM stories AS story
@@ -530,7 +598,13 @@ export function createPostgresLibraryService(
             if (!draft) {
               throw new LibraryServiceError("INVALID_COMMAND", "Preset world language is unavailable.");
             }
-            const ids = await this.createGenesis(scope, draft);
+            // base 统一内容层（§6）：preset 草稿降格为参数，经 base 内容
+            // provider 生成 instantiation plan，再走与 signed RealmWorld
+            // 相同的 plan → draft → createGenesis 物化契约。
+            const plan = createBaseInstantiationPlan(
+              baseGenesisParametersFromDraft(draft),
+            );
+            const ids = await this.instantiateBaseWorld(scope, plan);
             return { recordId: ids.recordId };
           }
 
@@ -827,10 +901,14 @@ export function createPostgresLibraryService(
           const story = await client.query<{
             world_id: string;
             worldline_id: string;
+            world_version: string;
           }>(
-            `SELECT world_id, worldline_id
-             FROM stories
-             WHERE workspace_id = $1 AND id = $2`,
+            `SELECT story.world_id, story.worldline_id, world.world_version
+             FROM stories AS story
+             JOIN worlds AS world
+               ON world.workspace_id = story.workspace_id
+              AND world.id = story.world_id
+             WHERE story.workspace_id = $1 AND story.id = $2`,
             [scope.workspaceId, command.storyId],
           );
           const storyRow = story.rows[0];
@@ -867,8 +945,9 @@ export function createPostgresLibraryService(
           await client.query(
             `INSERT INTO records (
                workspace_id, world_id, worldline_id, story_id, id, title,
-               status, start_tick, start_ordinal, timeline_kind, linked_record_id
-             ) VALUES ($1, $2, $3, $4, $5, $6, 'draft', 0, 0, $7, $8)`,
+               status, start_tick, start_ordinal, timeline_kind, linked_record_id,
+               world_version
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'draft', 0, 0, $7, $8, $9)`,
             [
               scope.workspaceId,
               storyRow.world_id,
@@ -878,6 +957,7 @@ export function createPostgresLibraryService(
               command.title.trim(),
               timelineKind,
               command.mergeTargetRecordId ?? null,
+              storyRow.world_version,
             ],
           );
           await client.query(
@@ -909,17 +989,52 @@ export function createPostgresLibraryService(
         database,
         scope.workspaceId,
         async (client) => {
+          // Goal 声明在任何 topology 写入前校验（fail-closed）；事务
+          // 回滚兜底零残留。
+          const declaredGoals = validateGenesisGoalDeclarations(draft.goals);
           const contentLanguage = draft.language
             ?? await resolveAccountLanguage(client, scope);
-          const worldId = `world_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
-          const worldlineId = `worldline_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
-          const storyId = `story_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
-          const recordId = `record_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          const worldId = draft.worldIdentity?.worldId
+            ?? `world_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          const worldlineId = draft.runtimeIdentity?.worldlineId
+            ?? `worldline_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          const storyId = draft.runtimeIdentity?.storyId
+            ?? `story_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          const recordId = draft.runtimeIdentity?.recordId
+            ?? `record_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          if (draft.runtimeIdentity) {
+            const existing = await client.query<{
+              world_id: string;
+              worldline_id: string;
+              story_id: string;
+            }>(
+              `SELECT world_id, worldline_id, story_id
+               FROM records
+               WHERE workspace_id = $1 AND id = $2`,
+              [scope.workspaceId, recordId],
+            );
+            if (existing.rows[0]) {
+              const row = existing.rows[0];
+              if (row.world_id !== worldId
+                || row.worldline_id !== worldlineId
+                || row.story_id !== storyId) {
+                throw new LibraryServiceError(
+                  "REALMWORLD_INSTANCE_CONFLICT",
+                  "RealmWorld instance identity conflicts with an existing Record.",
+                );
+              }
+              return { worldId, storyId, recordId };
+            }
+          }
+          // base（无 worldIdentity）落库恒为 LOCAL_WORLD_VERSION 哨兵——
+          // 绝不伪装成 RealmWorld package 版本。
+          const worldVersion = draft.worldIdentity?.worldVersion ?? LOCAL_WORLD_VERSION;
 
           await client.query(
             `INSERT INTO worlds (
-               workspace_id, id, name, status, calendar_id, summary, settings
-             ) VALUES ($1, $2, $3, 'active', 'native_calendar', $4, $5::jsonb)`,
+               workspace_id, id, name, status, calendar_id, summary, settings, world_version
+             ) VALUES ($1, $2, $3, 'active', 'native_calendar', $4, $5::jsonb, $6)
+             ON CONFLICT (workspace_id, id) DO NOTHING`,
             [
               scope.workspaceId,
               worldId,
@@ -931,9 +1046,31 @@ export function createPostgresLibraryService(
                 language: contentLanguage,
                 weather: draft.scene.weather,
                 tension: draft.scene.tension,
+                displayTime: draft.scene.displayTime,
               }),
+              worldVersion,
             ],
           );
+          const persistedWorld = await client.query<{ world_version: string; status: string }>(
+            `SELECT world_version, status
+             FROM worlds
+             WHERE workspace_id = $1 AND id = $2
+             FOR KEY SHARE`,
+            [scope.workspaceId, worldId],
+          );
+          const worldRow = persistedWorld.rows[0];
+          if (!worldRow) {
+            throw new LibraryServiceError("WORLD_NOT_FOUND", "RealmWorld target world was not created.");
+          }
+          if (worldRow.world_version !== worldVersion) {
+            throw new LibraryServiceError(
+              "REALMWORLD_IDENTITY_CONFLICT",
+              "RealmWorld world identity conflicts with the persisted world version.",
+            );
+          }
+          if (worldRow.status === "archived") {
+            throw new LibraryServiceError("WORLD_ARCHIVED", "RealmWorld target world is archived.");
+          }
           await client.query(
             `INSERT INTO worldlines (
                workspace_id, world_id, id, label, status, head_tick, head_ordinal
@@ -952,12 +1089,12 @@ export function createPostgresLibraryService(
             principalId: scope.principalId,
             role: observer ? "observer" : "owner",
           });
-          const companions = draft.companions.slice(0, 2).map((companion) => ({
+          const companions = draft.companions.map((companion) => ({
             id: `char_def_${randomUUID().replaceAll("-", "").slice(0, 18)}`,
             name: companion.name,
             role: companion.role,
           }));
-          for (const [index, companion] of draft.companions.slice(0, 2).entries()) {
+          for (const [index, companion] of draft.companions.entries()) {
             await client.query(
               `INSERT INTO character_definitions (
                  workspace_id, world_id, id, display_name, source_format, profile
@@ -988,8 +1125,9 @@ export function createPostgresLibraryService(
           await client.query(
             `INSERT INTO records (
                workspace_id, world_id, worldline_id, story_id, id, title,
-               status, start_tick, start_ordinal, timeline_kind, linked_record_id
-             ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 'primary', NULL)`,
+               status, start_tick, start_ordinal, timeline_kind, linked_record_id,
+               world_version
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 'primary', NULL, $7)`,
             [
               scope.workspaceId,
               worldId,
@@ -997,6 +1135,7 @@ export function createPostgresLibraryService(
               storyId,
               recordId,
               draft.record.title,
+              worldVersion,
             ],
           );
           await client.query(
@@ -1017,9 +1156,11 @@ export function createPostgresLibraryService(
               playerRole: draft.playerRole,
               observer,
               scene: {
-                title: "开幕",
+                title: draft.scene.title,
                 location: draft.scene.location,
+                weather: draft.scene.weather,
                 tension: draft.scene.tension,
+                displayTime: draft.scene.displayTime,
                 objective: draft.scene.objective,
               },
             },
@@ -1038,7 +1179,7 @@ export function createPostgresLibraryService(
             playerRole: draft.playerRole,
             playerName: (await resolvePlayerPersona(client, scope, worldId)).name,
             playerStance: draft.playerStance,
-            companions: draft.companions.slice(0, 2).map((companion) => ({
+            companions: draft.companions.map((companion) => ({
               name: companion.name,
               role: companion.role,
               summary: companion.summary,
@@ -1051,7 +1192,7 @@ export function createPostgresLibraryService(
             },
             opening: draft.opening,
           };
-          await insertOpeningEvent(
+          const openingEventId = await insertOpeningEvent(
             client,
             scope,
             { world_id: worldId, worldline_id: worldlineId },
@@ -1059,6 +1200,24 @@ export function createPostgresLibraryService(
             assembled,
             composeDeterministicOpening(firstNightContext),
           );
+          // Goal runtime materialization：声明式 Goal 在创建 Record 的同
+          // 一 workspace 事务内物化为 goal_instances（仅 Record-scoped
+          // 运行态；定义/rubric 留在 RealmWorld 内容层），并对同一事务内
+          // 真实落库的 opening 事件 enqueue durable assessment job。
+          // 旧 base/genesis 路径无 goals——零行为变化、零写入。
+          if (declaredGoals.length > 0) {
+            const goalScope = {
+              workspaceId: scope.workspaceId,
+              worldId,
+              worldlineId,
+              recordId,
+            };
+            await materializeGoalInstances(client, goalScope, declaredGoals);
+            await enqueueGoalAssessmentJobsForCommittedEvents(client, {
+              ...goalScope,
+              eventIds: [openingEventId],
+            });
+          }
           await client.query(
             `INSERT INTO record_first_nights (
                workspace_id, record_id, world_id, state, attempts, context
@@ -1075,6 +1234,74 @@ export function createPostgresLibraryService(
       );
     },
 
+    async instantiateRealmWorld(scope, plan, idempotencyKey) {
+      const stableKey = idempotencyKey.trim();
+      if (!stableKey) {
+        throw new LibraryServiceError("INVALID_COMMAND", "RealmWorld idempotency key is required.");
+      }
+      const digest = createHash("sha256")
+        .update([
+          "realmworld-instance:v1",
+          scope.workspaceId,
+          plan.binding.worldId,
+          plan.binding.worldVersion,
+          stableKey,
+        ].join("\u0000"))
+        .digest("hex");
+      const runtimeIdentity = {
+        worldlineId: `worldline_realm_${digest.slice(0, 18)}`,
+        storyId: `story_realm_${digest.slice(18, 36)}`,
+        recordId: `record_realm_${digest.slice(36, 54)}`,
+      };
+      const existing = await withWorkspaceTransaction(
+        database,
+        scope.workspaceId,
+        async (client) => client.query<{
+          world_id: string;
+          worldline_id: string;
+          story_id: string;
+        }>(
+          `SELECT world_id, worldline_id, story_id
+           FROM records
+           WHERE workspace_id = $1 AND id = $2`,
+          [scope.workspaceId, runtimeIdentity.recordId],
+        ),
+        { readOnly: true },
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        if (row.world_id !== plan.binding.worldId
+          || row.worldline_id !== runtimeIdentity.worldlineId
+          || row.story_id !== runtimeIdentity.storyId) {
+          throw new LibraryServiceError(
+            "REALMWORLD_INSTANCE_CONFLICT",
+            "RealmWorld idempotency key resolves to a conflicting Record.",
+          );
+        }
+        return { ...runtimeIdentity, worldId: row.world_id, replayed: true };
+      }
+      const draft = instantiationPlanToGenesisDraft(plan, runtimeIdentity);
+      const created = await this.createGenesis(scope, draft);
+      return { ...created, worldlineId: runtimeIdentity.worldlineId, replayed: false };
+    },
+    async instantiateBaseWorld(scope, plan) {
+      // 身份边界 fail-closed：world-bound 计划必须走 instantiateRealmWorld
+      // （幂等键 + 精确身份），绝不在此降级/伪装；base binding 必须是精确
+      // 的 { kind: "base" }（不夹带任何 worldId/worldVersion 键）。
+      const binding = plan?.binding as Record<string, unknown> | undefined;
+      if (
+        !binding
+        || binding.kind !== "base"
+        || Object.keys(binding).length !== 1
+      ) {
+        throw new LibraryServiceError(
+          "INVALID_COMMAND",
+          "Base instantiation requires an exact { kind: \"base\" } WorldBinding.",
+        );
+      }
+      const draft = baseInstantiationPlanToGenesisDraft(plan);
+      return this.createGenesis(scope, draft);
+    },
     async duplicateRecord(scope, sourceRecordId) {
       return withWorkspaceTransaction(
         writeDatabase,
@@ -1144,6 +1371,7 @@ type DuplicateSourceRow = QueryResultRow & {
   world_id: string;
   worldline_id: string;
   story_id: string;
+  world_version: string;
   record_title: string;
   story_title: string;
   story_premise: string;
@@ -1169,6 +1397,7 @@ async function duplicateRecordInTransaction(
        record.world_id,
        record.worldline_id,
        record.story_id,
+       record.world_version,
        record.title AS record_title,
        story.title AS story_title,
        story.premise AS story_premise,
@@ -1296,8 +1525,9 @@ async function duplicateRecordInTransaction(
   await client.query(
     `INSERT INTO records (
        workspace_id, world_id, worldline_id, story_id, id, title,
-       status, start_tick, start_ordinal, timeline_kind, linked_record_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, 'retrospection', $9)`,
+       status, start_tick, start_ordinal, timeline_kind, linked_record_id,
+       world_version
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, 'retrospection', $9, $10)`,
     [
       scope.workspaceId,
       sourceRow.world_id,
@@ -1308,6 +1538,7 @@ async function duplicateRecordInTransaction(
       forkTick,
       forkOrdinal,
       sourceRecordId,
+      sourceRow.world_version,
     ],
   );
   await client.query(
@@ -1379,9 +1610,20 @@ function compareBranchCursor(
  * 首个 scene。events 不复制、源 record 不改写。
  *
  * 锁序（world-write-gate.ts:9-13）：worlds(KEY SHARE) → records(FOR
- * UPDATE) → record_heads → worldlines/stories/records 插入。源 record
- * FOR UPDATE 同时是幂等/并发的串行点：同一源 record 的并发分叉在此
- * 排队，check-then-insert 无竞态。
+ * UPDATE) → goal_instances(FOR UPDATE，③b) → record_heads →
+ * worldlines/stories/records 插入。goal_instances 锁点与 assessment
+ * settle 路径同序（records → goal_instances → record_heads），避免
+ * AB-BA 死锁。源 record FOR UPDATE 同时是幂等/并发的串行点：同一源
+ * record 的并发分叉在此排队，check-then-insert 无竞态。
+ *
+ * Goal runtime（0055）：Goal instances 是 Record-scoped 运行态，分支是
+ * 新 record/worldline，不得让 Goal 静默消失。源 record 有 Goal 时只
+ * 允许 fork == 当前有效 head；历史分叉 fail-closed
+ * （BRANCH_GOAL_STATE_UNAVAILABLE，先于任何拓扑写入）。允许的当前 head
+ * 分支在同一事务内把每个 goal_instances 行克隆进目标 Record scope
+ * （确定性 goalInstanceIdFor；state/revision/progress/outcome/
+ * policy_version/completed_at 逐字节保留），绝不克隆
+ * goal_assessment_jobs / goal_assessments；identity/约束冲突即整体回滚。
  */
 async function createRecordBranchInTransaction(
   client: PoolClient,
@@ -1415,6 +1657,7 @@ async function createRecordBranchInTransaction(
   const source = await client.query<{
     worldline_id: string;
     story_id: string;
+    world_version: string;
     record_title: string;
     record_status: string;
     story_title: string;
@@ -1427,6 +1670,7 @@ async function createRecordBranchInTransaction(
     `SELECT
        record.worldline_id,
        record.story_id,
+       record.world_version,
        record.title AS record_title,
        record.status AS record_status,
        story.title AS story_title,
@@ -1478,6 +1722,18 @@ async function createRecordBranchInTransaction(
       "Archived records cannot be branched.",
     );
   }
+
+  // ③b Goal runtime 行快照（FOR UPDATE）。锁点刻意放在 records(FOR
+  // UPDATE) 之后、record_heads 之前——与 assessment settle 路径
+  // （goal-assessment-job-queue.ts：records → goal_instances →
+  // record_heads → worldlines）同序，避免分支与并发 Goal settle 的
+  // AB-BA 死锁。门禁判定在 ⑥b（fork 解析之后、拓扑写入之前）执行；
+  // 源 Record 无 Goal 时此处仅为一次安全空读。
+  const branchGoalSources = await lockGoalInstancesForBranch(
+    client,
+    scope.workspaceId,
+    sourceRecordId,
+  );
 
   // ④ record_heads（FOR UPDATE）→ effective head = COALESCE(last, start)。
   const headRow = await client.query<{
@@ -1610,6 +1866,20 @@ async function createRecordBranchInTransaction(
     recordId = `record_branch_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
   }
 
+  // ⑥b Goal runtime 分支门禁（fail-closed）：Goal instances 是 Record-scoped
+  // 运行态，分支不得让它们静默消失。源 Record 持有 goal_instances 时只允许
+  // 在当前有效 head 分叉——历史 fork 点的语义/确定性 Goal 状态无法由事件
+  // 流安全重建，绝不猜测，在写入任何拓扑行之前以稳定静态错误拒绝。
+  // 源 Record 无 Goal 时旧路径语义逐字节不变（③b 仅一次安全空读）。
+  // 注意顺序：本门禁在 ⑥ 幂等重放早返回之后——同键重放仍按既有契约返回
+  // 首次拓扑，不因源 head 之后推进而把合法重放误判为历史分叉。
+  if (branchGoalSources.length > 0 && compareBranchCursor(fork, head) !== 0) {
+    throw new LibraryServiceError(
+      "BRANCH_GOAL_STATE_UNAVAILABLE",
+      "Records with Goal runtime state can only be branched at the current head.",
+    );
+  }
+
   // ⑦ 覆盖 fork 点的场景快照（最近一个 start<=fork 的 scene）。
   const scene = await client.query<{
     title: string;
@@ -1697,8 +1967,9 @@ async function createRecordBranchInTransaction(
   await client.query(
     `INSERT INTO records (
        workspace_id, world_id, worldline_id, story_id, id, title,
-       status, start_tick, start_ordinal, timeline_kind, linked_record_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, 'branch', $9)`,
+       status, start_tick, start_ordinal, timeline_kind, linked_record_id,
+       world_version
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, 'branch', $9, $10)`,
     [
       scope.workspaceId,
       worldId,
@@ -1709,6 +1980,7 @@ async function createRecordBranchInTransaction(
       fork.tick,
       fork.ordinal,
       sourceRecordId,
+      sourceRow.world_version,
     ],
   );
   await client.query(
@@ -1741,6 +2013,20 @@ async function createRecordBranchInTransaction(
       },
     },
   );
+  // ⑨b Goal runtime 克隆（与拓扑同一 workspace 事务、同一 RLS/restricted
+  // 角色路径）：当前 head 分支把源 Record 的每个 goal_instances 行克隆进
+  // 目标 Record scope，instance id 由目标 Record scope 确定性派生；
+  // goal_key/state/revision/progress/outcome/policy_version/completed_at
+  // 逐字节保留（terminal ⇔ completed_at 形状随 0055 CHECK 一起保持）。
+  // 绝不克隆 goal_assessment_jobs / 不可变 goal_assessments——分支从零
+  // 队列与台账起步；任何 identity/约束不符即中止事务，零拓扑残留。
+  if (branchGoalSources.length > 0) {
+    await cloneGoalInstancesForBranch(
+      client,
+      { workspaceId: scope.workspaceId, worldId, worldlineId, recordId },
+      branchGoalSources,
+    );
+  }
   return { worldId, worldlineId, storyId, recordId, fork, replayed: false };
 }
 
@@ -2153,7 +2439,7 @@ async function insertOpeningEvent(
   recordId: string,
   assembled: { sceneId: string; policyId: string },
   opening: string,
-): Promise<void> {
+): Promise<string> {
   const eventId = `event_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
   await client.query(
     `INSERT INTO events (
@@ -2220,6 +2506,44 @@ async function insertOpeningEvent(
      WHERE workspace_id = $1 AND id = $2`,
     [scope.workspaceId, story.worldline_id],
   );
+  return eventId;
+}
+
+/**
+ * Goal runtime materialization 的声明校验（fail-closed）：goalKey/
+ * policyVersion 非空 trimmed 且不超内容契约上限（256）；goalKey 在单个
+ * Record 内必须唯一（UNIQUE (workspace_id, record_id, goal_key) 是最终
+ * 兜底，此处提前给出稳定的应用层错误并在写入任何 topology 前中止）。
+ */
+function validateGenesisGoalDeclarations(
+  goals: WorldGenesisDraft["goals"],
+): readonly GoalMaterializationDeclaration[] {
+  const seen = new Set<string>();
+  const declared: GoalMaterializationDeclaration[] = [];
+  for (const goal of goals ?? []) {
+    const goalKey = typeof goal?.goalKey === "string" ? goal.goalKey.trim() : "";
+    const policyVersion = typeof goal?.policyVersion === "string"
+      ? goal.policyVersion.trim()
+      : "";
+    if (
+      goalKey.length === 0 || goalKey.length > 256
+      || policyVersion.length === 0 || policyVersion.length > 256
+    ) {
+      throw new LibraryServiceError(
+        "INVALID_COMMAND",
+        "RealmWorld Goal declaration requires a non-empty goalKey and policyVersion.",
+      );
+    }
+    if (seen.has(goalKey)) {
+      throw new LibraryServiceError(
+        "INVALID_COMMAND",
+        "RealmWorld Goal declarations must have unique goalKey values.",
+      );
+    }
+    seen.add(goalKey);
+    declared.push({ goalKey, policyVersion });
+  }
+  return declared;
 }
 
 /**
@@ -2856,6 +3180,13 @@ function normalizeWorld(row: WorldRow): LibraryWorld {
     style: row.style,
     summary: row.summary,
     status: row.status,
+    // Phase 1B：身份映射 fail-closed——非法/缺失身份抛 RealmSaveError
+    // （INVALID_SAVE），list 整体拒绝，绝不静默降级为 base。
+    worldVersion: row.world_version,
+    binding: worldBindingFromWorldIdentity({
+      worldId: row.world_id,
+      worldVersion: row.world_version,
+    }),
     // T10-B6：list 的 EXISTS 过滤使 null 实际不可达；保底按 player 呈现。
     membershipRole: row.membership_role ?? "player",
     storyCount: Number(row.story_count ?? 0),

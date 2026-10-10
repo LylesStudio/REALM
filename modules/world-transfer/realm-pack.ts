@@ -833,6 +833,15 @@ const SIG_ZIP64_LOCATOR = 0x07064b50;
 
 const ENTRY_NAME_RE = /^(realm-manifest\.json|tables\/[a-z_]+\.ndjson|files\/[A-Za-z0-9_-]+\.bin)$/;
 
+export interface StrictZipStructureOptions {
+  /** Package-specific entry allowlist; matching paths are still checked for traversal. */
+  entryNamePattern?: RegExp;
+  /** Entry that must occupy the first local/CD position. */
+  firstEntryName?: string;
+  /** Per-entry uncompressed limit override. */
+  entrySizeCap?: (name: string) => number;
+}
+
 interface CdEntry {
   name: string;
   method: number;
@@ -855,7 +864,10 @@ function u32(buf: Uint8Array, off: number): number {
   return value >>> 0;
 }
 
-function parseStructure(bytes: Uint8Array): { entries: CdEntry[] } {
+function parseStructure(
+  bytes: Uint8Array,
+  options: StrictZipStructureOptions = {},
+): { entries: CdEntry[]; cdOffset: number; eocd: number } {
   if (bytes.length < 22) {
     throw new RealmPackError("INVALID_PACK", "file too small for ZIP");
   }
@@ -905,6 +917,7 @@ function parseStructure(bytes: Uint8Array): { entries: CdEntry[] } {
 
   // 2. CD 逐条。
   const entries: CdEntry[] = [];
+  const entryNamePattern = options.entryNamePattern ?? ENTRY_NAME_RE;
   const seenNames = new Set<string>();
   let off = cdOffset;
   for (let i = 0; i < totalEntries; i += 1) {
@@ -948,7 +961,7 @@ function parseStructure(bytes: Uint8Array): { entries: CdEntry[] } {
     if (lho >= eocd) throw new RealmPackError("INVALID_PACK", "local header offset out of range");
     const nameBytes = bytes.slice(off + 46, off + 46 + nlen);
     const name = Buffer.from(nameBytes).toString("utf8");
-    if (!ENTRY_NAME_RE.test(name)) {
+    if (!entryNamePattern.test(name)) {
       throw new RealmPackError("INVALID_PACK", `entry name not whitelisted: ${name}`);
     }
     if (seenNames.has(name)) {
@@ -969,11 +982,12 @@ function parseStructure(bytes: Uint8Array): { entries: CdEntry[] } {
     if (entry.sc > PACK_LIMITS.entryCompressedMax) {
       throw new RealmPackError("PACK_TOO_LARGE", "entry compressed size exceeds limit");
     }
-    const suCap = entry.name.startsWith("files/")
-      ? PACK_LIMITS.fileMax
-      : entry.name === "realm-manifest.json"
-        ? PACK_LIMITS.manifestMax
-        : PACK_LIMITS.ndjsonMax;
+    const suCap = options.entrySizeCap?.(entry.name)
+      ?? (entry.name.startsWith("files/")
+        ? PACK_LIMITS.fileMax
+        : entry.name === "realm-manifest.json"
+          ? PACK_LIMITS.manifestMax
+          : PACK_LIMITS.ndjsonMax);
     if (entry.su > suCap) {
       throw new RealmPackError("PACK_TOO_LARGE", "entry uncompressed size exceeds limit");
     }
@@ -996,7 +1010,7 @@ function parseStructure(bytes: Uint8Array): { entries: CdEntry[] } {
       throw new RealmPackError("PACK_TOO_LARGE", "total uncompressed size exceeds limit");
     }
   }
-  return { entries };
+  return { entries, cdOffset, eocd };
 }
 
 export interface ValidatedPack {
@@ -1145,6 +1159,101 @@ export function validateRealmPack(bytes: Uint8Array): ValidatedPack {
     throw new RealmPackError("HASH_MISMATCH", "contentHash mismatch");
   }
   return { manifest, tables, files };
+}
+
+/**
+ * Reusable strict ZIP mechanical layer for semantic packages such as
+ * `.realmworld`. It deliberately stops at bytes: callers own manifest/schema,
+ * digest and signature semantics. No entry is inflated before the central
+ * directory, local headers, names, sizes and limits have passed validation.
+ */
+export function validateStrictZipArchive(
+  bytes: Uint8Array,
+  options: StrictZipStructureOptions,
+): ReadonlyMap<string, Uint8Array> {
+  const { entries, cdOffset } = parseStructure(bytes, options);
+  const dataRegions: { start: number; end: number }[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (u32(bytes, entry.lho) !== SIG_LOCAL) {
+      throw new RealmPackError("INVALID_PACK", "local header signature mismatch");
+    }
+    if (u16(bytes, entry.lho + 4) !== 20) {
+      throw new RealmPackError("INVALID_PACK", "local version mismatch");
+    }
+    const localFlags = u16(bytes, entry.lho + 6);
+    const localMethod = u16(bytes, entry.lho + 8);
+    const localCrc = u32(bytes, entry.lho + 14);
+    const localCompressed = u32(bytes, entry.lho + 18);
+    const localUncompressed = u32(bytes, entry.lho + 22);
+    const localNameLength = u16(bytes, entry.lho + 26);
+    const localExtraLength = u16(bytes, entry.lho + 28);
+    if (localExtraLength !== 0) {
+      throw new RealmPackError("INVALID_PACK", "local extra fields are not accepted");
+    }
+    const localName = Buffer.from(
+      bytes.slice(entry.lho + 30, entry.lho + 30 + localNameLength),
+    ).toString("utf8");
+    if (
+      localName !== entry.name
+      || localMethod !== entry.method
+      || localFlags !== entry.flags
+      || localCrc !== entry.crc
+      || localCompressed !== entry.sc
+      || localUncompressed !== entry.su
+    ) {
+      throw new RealmPackError("INVALID_PACK", "local header does not match CD entry");
+    }
+    const dataStart = entry.lho + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataStart + entry.sc;
+    if (dataEnd > cdOffset) {
+      throw new RealmPackError("INVALID_PACK", "entry data overlaps central directory");
+    }
+    dataRegions.push({ start: dataStart, end: dataEnd });
+    if (index === 0 && options.firstEntryName && entry.name !== options.firstEntryName) {
+      throw new RealmPackError("INVALID_PACK", "first entry is not the package manifest");
+    }
+  }
+  const sortedRegions = [...dataRegions].sort((left, right) => left.start - right.start);
+  for (let index = 1; index < sortedRegions.length; index += 1) {
+    if (sortedRegions[index]!.start < sortedRegions[index - 1]!.end) {
+      throw new RealmPackError("INVALID_PACK", "overlapping entry data regions");
+    }
+  }
+
+  const decoded = new Map<string, Uint8Array>();
+  let totalOut = 0;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const dataStart = dataRegions[index]!.start;
+    const raw = bytes.slice(dataStart, dataStart + entry.sc);
+    const outputLimit = options.entrySizeCap?.(entry.name) ?? PACK_LIMITS.ndjsonMax;
+    let output: Uint8Array;
+    if (entry.method === 8) {
+      try {
+        output = inflateRawSync(raw, { maxOutputLength: outputLimit });
+      } catch (error) {
+        if ((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE") {
+          throw new RealmPackError("PACK_TOO_LARGE", "entry exceeds decompression limit");
+        }
+        throw new RealmPackError("INVALID_PACK", "entry deflate stream invalid");
+      }
+    } else {
+      output = raw.slice();
+    }
+    if (output.length !== entry.su) {
+      throw new RealmPackError("SIZE_SPOOF", `entry ${entry.name} size spoofed`);
+    }
+    totalOut += output.length;
+    if (totalOut > PACK_LIMITS.totalUncompressedMax) {
+      throw new RealmPackError("PACK_TOO_LARGE", "total decompressed size exceeds limit");
+    }
+    if (crc32(output) !== entry.crc >>> 0) {
+      throw new RealmPackError("CRC_MISMATCH", `entry ${entry.name} CRC mismatch`);
+    }
+    decoded.set(entry.name, output);
+  }
+  return decoded;
 }
 
 // ---------------------------------------------------------------------------

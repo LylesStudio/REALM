@@ -351,7 +351,7 @@ test("model-powered orchestration preserves DM, Character, Rule and Narrator aut
       }
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "确认密函当前可见状态",
+          turnIntent: "确认密函当前可见状态",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: true,
         });
@@ -369,7 +369,7 @@ test("model-powered orchestration preserves DM, Character, Rule and Narrator aut
         return jsonResponse({ action: "塞娜收回触碰蜡封的手。" });
       }
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("Unexpected model call");
     },
@@ -451,7 +451,7 @@ test("an explicit player action can complete under narration without forcing an 
       const system = request.messages[0]?.content ?? "";
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "呈现玩家观察密函的公开结果",
+          turnIntent: "呈现玩家观察密函的公开结果",
           activatedCharacterInstanceIds: [],
           narratorEnabled: true,
         });
@@ -463,7 +463,7 @@ test("an explicit player action can complete under narration without forcing an 
         });
       }
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("Unexpected model call");
     },
@@ -531,7 +531,7 @@ test("one stochastic DM disagreement triggers an independent confirmation instea
       }
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的低声询问",
+          turnIntent: "回应玩家的低声询问",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: true,
         });
@@ -548,8 +548,8 @@ test("one stochastic DM disagreement triggers an independent confirmation instea
       if (system.includes("DM output reviewer")) {
         reviewAttempts += 1;
         return jsonResponse(reviewAttempts === 1
-          ? { accepted: false, goalSatisfied: false, worldCompatible: false }
-          : { accepted: true, goalSatisfied: true, worldCompatible: true });
+          ? { accepted: false, turnIntentSatisfied: false, worldCompatible: false }
+          : { accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("Unexpected model call");
     },
@@ -600,7 +600,7 @@ function createReviewProbeOrchestrator(
       }
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的低声询问",
+          turnIntent: "回应玩家的低声询问",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: true,
         });
@@ -624,7 +624,7 @@ function createReviewProbeOrchestrator(
         }
         return jsonResponse({
           accepted: false,
-          goalSatisfied: false,
+          turnIntentSatisfied: false,
           worldCompatible: false,
         });
       }
@@ -718,7 +718,7 @@ test("plain dialogue activates a character without inventing an Actor Tool requi
       const system = request.messages[0]?.content ?? "";
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的自然询问",
+          turnIntent: "回应玩家的自然询问",
           activatedCharacterInstanceIds: [],
           narratorEnabled: false,
         });
@@ -731,7 +731,7 @@ test("plain dialogue activates a character without inventing an Actor Tool requi
         });
       }
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("Unexpected model call");
     },

@@ -117,8 +117,8 @@ test("PostgreSQL authoritative migrations stay complete and archive-free", () =>
   const files = readdirSync(directory).filter((name) => name.endsWith(".sql")).sort();
   assert.deepEqual(
     files.map((name) => name.slice(0, 4)),
-    Array.from({ length: 53 }, (_, index) => String(index + 1).padStart(4, "0")),
-    "PG migrations 0001–0053 应连续齐全；0048–0050 负责场景图，0051 账户密码，0052 场景图队列 lease fencing、0053 membership capability。",
+    Array.from({ length: 57 }, (_, index) => String(index + 1).padStart(4, "0")),
+    "PG migrations 0001–0057 应连续齐全；0048–0050 负责场景图，0051 账户密码，0052 场景图队列 lease fencing、0053 membership capability、0054 world_version 身份、0055 Goal runtime、0056 runtime save/restore grants、0057 RealmWorld Record binding。",
   );
   for (const name of files) {
     const sql = readFileSync(join(directory, name), "utf8");

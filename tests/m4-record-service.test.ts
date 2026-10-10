@@ -368,7 +368,7 @@ test("M4 scenario regression: one-to-one, one-to-many, many-to-one, many-to-many
   const twoCharacterDM: DMController = {
     async plan(input) {
       return {
-        goal: "两名角色都被点名",
+        turnIntent: "两名角色都被点名",
         constraints: [],
         activatedCharacters: input.availableCharacters.slice(0, 2),
         narratorEnabled: true,

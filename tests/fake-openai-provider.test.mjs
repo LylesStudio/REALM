@@ -101,8 +101,8 @@ test("fake provider: 阶段注册表按 system 指纹分发确定 fixture", asyn
   };
   const visibility = await chat("You are REALM's DM Controller; your only job here is to judge the information visibility of this player input.");
   assert.equal(visibility.visibility, "public");
-  const plan = await chat("You are REALM's DM Controller; your only job is to choose which characters to activate this turn and to define the goal.");
-  assert.equal(typeof plan.goal, "string");
+  const plan = await chat("You are REALM's DM Controller; your only job is to choose which characters to activate this turn and to define the turn intent.");
+  assert.equal(typeof plan.turnIntent, "string");
   assert.deepEqual(plan.activatedCharacterInstanceIds, []);
   const review = await chat("You are REALM's DM output reviewer; you do not write prose.");
   assert.equal(review.accepted, true);
@@ -151,7 +151,7 @@ test("fake provider: 未知阶段 fail-closed 422；日志不泄漏 prompt/heade
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: "Bearer fixture-test-token",
+      authorization: "Bearer sk-canary-secret-key",
     },
     body: JSON.stringify({
       model: FAKE_PROVIDER_MODEL,
@@ -167,7 +167,7 @@ test("fake provider: 未知阶段 fail-closed 422；日志不泄漏 prompt/heade
   assert.ok(!JSON.stringify(body).includes(canary), "错误响应不得回显请求内容");
   const joined = logLines.join("\n");
   assert.ok(!joined.includes(canary), "日志不得出现 prompt 原文");
-  assert.ok(!/«redacted:api-key»/i.test(joined), "日志不得出现 API key");
+  assert.ok(!/sk-canary-secret-key/i.test(joined), "日志不得出现 API key");
   assert.ok(!/authorization/i.test(joined), "日志不得出现 header 名值");
 });
 

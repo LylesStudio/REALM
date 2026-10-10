@@ -583,7 +583,7 @@ async function commitSystemCorrection(
     plan: {
       planId: "plan_crystal",
       body: {
-        goal: "场景晶化",
+        turnIntent: "场景晶化",
         constraints: [],
         activatedCharacters: [],
         narratorEnabled: false,
@@ -616,7 +616,7 @@ async function commitSystemCorrection(
       validationId: "validation_crystal",
       body: {
         accepted: true,
-        goalSatisfied: true,
+        turnIntentSatisfied: true,
         worldCompatible: true,
         actionTransactionsComplete: true,
         narratorChecked: true,
@@ -721,7 +721,7 @@ test("T3 无素材确定性沉默：空旁白空回应不调用门禁", async ()
   const silentOrchestrator: M2TurnOrchestrator = {
     async plan(input) {
       return {
-        goal: "安静的一轮",
+        turnIntent: "安静的一轮",
         constraints: [],
         activatedCharacters: [],
         narratorEnabled: false,
@@ -735,7 +735,7 @@ test("T3 无素材确定性沉默：空旁白空回应不调用门禁", async ()
     async validate() {
       return {
         accepted: true,
-        goalSatisfied: true,
+        turnIntentSatisfied: true,
         worldCompatible: true,
         actionTransactionsComplete: true,
         narratorChecked: true,

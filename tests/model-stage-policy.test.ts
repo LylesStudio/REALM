@@ -170,13 +170,13 @@ test("DM planner: chat transport with planner policy; reviewer: chat transport w
       }
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的自然询问",
+          turnIntent: "回应玩家的自然询问",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: false,
         });
       }
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error(`Unexpected chat call: ${system.slice(0, 60)}`);
     },
@@ -241,7 +241,7 @@ test("actor propose: tools request carries actor stage policy fields (chat trans
       const system = request.messages[0]?.content ?? "";
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "确认密函当前可见状态",
+          turnIntent: "确认密函当前可见状态",
           activatedCharacterInstanceIds: [SCOUT.characterInstanceId],
           narratorEnabled: true,
         });
@@ -269,7 +269,7 @@ test("actor propose: tools request carries actor stage policy fields (chat trans
         });
       }
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error("unexpected model call");
     },

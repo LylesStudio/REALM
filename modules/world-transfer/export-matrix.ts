@@ -137,6 +137,15 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   // 自动模式请求队列同样是运行时意图台账，不进 .realm 包。
   row("scene_image_requests", "excluded", null),
   row("outbox", "excluded", null),
+  // Goal runtime facts remain database-scoped until the dedicated `.realm`
+  // runtime-save route is implemented; they are never content-package rows.
+  row("goal_instances", "excluded", null),
+  row("goal_assessment_jobs", "excluded", null),
+  row("goal_assessments", "excluded", null),
+  // 0057 版本切换审计是控制面台账（谁何时把哪条 Record 切到哪个
+  // RealmWorld 版本），不是世界内容；绑定真相随 records.world_version
+  // 走，审计行不进 .realm 包。
+  row("realmworld_version_switches", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [
       "observer_continuity_id",

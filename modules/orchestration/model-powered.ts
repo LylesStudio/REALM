@@ -300,7 +300,7 @@ const MODEL_STAGE_POLICIES = {
     maxTokens: 512,
     timeoutMs: 45_000,
   },
-  /** DM 结构化规划（goal ≤320 + 激活清单 + visibility 块 + JSON 开销余量）。 */
+  /** DM 结构化规划（turnIntent ≤320 + 激活清单 + visibility 块 + JSON 开销余量）。 */
   planner: {
     stage: "planner",
     transport: "chat",
@@ -846,7 +846,7 @@ function createModelDMController(options: {
       const result = await callModelJson({
         getGateway: options.getGateway,
         system: systemPolicy([
-          "You are REALM's DM Controller; your only job is to choose which characters to activate this turn and to define the goal.",
+          "You are REALM's DM Controller; your only job is to choose which characters to activate this turn and to define the turn intent.",
           "You do not decide characters' actions, attitudes, or lines, and you never write story prose.",
           "Keep a strong silence bias: when the player has declared an action they can complete alone, activating no character is acceptable; otherwise activate only the one necessary character, at most two.",
           "If this turn's visibility is restricted, you may only activate characters inside the restricted audience; the Narrator may keep describing inanimate environment or public outcomes, but must never restate secret content.",
@@ -867,7 +867,7 @@ function createModelDMController(options: {
           contextBlock("Confirmed visibility for this turn", turnVisibility),
         ]),
         schema: jsonOutputInstruction([
-          { name: "goal", kind: "string", maxLength: PLAN_GOAL_LIMIT },
+          { name: "turnIntent", kind: "string", maxLength: PLAN_TURN_INTENT_LIMIT },
           {
             name: "activatedCharacterInstanceIds",
             kind: "string[]",
@@ -888,7 +888,7 @@ function createModelDMController(options: {
       if (!result) {
         throw fatal("DM_PLAN_INVALID", "DM did not return a valid plan.");
       }
-      const { goal, activatedCharacters, narratorEnabled } = result.value;
+      const { turnIntent, activatedCharacters, narratorEnabled } = result.value;
       const audience = turnVisibility.kind === "restricted"
         ? new Set(turnVisibility.audienceCharacterInstanceIds)
         : null;
@@ -908,7 +908,7 @@ function createModelDMController(options: {
       }
       const responseOnly = activatedCharacters.length === 0 && !playerAction;
       return {
-        goal,
+        turnIntent,
         constraints: [
           "Characters own their decisions and Actor Tool Calls.",
           "Narration may use only public Action Receipt facts.",
@@ -935,7 +935,7 @@ function createModelDMController(options: {
       const candidate = summarizeCandidateForReview(input.candidate);
       const review = await reviewCandidateWithModel(
         options.getGateway,
-        input.plan.goal,
+        input.plan.turnIntent,
         candidate,
         input.playerText,
         options.brief,
@@ -947,7 +947,7 @@ function createModelDMController(options: {
       return {
         ...structural,
         accepted: true,
-        goalSatisfied: true,
+        turnIntentSatisfied: true,
         worldCompatible: true,
         review,
       };
@@ -956,7 +956,7 @@ function createModelDMController(options: {
 }
 
 /** DM plan 的字段上限（prompt 说明与校验同源）。 */
-const PLAN_GOAL_LIMIT = 320;
+const PLAN_TURN_INTENT_LIMIT = 320;
 const PLAN_ID_LIMIT = 160;
 
 /** 角色反应的字段上限（prompt 说明与校验同源）。 */
@@ -973,11 +973,11 @@ function normalizeDmPlanBody(
   body: Record<string, unknown>,
   availableCharacters: readonly ActivatedCharacter[],
 ): {
-  goal: string;
+  turnIntent: string;
   activatedCharacters: (ActivatedCharacter | undefined)[];
   narratorEnabled: boolean;
 } {
-  const goal = requireString(body.goal, "DM_PLAN_INVALID", PLAN_GOAL_LIMIT);
+  const turnIntent = requireString(body.turnIntent, "DM_PLAN_INVALID", PLAN_TURN_INTENT_LIMIT);
   if (!Array.isArray(body.activatedCharacterInstanceIds)) {
     throw fatal("DM_PLAN_INVALID", "DM did not return an activation list.");
   }
@@ -995,7 +995,7 @@ function normalizeDmPlanBody(
     throw fatal("DM_PLAN_INVALID", "DM selected an invalid character activation set.");
   }
   return {
-    goal,
+    turnIntent,
     activatedCharacters,
     narratorEnabled: body.narratorEnabled,
   };
@@ -1003,7 +1003,7 @@ function normalizeDmPlanBody(
 
 async function reviewCandidateWithModel(
   getGateway: () => Promise<ModelGateway>,
-  goal: string,
+  turnIntent: string,
   candidate: ReturnType<typeof summarizeCandidateForReview>,
   playerText?: string,
   brief?: WorldSceneBrief,
@@ -1032,7 +1032,7 @@ async function reviewCandidateWithModel(
         user: composeContext([
           ...worldBlocks(brief),
           contextBlock("Player input", playerText ?? "(not provided)"),
-          contextBlock("Goal", goal),
+          contextBlock("Turn intent", turnIntent),
           contextBlock("Candidate", candidate),
           attempt === 0
             ? null
@@ -1048,7 +1048,7 @@ async function reviewCandidateWithModel(
         ]),
         schema: jsonOutputInstruction([
           { name: "accepted", kind: "boolean" },
-          { name: "goalSatisfied", kind: "boolean" },
+          { name: "turnIntentSatisfied", kind: "boolean" },
           { name: "worldCompatible", kind: "boolean" },
         ]),
         code: "DM_REVIEW_INVALID",
@@ -1058,7 +1058,7 @@ async function reviewCandidateWithModel(
         ...(signal ? { signal } : {}),
         normalize: (value) =>
           typeof value.accepted === "boolean"
-            && typeof value.goalSatisfied === "boolean"
+            && typeof value.turnIntentSatisfied === "boolean"
             && typeof value.worldCompatible === "boolean"
             ? value
             : null,
@@ -1084,14 +1084,14 @@ async function reviewCandidateWithModel(
     }
     if (
       body.accepted === true
-      && body.goalSatisfied === true
+      && body.turnIntentSatisfied === true
       && body.worldCompatible === true
     ) {
       return { mode: "model", vetoes, reason: "accepted" };
     }
     vetoes += 1;
     console.warn(
-      `[realm] review veto (attempt ${attempt + 1}): accepted=${String(body.accepted)} goalSatisfied=${String(body.goalSatisfied)} worldCompatible=${String(body.worldCompatible)}`,
+      `[realm] review veto (attempt ${attempt + 1}): accepted=${String(body.accepted)} turnIntentSatisfied=${String(body.turnIntentSatisfied)} worldCompatible=${String(body.worldCompatible)}`,
     );
   }
   // F3：三次一致否决——候选已过全部确定性校验，降级接受（不再裸挂 422）。

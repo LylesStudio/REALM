@@ -9,6 +9,27 @@ import {
   type WorkspaceDatabase,
 } from "./workspace-transaction.ts";
 import { profileNoteTextAt } from "./character-growth-store.ts";
+import {
+  worldBindingFromWorldIdentity,
+} from "../../modules/world-transfer/realm-save.ts";
+
+export type RuntimeWorldBinding =
+  | { kind: "base"; [key: string]: string }
+  | { kind: "world"; worldId: string; worldVersion: string; [key: string]: string };
+
+function runtimeWorldBindingFromIdentity(identity: {
+  worldId: unknown;
+  worldVersion: unknown;
+}): RuntimeWorldBinding {
+  const binding = worldBindingFromWorldIdentity(identity);
+  return binding.kind === "base"
+    ? { kind: "base" }
+    : {
+        kind: "world",
+        worldId: binding.worldId,
+        worldVersion: binding.worldVersion,
+      };
+}
 
 export interface RecordRuntimeScope {
   workspaceId: string;
@@ -27,7 +48,7 @@ export interface RecordRuntimeScope {
   language: string;
   /** 批次 T8：世界状态（worlds.status）——archived 世界只读，写路径拒绝。 */
   worldStatus: string;
-  /** 世界/故事/场景快照：模型回合与设定结晶的设定依据。 */
+  /** 世界/故事/场景快照：模型回合与设定依据。 */
   brief: WorldSceneBrief;
   /** 明确绑定到当前 principal 的角色身份；未绑定时为空串。 */
   viewerCharacterInstanceId: string;
@@ -53,7 +74,8 @@ export interface RecordRuntimeScope {
     | readonly RuntimeActor[]
     | readonly string[]
     | readonly PublicDialogueLine[]
-    | WorldSceneBrief;
+    | WorldSceneBrief
+    | RuntimeWorldBinding;
 }
 
 export interface WorldSceneBrief {
@@ -83,6 +105,7 @@ export interface RuntimeActor {
 interface RecordRow extends QueryResultRow {
   world_id: string;
   world_status: string;
+  world_version: string;
   worldline_id: string;
   head_tick: string | number;
   head_ordinal: string | number;
@@ -168,6 +191,7 @@ export function createPostgresRecordRuntimeScopeRepository(
                COALESCE(world.settings->>'language', 'zh-CN') AS language,
                world.name AS world_name,
                world.status AS world_status,
+               record.world_version AS world_version,
                COALESCE(world.settings->>'era', '') AS era,
                COALESCE(world.summary, '') AS summary,
                COALESCE(world.settings->>'weather', '') AS weather,
@@ -352,6 +376,12 @@ export function createPostgresRecordRuntimeScopeRepository(
             principalId,
             worldId: recordRow.world_id,
             worldStatus: recordRow.world_status,
+            // Phase 4D：binding 真相在 records.world_version（record 自带列），
+            // 不再从 worlds 派生——同一世界允许多个 Record 跨版本运行。
+            worldBinding: runtimeWorldBindingFromIdentity({
+              worldId: recordRow.world_id,
+              worldVersion: recordRow.world_version,
+            }),
             worldlineId: recordRow.worldline_id,
             storyId: recordRow.story_id,
             recordId,

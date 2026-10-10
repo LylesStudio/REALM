@@ -39,6 +39,7 @@ import {
   gateWorldWrite,
   isWorldWriteGateError,
 } from "./world-write-gate.ts";
+import { withRecordCommittedNotify } from "./record-events.ts";
 
 const RUNTIME_PAYLOAD_KEY = "__realmRuntimePayload";
 
@@ -145,6 +146,24 @@ export interface PostgresWorldCursorAllocationContext<
   eventCount: number;
 }
 
+/**
+ * commitRelease 同一事务内已提交的正式事件批次（Goal runtime
+ * materialization 等同事务副作用的 hook 上下文）。eventIds 是本批真实
+ * 落库的正式事件 id（顺序与 bundle.formalEvents 一致）；Record 作用域
+ * 精确到 Record binding（world_id/worldline_id 取自 records JOIN，
+ * 绝不以 worlds.world_version 冒充 Record binding）。
+ */
+export interface PostgresCommittedFormalEvents {
+  workspaceId: string;
+  worldId: string;
+  worldlineId: string;
+  recordId: string;
+  recordVersion: number;
+  firstOrdinal: number;
+  eventIds: readonly string[];
+  committedAt: string;
+}
+
 export interface PostgresRuntimeRepositoryOptions<
   TCommandPayload extends JsonValue,
   TPlan extends JsonValue,
@@ -173,6 +192,20 @@ export interface PostgresRuntimeRepositoryOptions<
       TValidation
     >,
   ): readonly PostgresWorldCursor[];
+  /** Optional pure checkpoint hydrator for domain-level legacy compatibility. */
+  normalizeCheckpoint?: (
+    run: TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>,
+  ) => TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>;
+  /**
+   * 可选的同事务副作用 hook：在本批正式事件落库后、事务提交前以同一
+   * client 调用（Goal assessment enqueue 等 durable 副作用）。hook 抛错
+   * 即整个 release 回滚——零残留、绝不在事务外补写。幂等 replay
+   * （completed + 同 fingerprint 早返回）不会到达此 hook。
+   */
+  onFormalEventsCommitted?(
+    client: PoolClient,
+    committed: PostgresCommittedFormalEvents,
+  ): Promise<void>;
 }
 
 interface ScopeRow extends QueryResultRow {
@@ -265,6 +298,11 @@ export function createPostgresRuntimeRepository<
 
   type Run = TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>;
 
+  function hydrateRun(value: unknown): Run {
+    const run = decodeRun<Run>(value);
+    return options.normalizeCheckpoint ? options.normalizeCheckpoint(run) : run;
+  }
+
   async function lockedRun(client: PoolClient, turnId: string): Promise<Run> {
     const result = await client.query<TurnRow>(
       `SELECT run_checkpoint
@@ -276,7 +314,7 @@ export function createPostgresRuntimeRepository<
     if (result.rowCount !== 1) {
       throw new RuntimeInvariantError("TURN_NOT_FOUND", "Turn not found.");
     }
-    return decodeRun<Run>(result.rows[0]!.run_checkpoint);
+    return hydrateRun(result.rows[0]!.run_checkpoint);
   }
 
   /**
@@ -331,7 +369,7 @@ export function createPostgresRuntimeRepository<
     if (result.rowCount !== 1) {
       throw new RuntimeInvariantError("TURN_NOT_FOUND", "Turn not found.");
     }
-    return decodeRun<Run>(result.rows[0]!.run_checkpoint).command.recordId;
+    return hydrateRun(result.rows[0]!.run_checkpoint).command.recordId;
   }
 
   async function saveRun(client: PoolClient, run: Run): Promise<void> {
@@ -487,7 +525,7 @@ export function createPostgresRuntimeRepository<
           throw new RuntimeIdempotencyConflictError();
         }
         return {
-          run: clone(decodeRun<Run>(row.run_checkpoint)),
+          run: clone(hydrateRun(row.run_checkpoint)),
           created: false,
         } satisfies AcceptCommandResult<TCommandPayload>;
       });
@@ -502,7 +540,7 @@ export function createPostgresRuntimeRepository<
           [workspaceId, turnId],
         );
         return result.rowCount === 1
-          ? clone(decodeRun<Run>(result.rows[0]!.run_checkpoint))
+          ? clone(hydrateRun(result.rows[0]!.run_checkpoint))
           : null;
       });
     },
@@ -629,7 +667,7 @@ export function createPostgresRuntimeRepository<
           if (initial.rowCount !== 1) {
             throw new RuntimeInvariantError("TURN_NOT_FOUND", "Turn not found.");
           }
-          const initialRun = decodeRun<Run>(initial.rows[0]!.run_checkpoint);
+          const initialRun = hydrateRun(initial.rows[0]!.run_checkpoint);
           // v37 §D.0：C 面两拍——worlds(KEY SHARE)→records(FOR UPDATE)
           // gate 先于 record_heads/worldlines 锁（锁序全局一致）；
           // archived 世界/记录在此拒绝。
@@ -918,6 +956,24 @@ export function createPostgresRuntimeRepository<
             );
           }
 
+          // Goal runtime materialization：同事务为本批正式事件 enqueue
+          // durable goal_assessment_jobs（仅仍 active 的 Goal；无 Goal 零
+          // 写入）。hook 与事件/观察/head 同事务——失败即整体回滚，绝不
+          // 在事务外补写；幂等 replay（上方 completed + 同 fingerprint
+          // 早返回）不会到达此处，replay 不重复 enqueue。
+          if (options.onFormalEventsCommitted && mapped.length > 0) {
+            await options.onFormalEventsCommitted(client, {
+              workspaceId,
+              worldId: scope.world_id,
+              worldlineId: scope.worldline_id,
+              recordId: run.command.recordId,
+              recordVersion,
+              firstOrdinal,
+              eventIds: mapped.map((item) => item.draft.eventId),
+              committedAt: input.now,
+            });
+          }
+
           const lastEvent = mapped.at(-1)!;
           const nextOrdinal = firstOrdinal + mapped.length;
           await client.query(
@@ -1000,14 +1056,27 @@ export function createPostgresRuntimeRepository<
             { from: previousState, to: "completed", at: input.now },
           ];
           await saveRun(client, run);
-          await client.query(
-            `UPDATE command_inbox
+          // Phase 2G-B：committed ledger（events/record_heads）与 outbox、
+          // turn state 写入完成后，把 SSE 唤醒并入本事务最后一条写语句——
+          // 同一事务提交才送达，回滚不送达，且不增加净查询数（回合 DB 预算
+          // 围栏）；上方 completed + 同 fingerprint 的幂等早返回不会到达
+          // 此处，幂等 replay 不重复 notify。
+          const completionStatement = withRecordCommittedNotify(
+            {
+              update: `UPDATE command_inbox
              SET state = 'completed', result_event_ids = $3::text[],
                  completed_at = $4::timestamptz, updated_at = $4::timestamptz,
-                 last_error_code = NULL
-             WHERE workspace_id = $1 AND id = $2`,
-            [workspaceId, run.turnId, receipt.eventIds, input.now],
+                 last_error_code = NULL`,
+              where: `workspace_id = $1 AND id = $2`,
+              values: [workspaceId, run.turnId, receipt.eventIds, input.now],
+            },
+            {
+              workspaceId,
+              recordId: run.command.recordId,
+              nextOrdinal,
+            },
           );
+          await client.query(completionStatement.text, completionStatement.values);
           return clone(run);
         });
       } catch (error) {

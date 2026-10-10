@@ -149,6 +149,9 @@ test("the portable projection-types module is the only production type source an
     // 评审实锤的 delivery projection 生产消费方；新增生产引用方必须先进评审。
     "database/postgres/delivery-projection.ts",
     "modules/application/local-record-service.ts",
+    // Phase 2A 评审：读模型拆分——envelope/ConsistentSnapshot 类型随读侧
+    // 边界迁入 local-record-read-model.ts，同为 import type 纯类型消费。
+    "modules/application/local-record-read-model.ts",
   ]);
   const seenProductionConsumers = new Set();
   const offenders = [];

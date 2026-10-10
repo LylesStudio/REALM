@@ -55,11 +55,21 @@ async function createMigratedDatabase(t: test.TestContext) {
     "0011_worldline_merge_semantic_propagation_jobs.sql",
     "0012_accounts.sql",
     "0013_membership_insert_grant.sql",
-      "0014_scene_crystallization_grants.sql",
-      "0015_account_ui_language.sql",
-      "0016_world_files.sql",
-      "0017_account_last_opened.sql",
-      "0018_account_last_opened_fk_set_null.sql",
+    "0014_scene_crystallization_grants.sql",
+    "0015_account_ui_language.sql",
+    "0016_world_files.sql",
+    "0017_account_last_opened.sql",
+    "0018_account_last_opened_fk_set_null.sql",
+    // 合并物化读取的列/表：scene 快照列、records.world_version、Goal runtime、
+    // 初夜/自演运行态探测表（merge unsupported 探针 fail-closed 读取）。
+    "0019_record_first_nights.sql",
+    "0020_record_self_play_sessions.sql",
+    "0029_record_scene_tension.sql",
+    "0039_scene_weather_snapshot.sql",
+    "0040_scene_display_time_snapshot.sql",
+    "0054_world_version_identity.sql",
+    "0055_goal_runtime.sql",
+    "0057_realmworld_record_binding.sql",
   ]) {
     const sql = await readFile(
       new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -247,16 +257,91 @@ test(
     );
     // 新 merged worldline 与 merged record 已创建；来源行数不变。
     const worldline = await ownerPool.query(
-      `SELECT label FROM worldlines WHERE id = $1`,
+      `SELECT label, status, head_tick::text, head_ordinal::text FROM worldlines WHERE id = $1`,
       [merged.mergedWorldlineId],
     );
     assert.equal(worldline.rows.length, 1);
+    assert.equal(worldline.rows[0].status, "active");
+    // 世界线 head 与 manifest 末位目标游标一致（bridgeable 顺移后）。
+    assert.equal(Number(worldline.rows[0].head_tick), TICK);
+    assert.equal(Number(worldline.rows[0].head_ordinal), 2);
     const mergedRecords = await ownerPool.query(
-      `SELECT timeline_kind, linked_record_id FROM records WHERE worldline_id = $1`,
+      `SELECT id, status, timeline_kind, linked_record_id FROM records WHERE worldline_id = $1`,
       [merged.mergedWorldlineId],
     );
     assert.ok(mergedRecords.rows.length >= 1);
     assert.ok(mergedRecords.rows.every((row) => row.timeline_kind === "merged"));
+    // playable：目标 Record 全部 active（不再是 archived 占位）。
+    assert.ok(mergedRecords.rows.every((row) => row.status === "active"));
+    // 事件实际复制进目标 scope：目标事件 ID 不复用源 ID，游标与 manifest 一致。
+    const targetEvents = await ownerPool.query(
+      `SELECT id, record_id, world_tick::text, world_ordinal::text,
+              scene_id, visibility_policy_id
+       FROM events WHERE worldline_id = $1
+       ORDER BY world_tick, world_ordinal`,
+      [merged.mergedWorldlineId],
+    );
+    assert.equal(targetEvents.rows.length, merged.report.manifest.length);
+    for (const entry of merged.report.manifest) {
+      const copied = targetEvents.rows.find(
+        (row) =>
+          Number(row.world_tick) === entry.tick
+          && Number(row.world_ordinal) === entry.worldOrdinal,
+      );
+      assert.ok(copied, "manifest entry must map to a copied target event");
+      assert.equal(copied.id, entry.targetEventId);
+      assert.notEqual(copied.id, entry.eventId);
+      // 目标外键指向目标 scope（scene/policy 与目标 Record 同属合并世界线）。
+      const scene = await ownerPool.query(
+        `SELECT worldline_id, record_id FROM scenes WHERE workspace_id = 'ws_demo' AND id = $1`,
+        [copied.scene_id],
+      );
+      assert.equal(scene.rows[0]?.worldline_id, merged.mergedWorldlineId);
+      assert.equal(scene.rows[0]?.record_id, copied.record_id);
+    }
+    // record_heads 与 manifest 一致：每条目标 Record 有可继续提交的 head。
+    const heads = await ownerPool.query(
+      `SELECT record_id, record_version::text, next_record_ordinal::text,
+              last_event_id, last_world_tick::text, last_world_ordinal::text
+       FROM record_heads WHERE worldline_id = $1`,
+      [merged.mergedWorldlineId],
+    );
+    assert.equal(heads.rows.length, mergedRecords.rows.length);
+    for (const head of heads.rows) {
+      const recordEvents = targetEvents.rows.filter(
+        (row) => row.record_id === head.record_id,
+      );
+      if (recordEvents.length === 0) {
+        assert.equal(Number(head.record_version), 0);
+        assert.equal(Number(head.next_record_ordinal), 0);
+        continue;
+      }
+      const last = recordEvents.at(-1)!;
+      assert.equal(head.last_event_id, last.id);
+      assert.equal(Number(head.last_world_tick), Number(last.world_tick));
+      assert.equal(Number(head.last_world_ordinal), Number(last.world_ordinal));
+      assert.equal(Number(head.next_record_ordinal), recordEvents.length + 1);
+    }
+    // 拓扑语义保留：源 Record 的参与者/场景/策略/技能/资产复制进目标 scope。
+    const topologyCounts = await ownerPool.query(
+      `SELECT
+         (SELECT count(*)::int FROM participants WHERE worldline_id = $1) AS participants,
+         (SELECT count(*)::int FROM scenes WHERE worldline_id = $1) AS scenes,
+         (SELECT count(*)::int FROM visibility_policies WHERE worldline_id = $1) AS policies,
+         (SELECT count(*)::int FROM character_instances WHERE worldline_id = $1) AS instances,
+         (SELECT count(*)::int FROM character_continuities WHERE worldline_id = $1) AS continuities,
+         (SELECT count(*)::int FROM character_skills WHERE worldline_id = $1) AS skills,
+         (SELECT count(*)::int FROM character_assets WHERE worldline_id = $1) AS assets`,
+      [merged.mergedWorldlineId],
+    );
+    assert.ok(topologyCounts.rows[0].participants >= 3, "origin cast copied");
+    assert.ok(topologyCounts.rows[0].scenes >= 2, "both scenes copied");
+    assert.ok(topologyCounts.rows[0].policies >= 2, "both public policies copied");
+    assert.ok(topologyCounts.rows[0].instances >= 3, "origin instances copied");
+    // 双侧同 continuity_key（player/scout/scholar）各折成一行。
+    assert.ok(topologyCounts.rows[0].continuities >= 3);
+    assert.ok(topologyCounts.rows[0].skills >= 3, "skill grants copied");
+    assert.ok(topologyCounts.rows[0].assets >= 1, "asset grants copied");
     const sourceEvents = await ownerPool.query(
       `SELECT count(*)::int AS c FROM events WHERE worldline_id IN ('worldline_origin', 'worldline_branch_m5')`,
     );

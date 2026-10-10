@@ -57,6 +57,9 @@ const migrationPaths = [
   "../database/postgres/migrations/0051_account_password_hash.sql",
   "../database/postgres/migrations/0052_scene_image_queue_lease_fencing.sql",
   "../database/postgres/migrations/0053_membership_capability.sql",
+  "../database/postgres/migrations/0054_world_version_identity.sql",
+  "../database/postgres/migrations/0055_goal_runtime.sql",
+  "../database/postgres/migrations/0057_realmworld_record_binding.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
@@ -107,6 +110,9 @@ const scopedTables = [
   "worldline_merges",
   "semantic_conflict_evaluations",
   "propagation_jobs",
+  "goal_instances",
+  "goal_assessments",
+  "goal_assessment_jobs",
   "accounts",
   "world_files",
   "record_first_nights",
@@ -129,6 +135,7 @@ const scopedTables = [
   "scene_image_requests",
   "realm_capability_keys",
   "realm_capability_nonces",
+  "realmworld_version_switches",
 ];
 
 function canonical(value) {
@@ -277,6 +284,9 @@ test("forced row-level security denies unscoped workspace access", () => {
       "worldline_merges",
       "semantic_conflict_evaluations",
       "propagation_jobs",
+      "goal_instances",
+      "goal_assessments",
+      "goal_assessment_jobs",
       "accounts",
       "world_files",
       "record_first_nights",
@@ -294,6 +304,7 @@ test("forced row-level security denies unscoped workspace access", () => {
       "scene_image_requests",
       "realm_capability_keys",
       "realm_capability_nonces",
+      "realmworld_version_switches",
     ].includes(tableName)) {
       assert.match(
         canonicalSql,
@@ -307,6 +318,33 @@ test("forced row-level security denies unscoped workspace access", () => {
       );
     }
   }
+});
+
+test("Goal runtime schema keeps definitions out of facts and evidence immutable", () => {
+  const instances = tableBody("goal_instances");
+  assert.match(instances, /goal_key text not null/);
+  assert.match(instances, /state text not null/);
+  assert.match(instances, /progress jsonb not null/);
+  assert.match(instances, /outcome jsonb/);
+  assert.match(instances, /unique \(workspace_id, record_id, goal_key\)/);
+
+  const assessments = tableBody("goal_assessments");
+  assert.match(assessments, /evidence_event_ids text\[\] not null/);
+  assert.match(assessments, /evidence_snapshot_hash text not null/);
+  assert.match(assessments, /policy_version text not null/);
+  assert.match(assessments, /jsonb_typeof\(result\) = 'object'/);
+  assert.match(canonicalSql, /pg_trigger_depth\(\) > 1/);
+
+  const jobs = tableBody("goal_assessment_jobs");
+  assert.match(jobs, /state text not null/);
+  assert.match(jobs, /lease_owner text/);
+  assert.match(jobs, /lease_expires_at timestamptz/);
+  assert.match(jobs, /unique \(workspace_id, goal_instance_id, source_event_id\)/);
+
+  assert.match(canonicalSql, /'goal\.transition\.committed'/);
+  assert.match(canonicalSql, /create trigger goal_assessments_append_only_guard/);
+  assert.match(canonicalSql, /grant select, insert on goal_assessments to realm_runtime/);
+  assert.match(canonicalSql, /grant select, insert, update on goal_assessment_jobs to realm_runtime/);
 });
 
 test("action state is durable, scoped, atomic and least-privilege", () => {
@@ -558,6 +596,21 @@ test("0053 membership capability narrows runtime writes to a definer channel", (
   assert.doesNotMatch(m53, /grant all/);
   assert.doesNotMatch(m53, /on all tables/);
   assert.doesNotMatch(m53, /grant delete/);
+});
+
+test("0054 world_version gives worlds a deterministic content identity", () => {
+  const m54 = canonical(
+    migrationSql[migrationPaths.findIndex((path) => path.includes("0054_world_version_identity"))],
+  );
+  // 可重复应用、确定性回填（同一常量，非随机值）、非空 CHECK、语义注释。
+  assert.match(m54, /add column if not exists world_version text not null default '0\.0\.0-local'/);
+  assert.match(m54, /worlds_world_version_check/);
+  assert.match(m54, /check \(length\(btrim\(world_version\)\) > 0\)/);
+  assert.match(m54, /comment on column worlds\.world_version/);
+  // 不新增表、不授新权限、不触碰既有列。
+  assert.doesNotMatch(m54, /create table/);
+  assert.doesNotMatch(m54, /grant /);
+  assert.doesNotMatch(m54, /drop column/);
 });
 
 test("T10-B1 worldline merge grants add only the topology INSERT surface", () => {

@@ -106,7 +106,7 @@ export const REALM_FAKE_STAGE_FIXTURES = [
     id: "dm-plan",
     match: "choose which characters to activate this turn",
     body: {
-      goal: "玩家环顾四周，场面安静推进。",
+      turnIntent: "玩家环顾四周，场面安静推进。",
       activatedCharacterInstanceIds: [],
       narratorEnabled: true,
     },
@@ -114,7 +114,7 @@ export const REALM_FAKE_STAGE_FIXTURES = [
   {
     id: "dm-review",
     match: "DM output reviewer",
-    body: { accepted: true, goalSatisfied: true, worldCompatible: true },
+    body: { accepted: true, turnIntentSatisfied: true, worldCompatible: true },
   },
   {
     // T3 在场旅程：特定观察输入 → 独特环境文案（供 presence-gate 分支识别）。

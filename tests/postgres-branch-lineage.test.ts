@@ -10,16 +10,32 @@
  * - 回归：duplicate/retrospection 语义不变；kind:"branch" 幽灵路径已废弃。
  */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
-import { seedPostgresDemo } from "../database/postgres/public.ts";
+import {
+  createPostgresRuntimeRepository,
+  seedPostgresDemo,
+} from "../database/postgres/public.ts";
+import {
+  enqueueGoalAssessmentJobsForCommittedEvents,
+} from "../database/postgres/goal-runtime-materialization.ts";
 import { loadBranchTree } from "../modules/application/branch-tree.ts";
 import {
   LibraryServiceError,
   createPostgresLibraryService,
 } from "../modules/application/library-service.ts";
+import {
+  goalAssessmentJobIdFor,
+  goalInstanceIdFor,
+} from "../modules/goals/public.ts";
+import {
+  executeTurn,
+  type JsonValue,
+  type RuntimeCommand,
+  type TurnRuntimeDependencies,
+} from "../modules/runtime/public.ts";
 import { POST as branchPOST } from "../app/api/record/branch/route.ts";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
@@ -658,3 +674,522 @@ test(
     assert.equal(replayedBody.recordId, createdBody.recordId);
   },
 );
+
+test(
+  "branch Goal runtime: current-head clone, commit enqueue, historical fail-closed, atomic rollback",
+  { skip: !adminConnectionString || !runtimeConnectionString, timeout: 300_000 },
+  async (t) => {
+    const fixture = await createFixtureDatabase(t);
+    const runtimeLibrary = createPostgresLibraryService(fixture.runtimePool);
+    const ownerLibrary = createPostgresLibraryService(fixture.ownerPool);
+
+    const eventId1 = await commitSyntheticEvent(fixture.ownerPool, fixture, {
+      tick: 40, ordinal: 1, recordOrdinal: 1, content: "潮起。",
+    });
+    const eventId2 = await commitSyntheticEvent(fixture.ownerPool, fixture, {
+      tick: 40, ordinal: 2, recordOrdinal: 2, content: "潮落。",
+    });
+
+    // ---- Goal fixture：active × 2（deterministic/semantic）+ terminal × 1，
+    // 附源 record 的 durable job 与不可变 assessment 台账各一行。----
+    const sourceGoalScope = {
+      workspaceId: WS,
+      worldId: fixture.worldId,
+      worldlineId: fixture.worldlineId,
+      recordId: fixture.recordId,
+    };
+    const activeGoalId = goalInstanceIdFor(sourceGoalScope, "ack-tide");
+    const semanticGoalId = goalInstanceIdFor(sourceGoalScope, "harbor-omen");
+    const settledGoalId = goalInstanceIdFor(sourceGoalScope, "settled-past");
+    await fixture.ownerPool.query(
+      `INSERT INTO goal_instances (
+         workspace_id, world_id, worldline_id, record_id, id, goal_key,
+         state, revision, progress, outcome, policy_version, completed_at
+       ) VALUES
+         ($1, $2, $3, $4, $5, 'ack-tide', 'active', 2,
+          '{"narrations":1}'::jsonb, NULL, 'v1', NULL),
+         ($1, $2, $3, $4, $6, 'harbor-omen', 'active', 0,
+          '{}'::jsonb, NULL, 'v2', NULL),
+         ($1, $2, $3, $4, $7, 'settled-past', 'completed', 1,
+          '{"narrations":2}'::jsonb, '{"result":"done"}'::jsonb, 'v1',
+          '2026-08-13T06:30:00.000Z')`,
+      [
+        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
+        activeGoalId, semanticGoalId, settledGoalId,
+      ],
+    );
+    const sourceJobId = goalAssessmentJobIdFor(WS, settledGoalId, eventId2);
+    await fixture.ownerPool.query(
+      `INSERT INTO goal_assessment_jobs (
+         workspace_id, world_id, worldline_id, record_id, id,
+         goal_instance_id, source_event_id, input, state, completed_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, 'completed',
+                 CURRENT_TIMESTAMP)`,
+      [
+        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
+        sourceJobId, settledGoalId, eventId2,
+      ],
+    );
+    await fixture.ownerPool.query(
+      `INSERT INTO goal_assessments (
+         workspace_id, world_id, worldline_id, record_id, id,
+         goal_instance_id, assessment_job_id, source_event_id,
+         source, status, result, evidence_event_ids,
+         evidence_head_version, evidence_head_ordinal,
+         evidence_snapshot_hash, policy_version
+       ) VALUES ($1, $2, $3, $4, 'assessment_settled_1', $5, $6, $7,
+                 'deterministic', 'accepted', '{}'::jsonb, ARRAY[$7]::text[],
+                 2, 2, 'hash-settled-past', 'v1')`,
+      [
+        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
+        settledGoalId, sourceJobId, eventId2,
+      ],
+    );
+
+    const countTopology = async () => (await fixture.ownerPool.query<{
+      worldlines: string;
+      stories: string;
+      records: string;
+      goals: string;
+      jobs: string;
+      assessments: string;
+    }>(
+      `SELECT
+         (SELECT count(*) FROM worldlines
+           WHERE workspace_id = $1 AND world_id = $2)::text AS worldlines,
+         (SELECT count(*) FROM stories
+           WHERE workspace_id = $1 AND world_id = $2)::text AS stories,
+         (SELECT count(*) FROM records
+           WHERE workspace_id = $1 AND world_id = $2)::text AS records,
+         (SELECT count(*) FROM goal_instances
+           WHERE workspace_id = $1 AND world_id = $2)::text AS goals,
+         (SELECT count(*) FROM goal_assessment_jobs
+           WHERE workspace_id = $1 AND world_id = $2)::text AS jobs,
+         (SELECT count(*) FROM goal_assessments
+           WHERE workspace_id = $1 AND world_id = $2)::text AS assessments`,
+      [WS, fixture.worldId],
+    )).rows[0]!;
+
+    // ---- 当前 head 分支（runtime/restricted 角色路径）：Goal 全量克隆 ----
+    const headBranch = await runtimeLibrary.branchRecord(SCOPE, {
+      sourceRecordId: fixture.recordId,
+      idempotencyKey: "goal-head-branch",
+    });
+    assert.equal(headBranch.replayed, false);
+    assert.deepEqual(headBranch.fork, { tick: 40, ordinal: 2 });
+
+    const branchGoalScope = {
+      workspaceId: WS,
+      worldId: fixture.worldId,
+      worldlineId: headBranch.worldlineId,
+      recordId: headBranch.recordId,
+    };
+    const clonedGoals = await fixture.ownerPool.query<{
+      id: string;
+      world_id: string;
+      worldline_id: string;
+      record_id: string;
+      goal_key: string;
+      state: string;
+      revision: string;
+      progress: Record<string, unknown>;
+      outcome: Record<string, unknown> | null;
+      policy_version: string;
+      completed_at: string | null;
+    }>(
+      `SELECT id, world_id, worldline_id, record_id, goal_key, state,
+              revision::text AS revision, progress, outcome, policy_version,
+              completed_at::text AS completed_at
+       FROM goal_instances
+       WHERE workspace_id = $1 AND record_id = $2
+       ORDER BY goal_key`,
+      [WS, headBranch.recordId],
+    );
+    assert.equal(clonedGoals.rows.length, 3, "active + terminal Goal 必须全量克隆");
+    for (const row of clonedGoals.rows) {
+      assert.equal(row.world_id, fixture.worldId);
+      assert.equal(row.worldline_id, headBranch.worldlineId);
+      assert.equal(row.record_id, headBranch.recordId);
+      assert.equal(
+        row.id,
+        goalInstanceIdFor(branchGoalScope, row.goal_key),
+        "克隆 instance id 必须由目标 Record scope 确定性派生",
+      );
+      assert.notEqual(
+        row.id,
+        goalInstanceIdFor(sourceGoalScope, row.goal_key),
+        "克隆 instance 不得复用源 id（Record-scoped identity）",
+      );
+    }
+    const clonedByKey = new Map(clonedGoals.rows.map((row) => [row.goal_key, row]));
+    assert.deepEqual(
+      {
+        state: clonedByKey.get("ack-tide")!.state,
+        revision: clonedByKey.get("ack-tide")!.revision,
+        progress: clonedByKey.get("ack-tide")!.progress,
+        outcome: clonedByKey.get("ack-tide")!.outcome,
+        policy: clonedByKey.get("ack-tide")!.policy_version,
+        completedAt: clonedByKey.get("ack-tide")!.completed_at,
+      },
+      {
+        state: "active",
+        revision: "2",
+        progress: { narrations: 1 },
+        outcome: null,
+        policy: "v1",
+        completedAt: null,
+      },
+    );
+    assert.deepEqual(
+      {
+        state: clonedByKey.get("harbor-omen")!.state,
+        revision: clonedByKey.get("harbor-omen")!.revision,
+        policy: clonedByKey.get("harbor-omen")!.policy_version,
+      },
+      { state: "active", revision: "0", policy: "v2" },
+    );
+    // terminal 语义逐字节保留：state/revision/progress/outcome/completed_at。
+    const settledClone = clonedByKey.get("settled-past")!;
+    assert.equal(settledClone.state, "completed");
+    assert.equal(settledClone.revision, "1");
+    assert.deepEqual(settledClone.progress, { narrations: 2 });
+    assert.deepEqual(settledClone.outcome, { result: "done" });
+    assert.equal(settledClone.policy_version, "v1");
+    assert.ok(settledClone.completed_at, "terminal Goal 的 completed_at 必须保留");
+    const settledSource = await fixture.ownerPool.query<{ completed_at: string }>(
+      `SELECT completed_at::text AS completed_at
+       FROM goal_instances
+       WHERE workspace_id = $1 AND id = $2`,
+      [WS, settledGoalId],
+    );
+    assert.equal(settledClone.completed_at, settledSource.rows[0]!.completed_at);
+
+    // 不克隆 assessment 队列/台账：分支从零起步；源 record 行原样保留。
+    const branchLedger = await fixture.ownerPool.query<{ jobs: string; assessments: string }>(
+      `SELECT
+         (SELECT count(*) FROM goal_assessment_jobs
+           WHERE workspace_id = $1 AND record_id = $2)::text AS jobs,
+         (SELECT count(*) FROM goal_assessments
+           WHERE workspace_id = $1 AND record_id = $2)::text AS assessments`,
+      [WS, headBranch.recordId],
+    );
+    assert.deepEqual(branchLedger.rows[0], { jobs: "0", assessments: "0" });
+    const sourceLedger = await fixture.ownerPool.query<{ jobs: string; assessments: string }>(
+      `SELECT
+         (SELECT count(*) FROM goal_assessment_jobs
+           WHERE workspace_id = $1 AND record_id = $2)::text AS jobs,
+         (SELECT count(*) FROM goal_assessments
+           WHERE workspace_id = $1 AND record_id = $2)::text AS assessments`,
+      [WS, fixture.recordId],
+    );
+    assert.deepEqual(sourceLedger.rows[0], { jobs: "1", assessments: "1" });
+
+    // 幂等重放：同键返回首次拓扑，不重复克隆 Goal、不补写 job/台账。
+    const goalReplay = await runtimeLibrary.branchRecord(SCOPE, {
+      sourceRecordId: fixture.recordId,
+      idempotencyKey: "goal-head-branch",
+    });
+    assert.equal(goalReplay.replayed, true);
+    assert.equal(goalReplay.recordId, headBranch.recordId);
+    const goalsAfterReplay = await fixture.ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM goal_instances
+       WHERE workspace_id = $1 AND record_id = $2`,
+      [WS, headBranch.recordId],
+    );
+    assert.equal(goalsAfterReplay.rows[0]!.count, "3", "重放不得重复克隆 Goal");
+
+    // ---- 分支上的下一条正式事件：commitRelease hook 只为克隆的 active
+    // Goal enqueue durable job（terminal 不 enqueue）。----
+    const branchAssets = await fixture.ownerPool.query<{
+      scene_id: string;
+      policy_id: string;
+    }>(
+      `SELECT scene.id AS scene_id, policy.id AS policy_id
+       FROM records AS record
+       JOIN LATERAL (
+         SELECT id FROM scenes
+         WHERE workspace_id = record.workspace_id AND record_id = record.id
+         ORDER BY start_tick ASC, start_ordinal ASC LIMIT 1
+       ) AS scene ON true
+       JOIN LATERAL (
+         SELECT id FROM visibility_policies
+         WHERE workspace_id = record.workspace_id AND record_id = record.id
+         LIMIT 1
+       ) AS policy ON true
+       WHERE record.workspace_id = $1 AND record.id = $2`,
+      [WS, headBranch.recordId],
+    );
+    const branchSceneId = branchAssets.rows[0]!.scene_id;
+    const branchPolicyId = branchAssets.rows[0]!.policy_id;
+    type CommandPayload = readonly JsonValue[];
+    type PlanBody = { objective: string };
+    type CandidateBody = { text: string };
+    type ValidationBody = { accepted: boolean };
+    type EventPayload = { content: string };
+    type OutboxPayload = { eventId: string };
+    let sequence = 0;
+    const dependencies: TurnRuntimeDependencies<
+      CommandPayload,
+      PlanBody,
+      CandidateBody,
+      ValidationBody,
+      EventPayload,
+      OutboxPayload
+    > = {
+      repository: createPostgresRuntimeRepository<
+        CommandPayload,
+        PlanBody,
+        CandidateBody,
+        ValidationBody,
+        EventPayload,
+        OutboxPayload
+      >({
+        pool: fixture.runtimePool,
+        workspaceId: WS,
+        mapFormalEvent({ draft }) {
+          return {
+            sceneId: branchSceneId,
+            visibilityPolicyId: branchPolicyId,
+            eventKind: "narration.committed",
+            speakerName: "旁白",
+            content: draft.payload.content,
+          };
+        },
+        onFormalEventsCommitted: async (client, committed) => {
+          await enqueueGoalAssessmentJobsForCommittedEvents(client, committed);
+        },
+      }),
+      planner: { async plan() { return { objective: "respond" }; } },
+      drafter: { async draft() { return { text: "支流第一夜。" }; } },
+      validator: { async validate() { return { accepted: true }; } },
+      releaseBuilder: {
+        async build(context) {
+          return {
+            formalEvents: [{
+              eventId: `${context.turnId}-event-a`,
+              kind: "narration.committed",
+              payload: { content: context.candidate.body.text },
+            }],
+            outbox: [],
+          };
+        },
+      },
+      idFactory: () => `goal-branch-${++sequence}`,
+      clock: tickingClock(),
+    };
+    const command: RuntimeCommand<CommandPayload> = {
+      commandType: "player.utterance",
+      recordId: headBranch.recordId,
+      expectedRecordVersion: 0,
+      idempotencyKey: "goal-branch-turn",
+      actorId: null,
+      payload: ["点亮塔灯"],
+    };
+    const completed = await executeTurn(command, dependencies);
+    assert.equal(completed.state, "completed");
+    const committedEventIds = completed.release?.eventIds ?? [];
+    assert.equal(committedEventIds.length, 1);
+
+    const branchJobs = await fixture.ownerPool.query<{
+      id: string;
+      world_id: string;
+      worldline_id: string;
+      record_id: string;
+      goal_instance_id: string;
+      source_event_id: string;
+      state: string;
+    }>(
+      `SELECT id, world_id, worldline_id, record_id,
+              goal_instance_id, source_event_id, state
+       FROM goal_assessment_jobs
+       WHERE workspace_id = $1 AND record_id = $2
+       ORDER BY goal_instance_id`,
+      [WS, headBranch.recordId],
+    );
+    // 1 条正式事件 × 2 个克隆的 active Goal；terminal 克隆无 job。
+    assert.equal(branchJobs.rows.length, 2);
+    for (const jobRow of branchJobs.rows) {
+      assert.equal(jobRow.world_id, fixture.worldId);
+      assert.equal(jobRow.worldline_id, headBranch.worldlineId);
+      assert.equal(jobRow.record_id, headBranch.recordId);
+      assert.equal(jobRow.source_event_id, committedEventIds[0]);
+      assert.equal(jobRow.state, "pending");
+      assert.ok(
+        [
+          goalInstanceIdFor(branchGoalScope, "ack-tide"),
+          goalInstanceIdFor(branchGoalScope, "harbor-omen"),
+        ].includes(jobRow.goal_instance_id),
+        "terminal Goal 不得获得 assessment job",
+      );
+      assert.equal(
+        jobRow.id,
+        goalAssessmentJobIdFor(WS, jobRow.goal_instance_id, jobRow.source_event_id),
+        "job id 必须是确定性派生",
+      );
+    }
+
+    // ---- 历史分叉 fail-closed：有 Goal 的源 record 只允许 head 分叉 ----
+    const beforeRejected = await countTopology();
+    const historicalForks: Array<
+      { eventId: string } | { worldTick: number; worldOrdinal: number }
+    > = [
+      { eventId: eventId1 },
+      { worldTick: 40, worldOrdinal: 1 },
+      { worldTick: 0, worldOrdinal: 0 }, // record start 同样是历史分叉
+    ];
+    for (const [index, fork] of historicalForks.entries()) {
+      await assert.rejects(
+        runtimeLibrary.branchRecord(SCOPE, {
+          sourceRecordId: fixture.recordId,
+          fork,
+          idempotencyKey: `goal-historical-${index}`,
+        }),
+        (error: unknown) =>
+          error instanceof LibraryServiceError
+            && error.code === "BRANCH_GOAL_STATE_UNAVAILABLE"
+            && error.message
+              === "Records with Goal runtime state can only be branched at the current head.",
+        "历史分叉 + Goal 运行态必须 fail-closed（稳定静态 code/message）",
+      );
+    }
+    assert.deepEqual(
+      await countTopology(),
+      beforeRejected,
+      "拒绝前不得写入任何 worldline/story/record/goal/job/assessment 行",
+    );
+
+    // ---- 克隆写入失败（identity/约束不符的故障注入）即整体回滚 ----
+    await fixture.ownerPool.query(
+      `INSERT INTO goal_instances (
+         workspace_id, world_id, worldline_id, record_id, id, goal_key,
+         state, revision, progress, outcome, policy_version
+       ) VALUES ($1, $2, $3, $4, $5, 'boom-goal', 'active', 0,
+                 '{}'::jsonb, NULL, 'v1')`,
+      [
+        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
+        goalInstanceIdFor(sourceGoalScope, "boom-goal"),
+      ],
+    );
+    await fixture.ownerPool.query(
+      `CREATE OR REPLACE FUNCTION realm_test_fail_goal_clone()
+       RETURNS trigger LANGUAGE plpgsql AS $fn$
+       BEGIN
+         IF NEW.goal_key = 'boom-goal' THEN
+           RAISE EXCEPTION 'injected goal clone identity failure';
+         END IF;
+         RETURN NEW;
+       END
+       $fn$`,
+    );
+    await fixture.ownerPool.query(
+      `CREATE TRIGGER realm_test_fail_goal_clone
+       BEFORE INSERT ON goal_instances
+       FOR EACH ROW EXECUTE FUNCTION realm_test_fail_goal_clone()`,
+    );
+    t.after(async () => {
+      await fixture.ownerPool.query(
+        `DROP TRIGGER IF EXISTS realm_test_fail_goal_clone ON goal_instances`,
+      ).catch(() => undefined);
+      await fixture.ownerPool.query(
+        `DROP FUNCTION IF EXISTS realm_test_fail_goal_clone()`,
+      ).catch(() => undefined);
+    });
+    const beforeRollback = await countTopology();
+    await assert.rejects(
+      runtimeLibrary.branchRecord(SCOPE, {
+        sourceRecordId: fixture.recordId,
+        idempotencyKey: "goal-rollback-branch",
+      }),
+      /injected goal clone identity failure/,
+    );
+    assert.deepEqual(
+      await countTopology(),
+      beforeRollback,
+      "克隆失败必须回滚整个分支拓扑，零残留",
+    );
+    // 该幂等键的确定性 record id 也不得落库。
+    const rollbackDigest = createHash("sha256")
+      .update(`${WS}:${fixture.recordId}:goal-rollback-branch`)
+      .digest("hex")
+      .slice(0, 18);
+    const rollbackRecord = await fixture.ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM records
+       WHERE workspace_id = $1 AND id = $2`,
+      [WS, `record_branch_${rollbackDigest}`],
+    );
+    assert.equal(rollbackRecord.rows[0]!.count, "0");
+
+    // ---- 无 Goal 旧路径回归：历史分叉语义逐字节不变，两端零 Goal 行 ----
+    await ownerLibrary.create(SCOPE, {
+      kind: "world",
+      name: "无目标试验场",
+      era: "静纪",
+      summary: "无 Goal 分支回归世界。",
+    });
+    const legacySnapshot = await ownerLibrary.list(SCOPE);
+    const legacyWorld = legacySnapshot.worlds.find(
+      (world) => world.name === "无目标试验场",
+    )!;
+    const legacyStory = legacyWorld.stories[0]!;
+    const legacyRecord = legacyStory.records[0]!;
+    const legacyAssets = await fixture.ownerPool.query<{
+      scene_id: string;
+      policy_id: string;
+      calendar_id: string;
+    }>(
+      `SELECT scene.id AS scene_id, policy.id AS policy_id, world.calendar_id
+       FROM worlds AS world
+       JOIN LATERAL (
+         SELECT id FROM scenes
+         WHERE workspace_id = world.workspace_id AND record_id = $2
+         ORDER BY start_tick ASC, start_ordinal ASC LIMIT 1
+       ) AS scene ON true
+       JOIN LATERAL (
+         SELECT id FROM visibility_policies
+         WHERE workspace_id = world.workspace_id AND record_id = $2
+         LIMIT 1
+       ) AS policy ON true
+       WHERE world.workspace_id = $1 AND world.id = $3`,
+      [WS, legacyRecord.id, legacyWorld.id],
+    );
+    const legacyFixture: Fixture = {
+      ownerPool: fixture.ownerPool,
+      runtimePool: fixture.runtimePool,
+      worldId: legacyWorld.id,
+      worldlineId: legacyWorld.worldlines[0]!.id,
+      storyId: legacyStory.id,
+      recordId: legacyRecord.id,
+      sceneId: legacyAssets.rows[0]!.scene_id,
+      policyId: legacyAssets.rows[0]!.policy_id,
+      calendarId: legacyAssets.rows[0]!.calendar_id,
+    };
+    // recordOrdinal 11/12：避开本库既有合成事件 id（event_branch_test_1/2）。
+    const legacyEventId1 = await commitSyntheticEvent(fixture.ownerPool, legacyFixture, {
+      tick: 50, ordinal: 1, recordOrdinal: 11, content: "旧路径第一段。",
+    });
+    await commitSyntheticEvent(fixture.ownerPool, legacyFixture, {
+      tick: 50, ordinal: 2, recordOrdinal: 12, content: "旧路径第二段。",
+    });
+    const legacyBranch = await runtimeLibrary.branchRecord(SCOPE, {
+      sourceRecordId: legacyRecord.id,
+      fork: { eventId: legacyEventId1 },
+      idempotencyKey: "legacy-mid-branch",
+    });
+    assert.equal(legacyBranch.replayed, false);
+    assert.deepEqual(legacyBranch.fork, { tick: 50, ordinal: 1 });
+    const legacyGoalRows = await fixture.ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM goal_instances
+       WHERE workspace_id = $1 AND world_id = $2`,
+      [WS, legacyWorld.id],
+    );
+    assert.equal(legacyGoalRows.rows[0]!.count, "0", "无 Goal 路径不得产生 Goal 行");
+  },
+);
+
+function tickingClock() {
+  let second = 0;
+  return () => new Date(Date.UTC(2026, 7, 13, 5, 0, second++)).toISOString();
+}

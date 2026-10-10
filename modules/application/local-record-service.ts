@@ -1,4 +1,4 @@
-import type { RecordProjection, ProjectionEvent } from "./legacy-record-projection-types.ts";
+import type { ProjectionEvent } from "./legacy-record-projection-types.ts";
 import type { Pool } from "pg";
 import { createHash } from "node:crypto";
 import {
@@ -15,29 +15,24 @@ import {
   createPostgresSceneCrystallizationStore,
   createPostgresSceneImageStore,
   createPostgresSceneImageQueue,
-  type PlayerDeliveryScope,
   type PostgresDeliveryProjectionRepository,
   type PostgresFormalEventMappingContext,
   type PostgresFormalEventWrite,
   type PostgresVisibilityPolicyWrite,
   type RecordRuntimeScope,
   type RecordRuntimeScopeRepository,
-  type RuntimeActor,
   type SceneCrystallizationStore,
   type SceneImageQueue,
   type SceneImageStore,
 } from "../../database/postgres/public.ts";
+import { enqueueGoalAssessmentJobsForCommittedEvents } from "../../database/postgres/goal-runtime-materialization.ts";
 import {
   RuntimeIdempotencyConflictError,
   RuntimeInvariantError,
-  RetryableTurnError,
   executeTurn,
   retryTurn,
   FatalTurnError,
   type RuntimeCommand,
-  type RuntimeRepository,
-  type TurnRuntimeDependencies,
-  type TurnRun,
 } from "../runtime/public.ts";
 import {
   createTurnControl,
@@ -49,24 +44,20 @@ import {
   type SceneImageAutoTrigger,
 } from "./scene-image-trigger.ts";
 import {
-  fallbackCompositeSemanticSegments,
   semanticPresentation,
-  type SemanticSegment,
 } from "../presentation/semantic-segments.ts";
 import {
-  createLocalM2TurnOrchestrator,
   createModelDynamicDiscoveryGenerator,
   createModelPoweredM2TurnOrchestrator,
   createModelPresenceAssessor,
   createModelVisibilityAssessor,
-  createRuleBasedDMController,
+  normalizeM2TurnCheckpoint,
   type ActivatedCharacter,
   type M2TurnCandidate,
   type M2TurnOrchestrator,
   type M2TurnPlan,
   type M2TurnValidation,
   type SemanticOutputDraft,
-  type TurnVisibilityAssessment,
   type TurnVisibilityPlan,
 } from "../orchestration/public.ts";
 import {
@@ -81,19 +72,20 @@ import {
   presenceContextIsEmpty,
   presenceTriggerText,
   type PresenceAssessor,
-  type PresenceTriggerKind,
 } from "../orchestration/presence.ts";
+// Phase 2B：preview 内存广播/可见性过滤生命周期已拆入
+// local-record-preview.ts；本 facade 只做编排调用并保持公开导出不变。
 import {
-  createPreviewSession,
-  type PreviewSession,
-} from "../streaming/preview-session.ts";
+  createLocalPreviewHub,
+  type LocalPreviewEvent,
+  type LocalPreviewHub,
+} from "./local-record-preview.ts";
 import {
   createDeterministicActionResolver,
   type ActionAffordance,
   type ActionAffordanceCatalog,
   type ActionSelection,
   type ActionTransaction,
-  type ActorToolCall,
 } from "../actions/public.ts";
 import { getModelSettingsService } from "./model-settings-service.ts";
 import { getFirstNightRuntime } from "./first-night-runtime.ts";
@@ -101,14 +93,23 @@ import { createPostgresSelfPlayStore } from "../../database/postgres/self-play-s
 import { createPostgresWorldKnowledgeRepository } from "../../database/postgres/world-knowledge-repository.ts";
 import { createWorldKnowledgeService } from "../world-knowledge/public.ts";
 import {
-  isSelfPlayTerminal,
   SELF_PLAY_BEAT_BUDGET,
-  SELF_PLAY_STALE_MS,
-  selfPlayInstruction,
-  selfPlaySessionNeedsBeats,
   type SelfPlaySession,
   type SelfPlayStore,
 } from "./self-play.ts";
+// Phase 2F-A：自演拍循环 coordinator（session 判定/租约/快照/turn signal/
+// 版本冲突重试/收束/单飞）已拆入 local-record-self-play.ts；本 facade 只做
+// 依赖组装与 start/stopSelfPlay 公开 API 编排。
+import {
+  createLocalSelfPlayCoordinator,
+} from "./local-record-self-play.ts";
+// Phase 2F-B：回合 memory prefetch 生命周期（玩家回合仅非 replay begin、
+// 成功后按既有角色顺序 consume、提交/失败/异常 finally 一律 end；插话回合
+// 开始即 begin、退出清理不泄漏）已拆入 local-record-memory-prefetch.ts；
+// 本 facade 只做依赖组装与调用，不再持有第二份 prefetch lifecycle 实现。
+import {
+  createLocalMemoryPrefetchCoordinator,
+} from "./local-record-memory-prefetch.ts";
 import {
   createCharacterMemoryService,
   formatMemoryPrefetchLines,
@@ -136,77 +137,83 @@ import {
 } from "../../database/postgres/character-growth-store.ts";
 import {
   extractExplicitCharacterProfileUpdate,
-  type CharacterProfileUpdate,
 } from "./character-profile.ts";
+// Phase 2A：读侧一致性快照 / envelope 组装边界已拆入
+// local-record-read-model.ts；本 facade 只做编排调用并保持公开导出不变。
+import {
+  LOCAL_RECORD_SCOPE,
+  LocalRecordServiceError,
+  demoRecordRuntimeScope,
+  listAuthorizedAffordances,
+  loadConsistentEnvelope,
+  loadConsistentSnapshot,
+  notInitialized,
+  resolveRuntimeScope,
+  sameWriteScope,
+  writeScope,
+  type LocalRecordEnvelope,
+  type LocalTurnFailureDiagnostic,
+  type WriteScope,
+  type WriteTokenRegistry,
+} from "./local-record-read-model.ts";
+export {
+  LOCAL_RECORD_SCOPE,
+  LocalRecordServiceError,
+} from "./local-record-read-model.ts";
+export type {
+  LocalRecordEnvelope,
+  LocalTurnFailureDiagnostic,
+  LocalVisibilityProposal,
+  WriteScope,
+  WriteTokenRegistry,
+} from "./local-record-read-model.ts";
+export { createLocalPreviewHub } from "./local-record-preview.ts";
+export type {
+  LocalPreviewEvent,
+  LocalPreviewHub,
+} from "./local-record-preview.ts";
+// Phase 2C：受限可见性提案签发/授权/绑定（issue/authorize/bind + TTL +
+// 校验）已拆入 local-record-visibility-proposals.ts；本 facade 只做编排
+// 调用并保持公开导出不变。
+import {
+  createMemoryVisibilityProposalRegistry,
+  type VisibilityProposalRegistry,
+} from "./local-record-visibility-proposals.ts";
+export { createMemoryVisibilityProposalRegistry } from "./local-record-visibility-proposals.ts";
+export type { VisibilityProposalRegistry } from "./local-record-visibility-proposals.ts";
+// Phase 2D：visibility resolution（assessor → plan/proposal 裁决、诊断
+// 分类）已拆入 local-record-visibility.ts；本 facade 只做编排调用并
+// 保持公开导出/类型路径不变。
+import {
+  formatTurnFailureMessage,
+  resolveTurnVisibility,
+  type LocalVisibilityAssessor,
+  type LocalVisibilityConfirmation,
+} from "./local-record-visibility.ts";
+export type {
+  LocalVisibilityAssessor,
+  LocalVisibilityConfirmation,
+} from "./local-record-visibility.ts";
+// Phase 2E：turn runtime dependency bridge（planner/drafter/validator/
+// releaser、presence/interjection 固定计划、取消 signal 检查、orchestrator
+// 选择、action catalog 接线）已拆入 local-record-turn-runtime.ts；本 facade
+// 只做依赖组装与调用并保持公开导出/类型路径不变。
+import {
+  createLocalTurnDependencies,
+  type ActiveTurnSignal,
+  type FormalEventPayload,
+  type LocalRuntimeRepository,
+  type LocalTurnRun,
+  type OutboxPayload,
+  type PlayerUtterancePayload,
+} from "./local-record-turn-runtime.ts";
+export type {
+  FormalEventPayload,
+  OutboxPayload,
+  PlayerUtterancePayload,
+} from "./local-record-turn-runtime.ts";
 
 const WRITE_TOKEN_TTL_MS = 15 * 60 * 1_000;
-const VISIBILITY_PROPOSAL_TTL_MS = 5 * 60 * 1_000;
-const SNAPSHOT_ATTEMPTS = 3;
-
-const LOCAL_AI_CHARACTERS = [
-  {
-    characterInstanceId: POSTGRES_DEMO_IDS.scoutInstance,
-    participantId: POSTGRES_DEMO_IDS.scoutParticipant,
-    displayName: "塞娜",
-    profileSummary: "谨慎的斥候。",
-  },
-  {
-    characterInstanceId: POSTGRES_DEMO_IDS.scholarInstance,
-    participantId: POSTGRES_DEMO_IDS.scholarParticipant,
-    displayName: "弥洛",
-    profileSummary: "研究旧世界文字的学者。",
-  },
-] as const;
-
-const LOCAL_PLAYER_ACTOR = {
-  characterInstanceId: POSTGRES_DEMO_IDS.playerInstance,
-  participantId: POSTGRES_DEMO_IDS.playerParticipant,
-  displayName: "洛川",
-  profileSummary: "在北岸谋生的旅人。",
-} as const;
-
-function demoRecordRuntimeScope(): RecordRuntimeScope {
-  return {
-    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
-    principalId: LOCAL_RECORD_SCOPE.principalId,
-    worldId: POSTGRES_DEMO_IDS.world,
-    worldlineId: POSTGRES_DEMO_IDS.worldline,
-    storyId: POSTGRES_DEMO_IDS.story,
-    recordId: LOCAL_RECORD_SCOPE.recordId,
-    sceneId: POSTGRES_DEMO_IDS.scene,
-    publicPolicyId: POSTGRES_DEMO_IDS.publicPolicy,
-    calendarId: "truce_calendar",
-    displayTime: "停战纪元17年 · 雾月12日 · 入夜",
-    style: "classical",
-    language: "zh-CN",
-    worldStatus: "active",
-    brief: {
-      worldName: "烬海诸国",
-      era: "停战纪元 17 年",
-      summary: "人魔停战十七年后，烬海诸国在脆弱的和平中重建。",
-      storyTitle: "无声钟的来客",
-      premise: "北岸灯塔在无风夜自行点亮，一封不属于任何阵营的密函被送上岸。",
-      location: "灰鲸港 · 北防波堤",
-      weather: "冷雾，无风",
-      tension: "钟声已经响过三次",
-      objective: "决定是否当众拆开密函",
-      // 批次 T9：demo scope 无 canon 数据，空串保持 prompt 兼容。
-      canon: "",
-      worldLore: "",
-    },
-    playerActor: LOCAL_PLAYER_ACTOR,
-    viewerCharacterInstanceId: LOCAL_PLAYER_ACTOR.characterInstanceId,
-    aiCharacters: LOCAL_AI_CHARACTERS,
-    observerCharacterInstanceIds: [
-      POSTGRES_DEMO_IDS.playerInstance,
-      POSTGRES_DEMO_IDS.scoutInstance,
-      POSTGRES_DEMO_IDS.scholarInstance,
-    ],
-    recentPublicEvents: [],
-    recentPublicDialogue: [],
-    recordKnowledge: [],
-  };
-}
 
 const LOCAL_NON_STATEFUL_AFFORDANCES = [
   {
@@ -229,165 +236,10 @@ const LOCAL_NON_STATEFUL_AFFORDANCES = [
   },
 ] as const satisfies readonly ActionAffordance[];
 
-export const LOCAL_RECORD_SCOPE = {
-  workspaceId: POSTGRES_DEMO_IDS.workspace,
-  principalId: POSTGRES_DEMO_IDS.principal,
-  recordId: POSTGRES_DEMO_IDS.record,
-  characterInstanceId: undefined,
-} as const satisfies PlayerDeliveryScope;
-
-export type PlayerUtterancePayload = {
-  text: string;
-  actionSelection?: ActionSelection;
-  visibility: TurnVisibilityPlan;
-  runtimeScope?: RecordRuntimeScope;
-  profileUpdate?: CharacterProfileUpdate;
-  /** M4：角色自动插话回合；不产生玩家事件。 */
-  interjection?: {
-    characterInstanceId: string;
-    triggerText: string;
-  };
-  /** 批次 T3：角色在场回合；不产生玩家事件。 */
-  presence?: {
-    characterInstanceId: string;
-    triggerKind: PresenceTriggerKind;
-    triggerText: string;
-    memories: string;
-    relationships: string;
-  };
-  /**
-   * 批次 T7：世界自演拍（无玩家输入的自治回合）——走完整 DM 规划/旁白/
-   * 角色行动管线，不产生玩家事件；text 恒等于 selfPlay.instruction。
-   */
-  selfPlay?: {
-    beat: number;
-    instruction: string;
-  };
-};
-export type FormalEventPayload = {
-  schemaVersion: 1;
-  role: "player" | "character" | "narrator" | "system";
-  speaker: string;
-  participantId: string | null;
-  content: string;
-  segments: readonly SemanticSegment[];
-  /**
-   * 对话主体标记（内部字段，UI 不展示）：角色有明确对话对象时为对方
-   * participantId，无明确对象时缺省；旧事件读作 null（向后兼容）。
-   */
-  recipientId?: string | null;
-  /** 旁白附带的下一步对话提案，随 narration.committed 事件持久化。 */
-  suggestions?: readonly string[];
-  /** 玩家明确自述后，当前 Record 角色简介的动态更新。 */
-  profileUpdate?: CharacterProfileUpdate;
-  actionTransaction?: ActionTransaction;
-  /**
-   * 批次 T3：在场标记（payload 元数据，不是新事件类型）——
-   * 该事件是回合外角色主动发声，triggerKind 为触发种类。
-   */
-  presence?: {
-    characterInstanceId: string;
-    triggerKind: PresenceTriggerKind;
-  };
-  /**
-   * 批次 T7：自演拍标记（payload 元数据，不是新事件类型）——
-   * 该事件是世界自演回合产出，beat 为拍号（1 起）。
-   */
-  selfPlay?: {
-    beat: number;
-  };
-};
-export type OutboxPayload = {
-  recordId: string;
-  eventIds: readonly string[];
-};
-
-type LocalRuntimeRepository = RuntimeRepository<
-  PlayerUtterancePayload,
-  M2TurnPlan,
-  M2TurnCandidate,
-  M2TurnValidation,
-  FormalEventPayload,
-  OutboxPayload
->;
-
-export interface WriteScope {
-  workspaceId: string;
-  recordId: string;
-  principalId: string;
-  characterInstanceId: string | null;
-}
-
 interface WriteTokenEntry extends WriteScope {
   canonicalVersion: number;
   expiresAt: number;
   usedByIdempotencyKey?: string;
-}
-
-export interface WriteTokenRegistry {
-  issue(scope: WriteScope, canonicalVersion: number): string;
-  authorize(input: {
-    token: string;
-    scope: WriteScope;
-    canonicalVersion: number;
-    idempotencyKey: string;
-  }): { replay: boolean; expectedRecordVersion: number };
-  bind(token: string, idempotencyKey: string): void;
-}
-
-export interface LocalRecordEnvelope {
-  record: RecordProjection;
-  writeToken: string;
-  viewer: {
-    cursor: "viewer-local";
-    perspective: "omniscient" | "character";
-    dynamicKnowledgeVisible: boolean;
-    characterInstanceId: string | null;
-    /** 批次 S：membership.role——前端渲染执笔者徽标与姿态开关。 */
-    membershipRole: "owner" | "player" | "observer";
-  };
-  affordances: readonly ActionAffordance[];
-  /** 回合后的下一步对话提案；从最新可见 Narration 事件持久化读取。 */
-  suggestions?: readonly string[];
-  /**
-   * 批次 T1：世界初夜状态。旧世界无状态行 → null（前端行为零变化）；
-   * pending 期间前端轻量轮询，ready/degraded 后呈现初夜事件。
-   * openingSuggestions：初夜开场提案（composer 回合提案为空时的补位）。
-   */
-  firstNight?: {
-    state: "pending" | "ready" | "degraded";
-    hookContent: string;
-    openingSuggestions: string[];
-  } | null;
-  /**
-   * 批次 T7：世界自演会话状态。无会话行 → null（完全向后兼容）；
-   * running/stopping 期间前端轻量轮询信封刷新状态（T1 轮询先例）。
-   */
-  selfPlay?: {
-    state: "running" | "stopping" | "completed" | "failed" | "cancelled";
-    beatBudget: number;
-    beatsCompleted: number;
-    lastError: string | null;
-  } | null;
-  /**
-   * 场景建立图（Stage 3）：当前 Record 最新 ready 场景背景；无图 → null
-   * （完全向后兼容）。fileUrl 恒为服务端生成的 /api/files/<id> 相对路径，
-   * 绝不携带 provider 远端 URL/路径。
-   */
-  sceneImage?: {
-    fileId: string;
-    fileUrl: string;
-    status: "ready";
-  } | null;
-  /**
-   * 场景图自动请求状态（0050 队列最新行的安全摘要：queued/running/ready/
-   * failed + triggerKind）；不透出 prompt_id/provider 路径/body/key。
-   * 无请求 → null（完全向后兼容）。
-   */
-  sceneImageJob?: {
-    status: "queued" | "running" | "ready" | "failed";
-    triggerKind: "scene_change" | "every_turn";
-  } | null;
 }
 
 export interface SubmitLocalMessageInput {
@@ -399,19 +251,6 @@ export interface SubmitLocalMessageInput {
   visibilityConfirmation?: LocalVisibilityConfirmation;
   /** 请求级身份；缺省回落本地单用户 principal。 */
   principalId?: string;
-}
-
-export type LocalVisibilityConfirmation = {
-  proposalId: string;
-  decision: "public" | "restricted";
-};
-
-export interface LocalVisibilityProposal {
-  proposalId: string;
-  kind: "restricted";
-  audienceCharacterInstanceIds: readonly string[];
-  audienceNames: readonly string[];
-  reason: string;
 }
 
 export interface SubmitLocalMessageResult extends LocalRecordEnvelope {
@@ -471,180 +310,6 @@ export interface LocalRecordService {
   ): () => void;
 }
 
-export type LocalPreviewEvent =
-  | { kind: "chunk"; previewId: string; speaker: string; content: string }
-  | { kind: "end"; previewId: string; outcome: "committed" | "aborted" };
-
-export interface LocalPreviewHub {
-  begin(
-    recordId: string,
-    previewId: string,
-    signal: AbortSignal | undefined,
-    visibility: TurnVisibilityPlan,
-  ): void;
-  publishChunk(recordId: string, speaker: string, content: string): void;
-  end(recordId: string, outcome: "committed" | "aborted"): void;
-  subscribe(
-    recordId: string,
-    listener: (event: LocalPreviewEvent) => void,
-    viewerCharacterInstanceId?: string,
-  ): () => void;
-}
-
-/**
- * In-memory preview 广播枢纽。public Turn 面向所有已授权 viewer；restricted
- * Turn 在服务端按 principal 绑定的 characterInstanceId 过滤，chunk 与 end
- * 元数据同样受 audience 约束。身份缺失时只允许 public Preview。
- */
-type LocalPreviewSubscriber = {
-  listener: (event: LocalPreviewEvent) => void;
-  viewerCharacterInstanceId?: string;
-};
-type ActiveLocalPreview = {
-  session: PreviewSession;
-  visibility: TurnVisibilityPlan;
-};
-
-function canViewPreview(
-  visibility: TurnVisibilityPlan,
-  viewerCharacterInstanceId?: string,
-): boolean {
-  if (visibility.kind === "public") return true;
-  if (
-    visibility.kind !== "restricted"
-    || !Array.isArray(visibility.audienceCharacterInstanceIds)
-    || typeof viewerCharacterInstanceId !== "string"
-    || viewerCharacterInstanceId.length === 0
-  ) {
-    return false;
-  }
-  return visibility.audienceCharacterInstanceIds.includes(viewerCharacterInstanceId);
-}
-
-export function createLocalPreviewHub(): LocalPreviewHub {
-  const listeners = new Map<string, Set<LocalPreviewSubscriber>>();
-  const sessions = new Map<string, ActiveLocalPreview>();
-
-  function emit(
-    recordId: string,
-    event: LocalPreviewEvent,
-    visibility: TurnVisibilityPlan,
-  ) {
-    for (const subscriber of listeners.get(recordId) ?? []) {
-      if (canViewPreview(visibility, subscriber.viewerCharacterInstanceId)) {
-        subscriber.listener(event);
-      }
-    }
-  }
-
-  return {
-    begin(recordId, previewId, signal, visibility) {
-      sessions.set(recordId, {
-        session: createPreviewSession({ id: previewId, signal }),
-        visibility,
-      });
-    },
-    publishChunk(recordId, speaker, content) {
-      const active = sessions.get(recordId);
-      if (!active || active.session.state !== "streaming" || !content) return;
-      active.session.push(content);
-      emit(recordId, {
-        kind: "chunk",
-        previewId: active.session.id,
-        speaker,
-        content,
-      }, active.visibility);
-    },
-    end(recordId, outcome) {
-      const active = sessions.get(recordId);
-      if (!active) return;
-      sessions.delete(recordId);
-      // Batch 2D：已 aborted 的会话绝不因迟到的 success cleanup 发出
-      // committed end；partial 已被会话状态机清空且不可读取。
-      const effectiveOutcome = active.session.state === "aborted"
-        ? "aborted"
-        : outcome;
-      if (active.session.state === "streaming") {
-        if (effectiveOutcome === "committed") active.session.complete();
-        else active.session.abort(effectiveOutcome);
-      }
-      emit(recordId, {
-        kind: "end",
-        previewId: active.session.id,
-        outcome: effectiveOutcome,
-      }, active.visibility);
-    },
-    subscribe(recordId, listener, viewerCharacterInstanceId) {
-      const set = listeners.get(recordId) ?? new Set<LocalPreviewSubscriber>();
-      const subscriber = { listener, viewerCharacterInstanceId };
-      set.add(subscriber);
-      listeners.set(recordId, set);
-      return () => {
-        set.delete(subscriber);
-        if (set.size === 0) listeners.delete(recordId);
-      };
-    },
-  };
-}
-
-export type LocalTurnFailureDiagnostic = {
-  stage: "visibility" | "planning" | "drafting" | "validating" | "releasing";
-  code: string;
-  message: string;
-  disposition: "retryable" | "failed";
-  attempt?: number;
-};
-
-export class LocalRecordServiceError extends Error {
-  readonly code:
-    | "NOT_FOUND"
-    | "LOCAL_RUNTIME_NOT_INITIALIZED"
-    | "INVALID_WRITE_TOKEN"
-    | "WRITE_CONFLICT"
-    | "IDEMPOTENCY_CONFLICT"
-    | "INVALID_ACTION_SELECTION"
-    | "VISIBILITY_CONFIRMATION_REQUIRED"
-    | "INVALID_VISIBILITY_CONFIRMATION"
-    | "WORLD_ARCHIVED"
-    | "TURN_FAILED";
-  readonly currentVersion?: number;
-  readonly visibilityProposal?: LocalVisibilityProposal;
-  readonly diagnostic?: LocalTurnFailureDiagnostic;
-
-  constructor(
-    code:
-      | "NOT_FOUND"
-      | "LOCAL_RUNTIME_NOT_INITIALIZED"
-      | "INVALID_WRITE_TOKEN"
-      | "WRITE_CONFLICT"
-      | "IDEMPOTENCY_CONFLICT"
-      | "INVALID_ACTION_SELECTION"
-      | "VISIBILITY_CONFIRMATION_REQUIRED"
-      | "INVALID_VISIBILITY_CONFIRMATION"
-      | "WORLD_ARCHIVED"
-      | "TURN_FAILED",
-    message: string,
-    currentVersion?: number,
-    visibilityProposal?: LocalVisibilityProposal,
-    diagnostic?: LocalTurnFailureDiagnostic,
-  ) {
-    super(message);
-    this.name = "LocalRecordServiceError";
-    this.code = code;
-    this.currentVersion = currentVersion;
-    this.visibilityProposal = visibilityProposal;
-    this.diagnostic = diagnostic;
-  }
-}
-
-export interface LocalVisibilityAssessor {
-  assess(input: {
-    playerText: string;
-  }): Promise<TurnVisibilityAssessment>;
-}
-
-type ActiveTurnSignal = { recordId: string; controller: AbortController };
-
 /** A cancellation key is insufficient authority without its Record scope. */
 export function cancelActiveTurn(
   signals: Map<string, ActiveTurnSignal>,
@@ -655,33 +320,6 @@ export function cancelActiveTurn(
   if (!active || active.recordId !== recordId) return false;
   active.controller.abort();
   return true;
-}
-
-interface VisibilityProposalEntry extends WriteScope {
-  canonicalVersion: number;
-  content: string;
-  expiresAt: number;
-  assessment: Extract<TurnVisibilityPlan, { kind: "restricted" }>;
-  reason: string;
-  usedByIdempotencyKey?: string;
-}
-
-export interface VisibilityProposalRegistry {
-  issue(input: {
-    scope: WriteScope;
-    canonicalVersion: number;
-    content: string;
-    assessment: TurnVisibilityAssessment;
-    audienceNames?: readonly string[];
-  }): LocalVisibilityProposal;
-  authorize(input: {
-    proposalId: string;
-    scope: WriteScope;
-    canonicalVersion: number;
-    content: string;
-    idempotencyKey: string;
-  }): VisibilityProposalEntry;
-  bind(proposalId: string, idempotencyKey: string): void;
 }
 
 /** 批次 S：账号级「最近打开」记忆仓储（accounts.last_world_id/last_record_id）。 */
@@ -896,102 +534,6 @@ export function createMemoryWriteTokenRegistry(options: {
   };
 }
 
-export function createMemoryVisibilityProposalRegistry(options: {
-  clock?: () => Date;
-  randomToken?: () => string;
-  ttlMs?: number;
-} = {}): VisibilityProposalRegistry {
-  const entries = new Map<string, VisibilityProposalEntry>();
-  const clock = options.clock ?? (() => new Date());
-  const randomToken = options.randomToken ?? (() => crypto.randomUUID());
-  const ttlMs = options.ttlMs ?? VISIBILITY_PROPOSAL_TTL_MS;
-
-  function prune(now: number): void {
-    for (const [proposalId, entry] of entries) {
-      if (entry.expiresAt <= now) entries.delete(proposalId);
-    }
-  }
-
-  return {
-    issue({ scope, canonicalVersion, content, assessment, audienceNames: proposedNames }) {
-      if (assessment.visibility.kind !== "restricted") {
-        throw new LocalRecordServiceError(
-          "INVALID_VISIBILITY_CONFIRMATION",
-          "Only a restricted visibility assessment can be confirmed.",
-        );
-      }
-      const now = clock().getTime();
-      prune(now);
-      const proposalId = randomToken();
-      entries.set(proposalId, {
-        ...scope,
-        canonicalVersion,
-        content,
-        expiresAt: now + ttlMs,
-        assessment: assessment.visibility,
-        reason: assessment.reason,
-      });
-      return {
-        proposalId,
-        kind: "restricted",
-        audienceCharacterInstanceIds: assessment.visibility.audienceCharacterInstanceIds,
-        audienceNames: proposedNames
-          ?? audienceNames(assessment.visibility.audienceCharacterInstanceIds),
-        reason: assessment.reason,
-      };
-    },
-
-    authorize({ proposalId, scope, canonicalVersion, content, idempotencyKey }) {
-      const now = clock().getTime();
-      prune(now);
-      const entry = entries.get(proposalId);
-      if (
-        !entry
-        || !sameWriteScope(entry, scope)
-        || entry.canonicalVersion !== canonicalVersion
-        || entry.content !== content
-      ) {
-        throw new LocalRecordServiceError(
-          "INVALID_VISIBILITY_CONFIRMATION",
-          "The visibility confirmation is missing, expired, or no longer matches this draft.",
-        );
-      }
-      if (
-        entry.usedByIdempotencyKey !== undefined
-        && entry.usedByIdempotencyKey !== idempotencyKey
-      ) {
-        throw new LocalRecordServiceError(
-          "INVALID_VISIBILITY_CONFIRMATION",
-          "The visibility confirmation was already used by another Command.",
-        );
-      }
-      return entry;
-    },
-
-    bind(proposalId, idempotencyKey) {
-      const now = clock().getTime();
-      prune(now);
-      const entry = entries.get(proposalId);
-      if (!entry) {
-        throw new LocalRecordServiceError(
-          "INVALID_VISIBILITY_CONFIRMATION",
-          "The visibility confirmation is missing or expired.",
-        );
-      }
-      if (
-        entry.usedByIdempotencyKey !== undefined
-        && entry.usedByIdempotencyKey !== idempotencyKey
-      ) {
-        throw new LocalRecordServiceError(
-          "INVALID_VISIBILITY_CONFIRMATION",
-          "The visibility confirmation was already used by another Command.",
-        );
-      }
-      entry.usedByIdempotencyKey ??= idempotencyKey;
-    },
-  };
-}
-
 export function createLocalRecordService(
   dependencies: LocalRecordServiceDependencies,
 ): LocalRecordService {
@@ -1014,8 +556,6 @@ export function createLocalRecordService(
         : null;
   const previewHub = dependencies.previewHub ?? createLocalPreviewHub();
   const turnSignals = new Map<string, ActiveTurnSignal>();
-  // 批次 T7：自演单飞守卫（进程内按 recordId 去重；DB 部分唯一索引兜底）。
-  const selfPlayInFlight = new Set<string>();
   const actionCatalog = dependencies.actionCatalog ?? {
     async listAuthorized() {
       return LOCAL_NON_STATEFUL_AFFORDANCES.map((item) => ({ ...item }));
@@ -1029,6 +569,25 @@ export function createLocalRecordService(
     turnSignals,
     actionCatalog,
   );
+  // Phase 2F-A：自演拍循环由独立 coordinator 承载；facade 只组装窄依赖
+  // （快照/晶化走本文件既有函数，单飞守卫在 coordinator 内部）。
+  const selfPlayCoordinator = createLocalSelfPlayCoordinator({
+    ...(dependencies.selfPlayStore ? { store: dependencies.selfPlayStore } : {}),
+    turnControl,
+    turnSignals,
+    runtimeDependencies,
+    loadSnapshot: (recordId, principalId) =>
+      loadConsistentSnapshot(dependencies, recordId, principalId),
+    ...(dependencies.memorySync ? { memorySync: dependencies.memorySync } : {}),
+    scheduleSceneCrystallization,
+  });
+  // Phase 2F-B：回合预取生命周期由独立 coordinator 承载；facade 只组装窄
+  // 依赖（hub 仍是 LocalRecordServiceDependencies.memoryPrefetch 既有类型）。
+  const memoryPrefetchCoordinator = createLocalMemoryPrefetchCoordinator({
+    ...(dependencies.memoryPrefetch
+      ? { memoryPrefetch: dependencies.memoryPrefetch }
+      : {}),
+  });
 
   async function scheduleInterjection(input: {
     recordId: string;
@@ -1048,16 +607,11 @@ export function createLocalRecordService(
       if (decision.kind !== "interject") return;
       // 批次 T2 prefetch：插话回合的 react 同样消费召回——回合开始即并行
       // 发起，与租约获取/快照加载/模型调用重叠。
-      const interjectionPrefetch = dependencies.memoryPrefetch
-        ? dependencies.memoryPrefetch.begin({
-            recordId: input.recordId,
-            workspaceId: input.runtimeScope.workspaceId,
-            worldId: input.runtimeScope.worldId,
-            worldlineId: input.runtimeScope.worldlineId,
-            playerText: input.playerText,
-            characters: input.runtimeScope.aiCharacters,
-          })
-        : null;
+      const interjectionPrefetch = memoryPrefetchCoordinator.beginTurn({
+        recordId: input.recordId,
+        runtimeScope: input.runtimeScope,
+        playerText: input.playerText,
+      });
       try {
         const lease = await turnControl.acquire(
           input.recordId,
@@ -1115,9 +669,7 @@ export function createLocalRecordService(
           lease.release();
         }
       } finally {
-        if (interjectionPrefetch) {
-          dependencies.memoryPrefetch?.end(interjectionPrefetch);
-        }
+        memoryPrefetchCoordinator.endTurn(interjectionPrefetch);
       }
     } catch (error) {
       // 自动插话永远不得影响玩家回合；失败只留本机日志。
@@ -1389,17 +941,6 @@ export function createLocalRecordService(
       .digest("hex")
       .slice(0, 18);
     return `claim_growth_${digest}`;
-  }
-
-  /**
-   * 自演拍 growth 的来源事件：只从真实已提交事件中选——优先旁白，
-   * 其次最后一个事件，空则 null（无旁白的自演拍不产生悬空来源）。
-   */
-  function selfPlaySourceEventId(run: LocalTurnRun): string | null {
-    const eventIds = run.release?.eventIds ?? [];
-    return eventIds.find((id) => id.endsWith(":narration"))
-      ?? eventIds.at(-1)
-      ?? null;
   }
 
   /**
@@ -1818,168 +1359,6 @@ export function createLocalRecordService(
     }
   }
 
-  /**
-   * 批次 T7：自演会话拍循环（fire-and-forget）。每拍是一次完整 executeTurn
-   * 自治回合（payload.selfPlay），拍边界重读会话行判定 stopping/预算；
-   * 版本冲突重读快照重试一次（T3 模式）；任何失败落 failed 只留日志，
-   * 绝不阻塞页面与玩家回合（规范失败矩阵 F2–F9）。
-   */
-  async function runSelfPlaySession(input: {
-    sessionId: string;
-    recordId: string;
-    runtimeScope: RecordRuntimeScope;
-    principalId?: string;
-  }): Promise<void> {
-    const store = dependencies.selfPlayStore;
-    if (!store) return;
-    try {
-      for (;;) {
-        const session = await store.load(input.sessionId);
-        if (!session || isSelfPlayTerminal(session.state)) return;
-        if (session.state === "stopping") {
-          await store.finish(input.sessionId, "cancelled");
-          return;
-        }
-        if (!selfPlaySessionNeedsBeats(session)) {
-          await store.finish(input.sessionId, "completed");
-          return;
-        }
-        const beat = session.beatsCompleted + 1;
-        // 与玩家回合/插话/在场互斥：同一 Record 只有一个写者（FIFO 租约）。
-        const lease = await turnControl.acquire(
-          input.recordId,
-          `self-play:${input.sessionId}`,
-        );
-        try {
-          const before = await loadConsistentSnapshot(
-            dependencies,
-            input.recordId,
-            input.principalId,
-          );
-          const instruction = selfPlayInstruction(
-            input.runtimeScope.brief.language
-              ?? before.projection.world.language
-              ?? "zh-CN",
-          );
-          const buildSelfPlayCommand = (
-            expectedRecordVersion: number,
-            idempotencyKey: string,
-          ): RuntimeCommand<PlayerUtterancePayload> => ({
-            commandType: "player.utterance",
-            recordId: input.recordId,
-            expectedRecordVersion,
-            idempotencyKey,
-            actorId: input.runtimeScope.playerActor.participantId,
-            payload: {
-              text: instruction,
-              visibility: { kind: "public" as const },
-              runtimeScope: input.runtimeScope,
-              selfPlay: { beat, instruction },
-            },
-          });
-          let activeKey = `selfplay-${input.sessionId}-${beat}`;
-          const selfPlayController = new AbortController();
-          turnSignals.set(activeKey, { recordId: input.recordId, controller: selfPlayController });
-          // Batch 2D：独立 controller 的 signal 贯通 self-play 模型链。
-          const selfPlayDependencies = { ...runtimeDependencies, signal: selfPlayController.signal };
-          let run: LocalTurnRun;
-          try {
-            run = await executeTurn(
-              buildSelfPlayCommand(before.canonicalVersion, activeKey),
-              selfPlayDependencies,
-            );
-            if (run.state === "retryable") {
-              run = await retryTurn(run.turnId, selfPlayDependencies);
-            }
-            // T3 模式：生成期间异步写者（场景晶化/初夜补录/玩家回合）推进
-            // 版本 → 重读最新快照重试一次；再撞则本拍失败（F5）。
-            if (
-              run.state !== "completed"
-              && run.currentFailure?.code === "RECORD_VERSION_CONFLICT"
-            ) {
-              console.warn(
-                `[realm] self-play turn ${run.turnId} hit version conflict; retrying on fresh snapshot`,
-              );
-              turnSignals.delete(activeKey);
-              const refreshed = await loadConsistentSnapshot(
-                dependencies,
-                input.recordId,
-                input.principalId,
-              );
-              activeKey = `selfplay-${input.sessionId}-${beat}-retry`;
-              const retryController = new AbortController();
-              turnSignals.set(activeKey, { recordId: input.recordId, controller: retryController });
-              const retryDependencies = { ...runtimeDependencies, signal: retryController.signal };
-              run = await executeTurn(
-                buildSelfPlayCommand(refreshed.canonicalVersion, activeKey),
-                retryDependencies,
-              );
-              if (run.state === "retryable") {
-                run = await retryTurn(run.turnId, retryDependencies);
-              }
-            }
-          } finally {
-            turnSignals.delete(activeKey);
-          }
-          if (run.state !== "completed") {
-            const code = run.currentFailure?.code ?? "TURN_FAILED";
-            console.warn(
-              `[realm] self-play beat ${beat} of session ${input.sessionId} did not complete: ${code}`,
-            );
-            await store.finish(input.sessionId, "failed", code);
-            return;
-          }
-          // 拍落账（仅 running 行可被 +1；中途 stop 的行留待拍边界收束）。
-          await store.completeBeat(input.sessionId);
-          // 与玩家回合后同型：sync_turn 萃取 + 场景晶化（均 fire-and-forget）。
-          dependencies.memorySync?.schedule({
-            workspaceId: input.runtimeScope.workspaceId,
-            worldId: input.runtimeScope.worldId,
-            worldlineId: input.runtimeScope.worldlineId,
-            recordId: input.recordId,
-          });
-          void scheduleSceneCrystallization({
-            recordId: input.recordId,
-            playerText: instruction,
-            runtimeScope: input.runtimeScope,
-            principalId: input.principalId,
-            // 自演拍是公开自治回合（无玩家私密输入），允许公共 growth。
-            visibility: { kind: "public" },
-            sourceEventId: selfPlaySourceEventId(run) ?? undefined,
-          });
-        } finally {
-          lease.release();
-        }
-      }
-    } catch (error) {
-      // 调度器任何未捕获异常：日志收场，会话尽力落 failed（F9）。
-      console.warn(
-        `[realm] self-play session ${input.sessionId} aborted: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      try {
-        await store.finish(input.sessionId, "failed", "SELFPLAY_ABORTED");
-      } catch {
-        // 账本不可写时不再扩散失败。
-      }
-    } finally {
-      selfPlayInFlight.delete(input.recordId);
-    }
-  }
-
-  /** 批次 T7：自演调度入口——单飞守卫去重，重复触发不重入。 */
-  function scheduleSelfPlay(input: {
-    sessionId: string;
-    recordId: string;
-    runtimeScope: RecordRuntimeScope;
-    principalId?: string;
-  }): void {
-    if (selfPlayInFlight.has(input.recordId)) return;
-    selfPlayInFlight.add(input.recordId);
-    void runSelfPlaySession(input);
-  }
-
   return {
     async loadRecord(recordId = LOCAL_RECORD_SCOPE.recordId, principalId) {
       const envelope = await loadConsistentEnvelope(
@@ -2151,17 +1530,12 @@ export function createLocalRecordService(
       );
       // 批次 T2 prefetch：回合开始并行发起各在场角色召回，与可见性裁决/DM
       // 规划等模型调用重叠；replay 回合没有模型调用，不预取。
-      const prefetchHandle =
-        !authorization.replay && dependencies.memoryPrefetch
-          ? dependencies.memoryPrefetch.begin({
-              recordId: input.recordId,
-              workspaceId: runtimeScope.workspaceId,
-              worldId: runtimeScope.worldId,
-              worldlineId: runtimeScope.worldlineId,
-              playerText: input.content,
-              characters: runtimeScope.aiCharacters,
-            })
-          : null;
+      const prefetchHandle = memoryPrefetchCoordinator.beginTurn({
+        recordId: input.recordId,
+        runtimeScope,
+        playerText: input.content,
+        replay: authorization.replay,
+      });
       // Batch 2D：Turn controller 在任何模型调用（prefetch/可见性裁决）之前
       // 注册，使 cancelMessage 能命中整条主链路；所有出口统一 finally 清理。
       const turnController = new AbortController();
@@ -2275,18 +1649,11 @@ export function createLocalRecordService(
         );
         // 批次 T3：在 prefetch 会话结束前同步 consume 各候选角色的预取记忆
         // （fail-closed，不等待、不抛错），带入在场载荷；prefetch 生命周期不变。
-        const prefetchedMemories = new Map<string, string>();
-        if (prefetchHandle && dependencies.memoryPrefetch) {
-          for (const character of runtimeScope.aiCharacters) {
-            prefetchedMemories.set(
-              character.characterInstanceId,
-              dependencies.memoryPrefetch.consume(
-                input.recordId,
-                character.characterInstanceId,
-              ),
-            );
-          }
-        }
+        const prefetchedMemories = memoryPrefetchCoordinator.consumeTurn({
+          recordId: input.recordId,
+          handle: prefetchHandle,
+          characters: runtimeScope.aiCharacters,
+        });
         if (!authorization.replay && visibility.plan.kind === "public") {
           // M4/T3：插话优先——显式点名高于自主反应。插话评估是纯同步四道门，
           // 此处先裁决再分流，保证同一回合后自治发声至多一次（预算语义）。
@@ -2360,7 +1727,7 @@ export function createLocalRecordService(
         };
       } finally {
         // 回合退出（提交成功/失败/异常）一律清理预取会话。
-        if (prefetchHandle) dependencies.memoryPrefetch?.end(prefetchHandle);
+        memoryPrefetchCoordinator.endTurn(prefetchHandle);
         // Batch 2D：早注册的 Turn controller 统一清理（幂等；presence/插话
         // 的独立 key 不受本回合影响）。
         if (turnSignals.get(input.idempotencyKey)?.controller === turnController) {
@@ -2398,7 +1765,7 @@ export function createLocalRecordService(
         requestedBy: principalId ?? LOCAL_RECORD_SCOPE.principalId,
       });
       if (created && session.state === "running") {
-        scheduleSelfPlay({
+        selfPlayCoordinator.scheduleSelfPlay({
           sessionId: session.id,
           recordId,
           runtimeScope,
@@ -2440,540 +1807,6 @@ export function createLocalRecordService(
       if (!projection) throw notInitialized();
       return projection.events.filter((event) => event.ordinal > afterOrdinal);
     },
-  };
-}
-
-type LocalTurnRun = TurnRun<
-  PlayerUtterancePayload,
-  M2TurnPlan,
-  M2TurnCandidate,
-  M2TurnValidation
->;
-
-async function resolveRuntimeScope(
-  dependencies: LocalRecordServiceDependencies,
-  recordId: string,
-  principalId?: string,
-): Promise<RecordRuntimeScope> {
-  if (!dependencies.runtimeScopeProvider) {
-    if (recordId !== LOCAL_RECORD_SCOPE.recordId) {
-      throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
-    }
-    return demoRecordRuntimeScope();
-  }
-  const scope = await dependencies.runtimeScopeProvider.resolve({
-    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
-    principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
-    recordId,
-  });
-  if (!scope) {
-    throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
-  }
-  return scope;
-}
-
-async function resolveTurnVisibility(input: {
-  input: SubmitLocalMessageInput;
-  scope: WriteScope;
-  runtimeScope: RecordRuntimeScope;
-  canonicalVersion: number;
-  assessor?: LocalVisibilityAssessor;
-  assessorFactory?: (scope: RecordRuntimeScope) => LocalVisibilityAssessor;
-  proposals: VisibilityProposalRegistry;
-  /** Batch 2D：本 Turn 的取消信号（可选；取消即停可见性模型调用）。 */
-  signal?: AbortSignal;
-}): Promise<{
-  plan: TurnVisibilityPlan;
-  proposalId: string | null;
-}> {
-  if (input.input.visibilityConfirmation) {
-    const confirmation = input.input.visibilityConfirmation;
-    const proposal = input.proposals.authorize({
-      proposalId: confirmation.proposalId,
-      scope: input.scope,
-      canonicalVersion: input.canonicalVersion,
-      content: input.input.content,
-      idempotencyKey: input.input.idempotencyKey,
-    });
-    return {
-      plan: confirmation.decision === "restricted"
-        ? proposal.assessment
-        : { kind: "public" },
-      proposalId: confirmation.proposalId,
-    };
-  }
-  const assessor = input.assessorFactory
-    ? input.assessorFactory(input.runtimeScope)
-    : input.assessor;
-  if (!assessor) {
-    return { plan: { kind: "public" }, proposalId: null };
-  }
-
-  let assessment: TurnVisibilityAssessment;
-  try {
-    assessment = await assessor.assess({
-      playerText: input.input.content,
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
-  } catch (error) {
-    const diagnostic = diagnosticFromError(error, "visibility");
-    throw new LocalRecordServiceError(
-      "TURN_FAILED",
-      formatTurnFailureMessage(diagnostic),
-      undefined,
-      undefined,
-      diagnostic,
-    );
-  }
-  if (assessment.visibility.kind === "public") {
-    return { plan: assessment.visibility, proposalId: null };
-  }
-  const proposal = input.proposals.issue({
-    scope: input.scope,
-    canonicalVersion: input.canonicalVersion,
-    content: input.input.content,
-    assessment,
-    audienceNames: runtimeActorNames(
-      input.runtimeScope,
-      assessment.visibility.audienceCharacterInstanceIds,
-    ),
-  });
-  throw new LocalRecordServiceError(
-    "VISIBILITY_CONFIRMATION_REQUIRED",
-    "DM 判断这条内容可能只适合部分角色知道；请确认可见范围后再提交。",
-    undefined,
-    proposal,
-  );
-}
-
-function createLocalTurnDependencies(
-  repository: LocalRuntimeRepository,
-  clock: () => Date,
-  idFactory?: () => string,
-  orchestration?: M2TurnOrchestrator | ((scope: RecordRuntimeScope) => M2TurnOrchestrator),
-  turnSignals?: ReadonlyMap<string, ActiveTurnSignal>,
-  actionCatalog?: ActionAffordanceCatalog,
-): TurnRuntimeDependencies<
-  PlayerUtterancePayload,
-  M2TurnPlan,
-  M2TurnCandidate,
-  M2TurnValidation,
-  FormalEventPayload,
-  OutboxPayload
-> {
-  function orchestratorFor(scope: RecordRuntimeScope): M2TurnOrchestrator {
-    if (typeof orchestration === "function") return orchestration(scope);
-    return orchestration ?? createLocalM2TurnOrchestrator({
-      characters: scope.aiCharacters,
-    });
-  }
-  function assertNotCancelled(idempotencyKey: string) {
-    // M4：打断在阶段边界生效；被取消的 Turn 不得提交任何正式事件。
-    if (turnSignals?.get(idempotencyKey)?.controller.signal.aborted) {
-      throw new FatalTurnError(
-        "TURN_CANCELLED",
-        "The Turn was interrupted by the player.",
-      );
-    }
-  }
-  return {
-    repository,
-    planner: {
-      async plan(context) {
-        assertNotCancelled(context.command.idempotencyKey);
-        const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const presence = context.command.payload.presence;
-        if (presence) {
-          // 在场回合使用固定计划：不调用模型规划，无 Narrator、无行动预算。
-          const character = scope.aiCharacters.find(
-            (actor) => actor.characterInstanceId === presence.characterInstanceId,
-          );
-          if (!character) {
-            throw new FatalTurnError(
-              "PRESENCE_CHARACTER_UNKNOWN",
-              "The presence character is not part of this Record.",
-            );
-          }
-          return {
-            goal: `让 ${character.displayName} 对刚发生的变化自发作出一个简短反应。`,
-            constraints: ["在场反应不得开启 Narrator，不得包含行动事务。"],
-            activatedCharacters: [character],
-            narratorEnabled: false,
-            actionBudgetPerCharacter: 0,
-            visibility: context.command.payload.visibility,
-            presence: {
-              characterInstanceId: presence.characterInstanceId,
-              triggerKind: presence.triggerKind,
-              triggerText: presence.triggerText,
-              memories: presence.memories,
-              relationships: presence.relationships,
-            },
-          };
-        }
-        const interjection = context.command.payload.interjection;
-        if (interjection) {
-          // 插话回合使用固定计划：不调用模型规划，无 Narrator、无行动预算。
-          const character = scope.aiCharacters.find(
-            (actor) => actor.characterInstanceId === interjection.characterInstanceId,
-          );
-          if (!character) {
-            throw new FatalTurnError(
-              "INTERJECTION_CHARACTER_UNKNOWN",
-              "The interjecting character is not part of this Record.",
-            );
-          }
-          return {
-            goal: `让 ${character.displayName} 对触发内容作出简短插话回应。`,
-            constraints: ["插话不得开启 Narrator，不得包含行动事务。"],
-            activatedCharacters: [character],
-            narratorEnabled: false,
-            actionBudgetPerCharacter: 0,
-            visibility: context.command.payload.visibility,
-          };
-        }
-        const orchestrator = orchestratorFor(scope);
-        const selfPlay = context.command.payload.selfPlay;
-        if (selfPlay) {
-          // 批次 T7 自演拍：真实 DM 模型规划（无玩家输入，instruction 作上下文），
-          // 随后确定性规整——Narrator 恒开、行动预算恒 1、空激活兜底前 1 名，
-          // 保证每拍有内容；规整只收紧不放纵（DM 越界输出仍已在 plan 内被拒）。
-          const planned = await orchestrator.plan({
-            turnId: context.turnId,
-            playerText: selfPlay.instruction,
-            visibility: context.command.payload.visibility,
-          });
-          return {
-            ...planned,
-            narratorEnabled: true,
-            actionBudgetPerCharacter: 1,
-            activatedCharacters: planned.activatedCharacters.length > 0
-              ? planned.activatedCharacters
-              : scope.aiCharacters.slice(0, 1),
-          };
-        }
-        return orchestrator.plan({
-          turnId: context.turnId,
-          playerText: context.command.payload.text,
-          visibility: context.command.payload.visibility,
-          ...(context.command.payload.actionSelection
-            ? {
-                playerAction: await resolvePlayerAction(
-                  actionCatalog!,
-                  scope,
-                  context.turnId,
-                  context.command.payload.text,
-                  context.command.payload.actionSelection,
-                ),
-              }
-            : {}),
-        });
-      },
-    },
-    drafter: {
-      async draft(context) {
-        assertNotCancelled(context.command.idempotencyKey);
-        const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const orchestrator = orchestratorFor(scope);
-        return orchestrator.draft({
-          turnId: context.turnId,
-          playerText: context.command.payload.interjection
-            ? context.command.payload.interjection.triggerText
-            : context.command.payload.text,
-          plan: context.plan.body,
-        });
-      },
-    },
-    validator: {
-      async validate(context) {
-        assertNotCancelled(context.command.idempotencyKey);
-        if (context.command.payload.interjection || context.command.payload.presence) {
-          // 插话/在场只做结构校验：恰好一条目标角色回应、无行动事务；不走模型复核。
-          return createRuleBasedDMController().validate({
-            plan: context.plan.body,
-            candidate: context.candidate.body,
-          });
-        }
-        const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const orchestrator = orchestratorFor(scope);
-        return orchestrator.validate({
-          plan: context.plan.body,
-          candidate: context.candidate.body,
-          playerText: context.command.payload.text,
-        });
-      },
-    },
-    releaseBuilder: {
-      async build(context) {
-        assertNotCancelled(context.command.idempotencyKey);
-        const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const presence = context.command.payload.presence;
-        if (presence) {
-          // 在场回合只发布角色自主发声：不产生玩家事件、旁白或行动事务；
-          // payload 附 presence 标记（既有事件形态，不是新事件类型）。
-          return {
-            formalEvents: context.candidate.body.characterResponses.map(
-              (response, index) => ({
-                eventId: `${context.turnId}:presence:${index + 1}`,
-                kind: "utterance.committed",
-                payload: {
-                  schemaVersion: 1 as const,
-                  role: "character" as const,
-                  speaker: response.speaker,
-                  participantId: response.participantId,
-                  content: response.content,
-                  segments: response.segments,
-                  // 对话主体标记：仅在有明确对象时落字段（缺省读作 null）。
-                  ...(response.recipientId
-                    ? { recipientId: response.recipientId }
-                    : {}),
-                  presence: {
-                    characterInstanceId: presence.characterInstanceId,
-                    triggerKind: presence.triggerKind,
-                  },
-                },
-              }),
-            ),
-            outbox: [
-              {
-                messageId: `${context.turnId}:delivery`,
-                topic: "record.events.committed",
-                dedupeKey: `${context.turnId}:delivery:v1`,
-                payload: {
-                  recordId: context.command.recordId,
-                  eventIds: context.candidate.body.characterResponses.map(
-                    (_response, index) => `${context.turnId}:presence:${index + 1}`,
-                  ),
-                },
-              },
-            ],
-          };
-        }
-        if (context.command.payload.interjection) {
-          // 插话回合只发布角色回应：不产生玩家事件、旁白或行动事务。
-          return {
-            formalEvents: context.candidate.body.characterResponses.map(
-              (response, index) => ({
-                eventId: `${context.turnId}:interjection:${index + 1}`,
-                kind: "utterance.committed",
-                payload: {
-                  schemaVersion: 1 as const,
-                  role: "character" as const,
-                  speaker: response.speaker,
-                  participantId: response.participantId,
-                  content: response.content,
-                  segments: response.segments,
-                  ...(response.recipientId
-                    ? { recipientId: response.recipientId }
-                    : {}),
-                },
-              }),
-            ),
-            outbox: [
-              {
-                messageId: `${context.turnId}:delivery`,
-                topic: "record.events.committed",
-                dedupeKey: `${context.turnId}:delivery:v1`,
-                payload: {
-                  recordId: context.command.recordId,
-                  eventIds: context.candidate.body.characterResponses.map(
-                    (_response, index) => `${context.turnId}:interjection:${index + 1}`,
-                  ),
-                },
-              },
-            ],
-          };
-        }
-        const selfPlay = context.command.payload.selfPlay;
-        if (selfPlay) {
-          // 批次 T7 自演拍：不产出玩家事件；行动事务（含 T5 骰点物化）+
-          // 旁白 + 角色事件照常发布，旁白与角色事件载荷附 selfPlay 标记
-          // （既有事件形态，不是新事件类型，T3 presence 先例）。
-          const selfPlayNarrationEventId = `${context.turnId}:narration`;
-          return {
-            formalEvents: [
-              ...context.candidate.body.actionTransactions.map(
-                (transaction, index) => ({
-                  eventId: toolEventId(context.turnId, index),
-                  kind: "action.transaction.committed",
-                  payload: {
-                    schemaVersion: 1 as const,
-                    role: "system" as const,
-                    speaker: "行动裁决",
-                    participantId: null,
-                    content: transaction.receipt.summary,
-                    segments: [
-                      {
-                        id: "fact-1",
-                        kind: "fact" as const,
-                        content: transaction.receipt.summary,
-                        speechMode: "none" as const,
-                      },
-                    ],
-                    actionTransaction: transaction,
-                  },
-                }),
-              ),
-              ...(context.candidate.body.narration
-                ? [{
-                    eventId: selfPlayNarrationEventId,
-                    kind: "narration.committed",
-                    payload: {
-                      schemaVersion: 1 as const,
-                      role: "narrator" as const,
-                      speaker: context.candidate.body.narration.speaker,
-                      participantId: null,
-                      content: context.candidate.body.narration.content,
-                      segments: context.candidate.body.narration.segments,
-                      ...(context.candidate.body.narration.suggestions?.length
-                        ? { suggestions: context.candidate.body.narration.suggestions }
-                        : {}),
-                      selfPlay: { beat: selfPlay.beat },
-                    },
-                  }]
-                : []),
-              ...context.candidate.body.characterResponses.map(
-                (response, index) => ({
-                  eventId: `${context.turnId}:character:${index + 1}`,
-                  kind: "utterance.committed",
-                  payload: {
-                    schemaVersion: 1 as const,
-                    role: "character" as const,
-                    speaker: response.speaker,
-                    participantId: response.participantId,
-                    content: response.content,
-                    segments: response.segments,
-                    ...(response.recipientId
-                      ? { recipientId: response.recipientId }
-                      : {}),
-                    selfPlay: { beat: selfPlay.beat },
-                  },
-                }),
-              ),
-            ],
-            outbox: [
-              {
-                messageId: `${context.turnId}:delivery`,
-                topic: "record.events.committed",
-                dedupeKey: `${context.turnId}:delivery:v1`,
-                payload: {
-                  recordId: context.command.recordId,
-                  eventIds: [
-                    ...context.candidate.body.actionTransactions.map(
-                      (_transaction, index) => toolEventId(context.turnId, index),
-                    ),
-                    ...(context.candidate.body.narration
-                      ? [selfPlayNarrationEventId]
-                      : []),
-                    ...context.candidate.body.characterResponses.map(
-                      (_response, index) => `${context.turnId}:character:${index + 1}`,
-                    ),
-                  ],
-                },
-              },
-            ],
-          };
-        }
-        const playerEventId = `${context.turnId}:player`;
-        const narrationEventId = `${context.turnId}:narration`;
-        const playerSegments = fallbackCompositeSemanticSegments(
-          context.command.payload.text,
-          "action",
-        );
-        return {
-          formalEvents: [
-            {
-              eventId: playerEventId,
-              kind: "utterance.committed",
-              payload: {
-                schemaVersion: 1,
-                role: "player",
-                speaker: scope.playerActor.displayName,
-                participantId: scope.playerActor.participantId,
-                content: context.command.payload.text,
-                segments: playerSegments,
-                ...(context.command.payload.profileUpdate
-                  ? { profileUpdate: context.command.payload.profileUpdate }
-                  : {}),
-              },
-            },
-            ...context.candidate.body.actionTransactions.map((transaction, index) => ({
-              eventId: toolEventId(context.turnId, index),
-              kind: "action.transaction.committed",
-              payload: {
-                schemaVersion: 1 as const,
-                role: "system" as const,
-                speaker: "行动裁决",
-                participantId: null,
-                content: transaction.receipt.summary,
-                segments: [
-                  {
-                    id: "fact-1",
-                    kind: "fact" as const,
-                    content: transaction.receipt.summary,
-                    speechMode: "none" as const,
-                  },
-                ],
-                actionTransaction: transaction,
-              },
-            })),
-            ...(context.candidate.body.narration
-              ? [{
-                  eventId: narrationEventId,
-                  kind: "narration.committed",
-                  payload: {
-                    schemaVersion: 1 as const,
-                    role: "narrator" as const,
-                    speaker: context.candidate.body.narration.speaker,
-                    participantId: null,
-                    content: context.candidate.body.narration.content,
-                    segments: context.candidate.body.narration.segments,
-                    ...(context.candidate.body.narration.suggestions?.length
-                      ? { suggestions: context.candidate.body.narration.suggestions }
-                      : {}),
-                  },
-                }]
-              : []),
-            ...context.candidate.body.characterResponses.map((response, index) => ({
-              eventId: `${context.turnId}:character:${index + 1}`,
-              kind: "utterance.committed",
-              payload: {
-                schemaVersion: 1 as const,
-                role: "character" as const,
-                speaker: response.speaker,
-                participantId: response.participantId,
-                content: response.content,
-                segments: response.segments,
-                ...(response.recipientId
-                  ? { recipientId: response.recipientId }
-                  : {}),
-              },
-            })),
-          ],
-          outbox: [
-            {
-              messageId: `${context.turnId}:delivery`,
-              topic: "record.events.committed",
-              dedupeKey: `${context.turnId}:delivery:v1`,
-              payload: {
-                recordId: context.command.recordId,
-                eventIds: [
-                  playerEventId,
-                  ...context.candidate.body.actionTransactions.map(
-                    (_transaction, index) => toolEventId(context.turnId, index),
-                  ),
-                  ...(context.candidate.body.narration ? [narrationEventId] : []),
-                  ...context.candidate.body.characterResponses.map(
-                    (_response, index) => `${context.turnId}:character:${index + 1}`,
-                  ),
-                ],
-              },
-            },
-          ],
-        };
-      },
-    },
-    clock: () => clock().toISOString(),
-    idFactory,
   };
 }
 
@@ -3090,203 +1923,6 @@ function dynamicVisibilityPolicyId(turnId: string): string {
   return `visibility_secret_${normalized.slice(-96) || "turn"}`;
 }
 
-function toolEventId(turnId: string, index: number): string {
-  return `${turnId}:tool:${index + 1}`;
-}
-
-interface ConsistentSnapshot {
-  projection: RecordProjection;
-  viewer: LocalRecordEnvelope["viewer"];
-  suggestions: readonly string[];
-  canonicalVersion: number;
-}
-
-async function loadConsistentSnapshot(
-  dependencies: LocalRecordServiceDependencies,
-  recordId: string,
-  principalId?: string,
-): Promise<ConsistentSnapshot> {
-  for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt += 1) {
-    const before = await dependencies.repository.loadRecordHead(recordId);
-    if (!before) throw notInitialized();
-    const delivery = await dependencies.projection.loadDeliveryForPlayer({
-      ...LOCAL_RECORD_SCOPE,
-      recordId,
-      principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
-    });
-    if (!delivery) throw notInitialized();
-    const after = await dependencies.repository.loadRecordHead(recordId);
-    if (!after) throw notInitialized();
-    if (before.version === after.version) {
-      return {
-        projection: delivery.record,
-        viewer: delivery.viewer,
-        suggestions: delivery.suggestions ?? [],
-        canonicalVersion: after.version,
-      };
-    }
-  }
-  throw new LocalRecordServiceError(
-    "WRITE_CONFLICT",
-    "The Record changed while its delivery view was being prepared.",
-  );
-}
-
-async function loadConsistentEnvelope(
-  dependencies: LocalRecordServiceDependencies,
-  tokens: WriteTokenRegistry,
-  actionCatalog: ActionAffordanceCatalog,
-  recordId: string,
-  principalId?: string,
-  /**
-   * Clean-up Phase 2：调用方已在本回合解析过的 scope 可复用（affordances
-   * 只依赖 workspace/world/record/席位，不依赖游标），免去二次 resolve
-   * （含 canon 的第二个事务）。缺省仍现场解析（GET 路径语义不变）。
-   */
-  preResolvedScope?: RecordRuntimeScope,
-): Promise<LocalRecordEnvelope> {
-  // 批次 T12-B：先解析运行时作用域——归档/不存在 Record 在此 fail-closed
-  // 为 NOT_FOUND（404），而非投影空快照误导成「运行未初始化」（503）。
-  const scope = preResolvedScope
-    ?? await resolveRuntimeScope(dependencies, recordId, principalId);
-  // Batch 3C：scope 先行（归档/不存在 fail-closed 语义不变）之后，四项读取
-  // 互相无数据依赖，并行发起。提交后快照仍单独重读（writeToken 依赖新
-  // canonicalVersion），不新增任何 SQL/query；firstNight 懒调度与
-  // selfPlay failStale→findLatest、warn→null 语义均保持不变。
-  // 场景图（Stage 3）：latest ready 背景随信封透出；缺 store（内存测试）
-  // 或读取失败一律 fail-closed null，绝不影响信封主路径。
-  const sceneImageStore = dependencies.sceneImageStore;
-  const sceneImageQueue = dependencies.sceneImageQueue;
-  const [snapshot, affordances, firstNight, selfPlay, sceneImage, sceneImageJob] = await Promise.all([
-    loadConsistentSnapshot(dependencies, recordId, principalId),
-    listAuthorizedAffordances(actionCatalog, scope),
-    loadFirstNightState(dependencies, recordId),
-    loadSelfPlayState(dependencies, recordId),
-    sceneImageStore
-      ? sceneImageStore
-        .findLatestReady({ workspaceId: scope.workspaceId, recordId })
-        .then((generation) =>
-          generation?.fileId
-            ? {
-              fileId: generation.fileId,
-              fileUrl: `/api/files/${generation.fileId}`,
-              status: "ready" as const,
-            }
-            : null
-        )
-        .catch(() => null)
-      : Promise.resolve(null),
-    sceneImageQueue
-      ? sceneImageQueue
-        .findLatestForRecord({ workspaceId: scope.workspaceId, recordId })
-        .then((request) =>
-          request
-            ? {
-              status: request.status === "leased"
-                ? "running" as const
-                : request.status === "completed"
-                  ? "ready" as const
-                  : request.status,
-              triggerKind: request.triggerKind,
-            }
-            : null
-        )
-        .catch(() => null)
-      : Promise.resolve(null),
-  ]);
-  return {
-    record: snapshot.projection,
-    writeToken: tokens.issue(
-      writeScope(recordId, snapshot.viewer.characterInstanceId, principalId),
-      snapshot.canonicalVersion,
-    ),
-    viewer: snapshot.viewer,
-    affordances,
-    suggestions: snapshot.suggestions,
-    firstNight,
-    selfPlay,
-    sceneImage,
-    sceneImageJob,
-  };
-}
-
-/**
- * 批次 T7：自演会话状态读取（fail-closed，读失败只告警不影响读取路径）。
- * 先懒恢复（活动行心跳超时落 failed，SELFPLAY_STALE），再读最新会话。
- */
-async function loadSelfPlayState(
-  dependencies: LocalRecordServiceDependencies,
-  recordId: string,
-): Promise<
-  | {
-      state: "running" | "stopping" | "completed" | "failed" | "cancelled";
-      beatBudget: number;
-      beatsCompleted: number;
-      lastError: string | null;
-    }
-  | null
-> {
-  const store = dependencies.selfPlayStore;
-  if (!store) return null;
-  try {
-    await store.failStale(
-      recordId,
-      new Date(Date.now() - SELF_PLAY_STALE_MS),
-    );
-    const session = await store.findLatest(recordId);
-    if (!session) return null;
-    return {
-      state: session.state,
-      beatBudget: session.beatBudget,
-      beatsCompleted: session.beatsCompleted,
-      lastError: session.lastError,
-    };
-  } catch (error) {
-    console.warn(
-      `[realm] self-play session read failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return null;
-  }
-}
-
-/**
- * 批次 T1：初夜状态行读取（fail-closed，读失败只告警不影响读取路径）。
- * pending 且未在途 → 触发一次懒重试调度（进程重启等场景的自愈）。
- */
-async function loadFirstNightState(
-  dependencies: LocalRecordServiceDependencies,
-  recordId: string,
-): Promise<
-  | { state: "pending" | "ready" | "degraded"; hookContent: string; openingSuggestions: string[] }
-  | null
-> {
-  const hook = dependencies.firstNight;
-  if (!hook) return null;
-  try {
-    const marker = await hook.load(recordId);
-    if (!marker) return null;
-    if (marker.state === "pending" && hook.schedule) {
-      hook.schedule(recordId);
-    }
-    return {
-      state: marker.state,
-      hookContent: marker.hookContent,
-      openingSuggestions: marker.suggestions
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0),
-    };
-  } catch (error) {
-    console.warn(
-      `[realm] first night marker read failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return null;
-  }
-}
-
 /**
  * 批次 S：成功加载后把 (worldId, recordId) 写回账号记忆。
  * fail-closed——写失败只告警，绝不影响读取路径。
@@ -3315,149 +1951,6 @@ async function rememberLastOpened(
   }
 }
 
-function listAuthorizedAffordances(
-  catalog: ActionAffordanceCatalog,
-  scope: RecordRuntimeScope,
-): Promise<readonly ActionAffordance[]> {
-  // 批次 S：观察者席位没有角色实例，行动目录的非空校验不适用。
-  if (!scope.playerActor.characterInstanceId.trim()) {
-    return Promise.resolve([]);
-  }
-  return catalog.listAuthorized({
-    workspaceId: scope.workspaceId,
-    worldId: scope.worldId,
-    worldlineId: scope.worldlineId,
-    recordId: scope.recordId,
-    principalId: scope.principalId,
-    characterInstanceId: scope.playerActor.characterInstanceId,
-  });
-}
-
-/**
- * 批次 T4：选择解析目录化——提交授权与回合规划都以「当前能力目录
- * 实时投影」为准；静态名单已退役。查无该能力 → INVALID_ACTION_SELECTION。
- */
-async function resolvePlayerAction(
-  catalog: ActionAffordanceCatalog,
-  scope: RecordRuntimeScope,
-  turnId: string,
-  playerText: string,
-  selection: ActionSelection,
-): Promise<{ actor: RuntimeActor; call: ActorToolCall }> {
-  const affordances = await listAuthorizedAffordances(catalog, scope);
-  const affordance = affordances.find((item) => item.id === selection.affordanceId);
-  if (!affordance) {
-    throw new LocalRecordServiceError(
-      "INVALID_ACTION_SELECTION",
-      "The selected action is no longer available in this Scene.",
-    );
-  }
-  const callId = `${turnId}:${scope.playerActor.characterInstanceId}:${affordance.kind}:player`;
-  const parsed = parseAffordanceId(affordance);
-  let call: ActorToolCall;
-  if (affordance.kind === "skill") {
-    call = {
-      callId,
-      name: "use_skill",
-      arguments: {
-        skillId: parsed.key,
-        targetId: parsed.targetId,
-        intent: playerText,
-      },
-    };
-  } else if (affordance.kind === "asset") {
-    call = {
-      callId,
-      name: "use_asset",
-      arguments: {
-        assetId: parsed.key,
-        targetId: null,
-        intent: playerText,
-      },
-    };
-  } else if (affordance.kind === "stance") {
-    call = {
-      callId,
-      name: "take_stance",
-      arguments: {
-        stanceId: parsed.key,
-        intent: playerText,
-      },
-    };
-  } else {
-    call = {
-      callId,
-      name: "act",
-      arguments: {
-        intent: playerText,
-        targetId: "scene_surroundings",
-        approach: "cautious",
-      },
-    };
-  }
-  return { actor: scope.playerActor, call };
-}
-
-/**
- * 能力 id 反解：skill.<skill_key>[.<defaultTargetId>] / asset.<asset_key> /
- * stance.<effect_key> / scene.<scene_action>。
- */
-function parseAffordanceId(affordance: ActionAffordance): {
-  key: string;
-  targetId: string | null;
-} {
-  const [prefix, ...rest] = affordance.id.split(".");
-  const remainder = rest.join(".");
-  if (affordance.kind === "skill") {
-    const [skillKey, ...targetParts] = remainder.split(".");
-    return {
-      key: skillKey ?? remainder,
-      targetId: targetParts.length > 0 ? targetParts.join(".") : null,
-    };
-  }
-  void prefix;
-  return { key: remainder, targetId: null };
-}
-
-function audienceNames(characterInstanceIds: readonly string[]): readonly string[] {
-  const actors = [LOCAL_PLAYER_ACTOR, ...LOCAL_AI_CHARACTERS] as const;
-  return characterInstanceIds.map((id) =>
-    actors.find((actor) => actor.characterInstanceId === id)?.displayName
-    ?? "未知角色"
-  );
-}
-
-function runtimeActorNames(
-  scope: RecordRuntimeScope,
-  characterInstanceIds: readonly string[],
-): readonly string[] {
-  const actors = [scope.playerActor, ...scope.aiCharacters];
-  return characterInstanceIds.map((id) =>
-    actors.find((actor) => actor.characterInstanceId === id)?.displayName
-    ?? "未知角色"
-  );
-}
-
-function writeScope(
-  recordId: string,
-  characterInstanceId: string | null,
-  principalId?: string,
-): WriteScope {
-  return {
-    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
-    recordId,
-    principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
-    characterInstanceId,
-  };
-}
-
-function sameWriteScope(left: WriteScope, right: WriteScope): boolean {
-  return left.workspaceId === right.workspaceId
-    && left.recordId === right.recordId
-    && left.principalId === right.principalId
-    && left.characterInstanceId === right.characterInstanceId;
-}
-
 function diagnosticFromRuntimeFailure(
   failure: NonNullable<LocalTurnRun["currentFailure"]>,
 ): LocalTurnFailureDiagnostic {
@@ -3468,64 +1961,6 @@ function diagnosticFromRuntimeFailure(
     disposition: failure.disposition,
     attempt: failure.attempt,
   };
-}
-
-function diagnosticFromError(
-  error: unknown,
-  stage: LocalTurnFailureDiagnostic["stage"],
-): LocalTurnFailureDiagnostic {
-  if (error instanceof LocalRecordServiceError && error.diagnostic) {
-    return error.diagnostic;
-  }
-  if (error instanceof RetryableTurnError) {
-    return {
-      stage,
-      code: error.code,
-      message: error.safeMessage,
-      disposition: "retryable",
-    };
-  }
-  if (error instanceof FatalTurnError) {
-    return {
-      stage,
-      code: error.code,
-      message: error.safeMessage,
-      disposition: "failed",
-    };
-  }
-  if (error instanceof RuntimeInvariantError) {
-    return {
-      stage,
-      code: error.code,
-      message: "运行时约束未满足；底层错误已脱敏。",
-      disposition: "failed",
-    };
-  }
-  return {
-    stage,
-    code: "TURN_STEP_FAILED",
-    message: "该阶段没有返回可安全展示的结构化结果。",
-    disposition: "failed",
-  };
-}
-
-function formatTurnFailureMessage(diagnostic: LocalTurnFailureDiagnostic): string {
-  const labels: Record<LocalTurnFailureDiagnostic["stage"], string> = {
-    visibility: "可见性判断",
-    planning: "回合规划",
-    drafting: "内容生成",
-    validating: "结构化验证",
-    releasing: "写入提交",
-  };
-  const attempt = diagnostic.attempt === undefined ? "" : `，第 ${diagnostic.attempt} 次尝试`;
-  return `本轮在「${labels[diagnostic.stage]}」阶段未完成${attempt}（${diagnostic.code}）：${diagnostic.message}`;
-}
-
-function notInitialized(): LocalRecordServiceError {
-  return new LocalRecordServiceError(
-    "LOCAL_RUNTIME_NOT_INITIALIZED",
-    "The local PostgreSQL demo has not been initialized.",
-  );
 }
 
 function translateRuntimeError(error: unknown): Error {
@@ -3635,6 +2070,13 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
     pool,
     workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
     mapFormalEvent: mapLocalFormalEvent,
+    normalizeCheckpoint: normalizeM2TurnCheckpoint,
+    // Goal runtime materialization：commitRelease 同一事务内对该 Record
+    // 仍 active 的 Goal 按每条正式事件 enqueue durable assessment job
+    // （0055 schema；无 Goal 零写入；hook 失败即整事务回滚）。
+    onFormalEventsCommitted: async (client, committed) => {
+      await enqueueGoalAssessmentJobsForCommittedEvents(client, committed);
+    },
     allocateWorldCursors({ previous, eventCount }) {
       return Array.from({ length: eventCount }, (_, index) => ({
         tick: previous.tick,

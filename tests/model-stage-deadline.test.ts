@@ -70,7 +70,7 @@ function trackedGateway(hooks: {
         }
         if (system.includes("DM Controller")) {
           return jsonResponse({
-            goal: "回应玩家的自然询问",
+            turnIntent: "回应玩家的自然询问",
             activatedCharacterInstanceIds: [SCOUT.characterInstanceId],
             narratorEnabled: true,
           });
@@ -79,7 +79,7 @@ function trackedGateway(hooks: {
           return jsonResponse({});
         }
         if (system.includes("DM output reviewer")) {
-          return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+          return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
         }
         throw new Error(`Unexpected chat call: ${system.slice(0, 60)}`);
       },

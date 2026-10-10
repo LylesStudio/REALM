@@ -48,14 +48,14 @@ function narratorQueueGateway(narratorBodies: readonly unknown[]) {
       const system = request.messages[0]?.content ?? "";
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的自然询问",
+          turnIntent: "回应玩家的自然询问",
           activatedCharacterInstanceIds: [SCOUT.characterInstanceId],
           narratorEnabled: true,
         });
       }
       if (request.tools) return jsonResponse({});
       if (system.includes("DM output reviewer")) {
-        return jsonResponse({ accepted: true, goalSatisfied: true, worldCompatible: true });
+        return jsonResponse({ accepted: true, turnIntentSatisfied: true, worldCompatible: true });
       }
       throw new Error(`Unexpected chat call: ${system.slice(0, 60)}`);
     },
@@ -141,7 +141,7 @@ test("model narrator: 一次违规经 repair 改正后正常放行", async () =>
 // ---- legacy authority helper（createLocalM2TurnOrchestrator validate 路径）----
 
 const LEGACY_PLAN: M2TurnPlan = {
-  goal: "Advance one coherent public scene.",
+  turnIntent: "Advance one coherent public scene.",
   constraints: [],
   activatedCharacters: [],
   narratorEnabled: true,

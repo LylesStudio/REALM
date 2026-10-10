@@ -57,6 +57,9 @@ const MIGRATIONS = [
   "0022_worldline_merge_grants.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0057_realmworld_record_binding.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

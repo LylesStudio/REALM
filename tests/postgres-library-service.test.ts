@@ -32,6 +32,7 @@ import {
   mapLocalFormalEvent,
 } from "../modules/application/local-record-service.ts";
 import { createMemorySyncScheduler } from "../modules/memory/pipeline.ts";
+import type { RealmWorldRuntimeInstantiationPlan } from "../modules/world-transfer/realmworld-runtime-content.ts";
 import {
   createLocalM2TurnOrchestrator,
   type M2TurnCandidate,
@@ -42,6 +43,15 @@ import {
 import type { SemanticSegment } from "../modules/presentation/semantic-segments.ts";
 import type { ActionTransaction } from "../modules/actions/public.ts";
 import { createCharacterMemoryService } from "../modules/memory/public.ts";
+import {
+  LOCAL_WORLD_VERSION,
+  RealmSaveError,
+  worldBindingFromWorldIdentity,
+} from "../modules/world-transfer/realm-save.ts";
+import {
+  goalAssessmentJobIdFor,
+  goalInstanceIdFor,
+} from "../modules/goals/public.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 
@@ -106,9 +116,43 @@ test(
       "0044_record_branch_timeline_kind.sql",
       // 0053：membership 写入走 capability 窄通道（自包含 pgcrypto）。
       "0053_membership_capability.sql",
+      // Phase 3/本批：Goal runtime（goal_instances + goal_assessment_jobs），
+      // RealmWorld instantiate 的 Goal 物化与 opening event enqueue 落库于此。
+      "0055_goal_runtime.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
+        "utf8",
+      );
+      await owner.query(sql);
+    }
+    // Phase 1A（0054）回填验证：先造一个 0054 之前的“旧世界”（表上还没有
+    // world_version 列），再应用 0054，验证存量行得到确定性哨兵版本。
+    await owner.query(
+      `INSERT INTO workspaces (id, name) VALUES ('ws_legacy', '回填验证工作区')`,
+    );
+    await owner.query(
+      `INSERT INTO worlds (workspace_id, id, name, calendar_id)
+       VALUES ('ws_legacy', 'world_legacy_pre_contract', '旧历世界', 'native_calendar')`,
+    );
+    {
+      const sql = await readFile(
+        new URL(
+          "../database/postgres/migrations/0054_world_version_identity.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      await owner.query(sql);
+    }
+    // Phase 4D（0057）：records.world_version 列 + 回填 + 切换台账；在 0054
+    // 回填验证之后应用（0057 依赖 worlds.world_version 存在）。
+    {
+      const sql = await readFile(
+        new URL(
+          "../database/postgres/migrations/0057_realmworld_record_binding.sql",
+          import.meta.url,
+        ),
         "utf8",
       );
       await owner.query(sql);
@@ -135,6 +179,31 @@ test(
     assert.equal(initial.worlds[0]?.stories[0]?.records.length, 1);
     // 世界文风：demo seed 显式 classical。
     assert.equal(initial.worlds[0]?.style, "classical");
+    // Phase 1B：Library read model 暴露世界身份——demo/local 世界携带
+    // 确定性哨兵版本，binding 映射为 base（绝不偷绑 worldId）。
+    assert.equal(initial.worlds[0]?.worldVersion, LOCAL_WORLD_VERSION);
+    assert.deepEqual(initial.worlds[0]?.binding, { kind: "base" });
+
+    // Phase 1A：world identity——0054 把 0054 之前的存量行回填为确定性
+    // 哨兵版本；demo seed 与新建世界经列 DEFAULT 获得同一哨兵，
+    // 调用方无需手工补版本字段。
+    const legacyVersion = await ownerPool.query<{ world_version: string }>(
+      `SELECT world_version FROM worlds
+       WHERE workspace_id = 'ws_legacy' AND id = 'world_legacy_pre_contract'`,
+    );
+    assert.equal(legacyVersion.rows[0]?.world_version, LOCAL_WORLD_VERSION);
+    const demoVersion = await ownerPool.query<{ world_version: string }>(
+      `SELECT world_version FROM worlds WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, POSTGRES_DEMO_IDS.world],
+    );
+    assert.equal(demoVersion.rows[0]?.world_version, LOCAL_WORLD_VERSION);
+    await assert.rejects(
+      ownerPool.query(
+        `UPDATE worlds SET world_version = '   '
+         WHERE workspace_id = 'ws_legacy' AND id = 'world_legacy_pre_contract'`,
+      ),
+      /worlds_world_version_check/,
+    );
 
     await service.create(scope, {
       kind: "world",
@@ -152,6 +221,56 @@ test(
     assert.equal(createdWorld?.stories[0]?.records[0]?.timelineKind, "primary");
     // 缺省无 style 键：读取为空串，前端/运行时按 modern 兜底。
     assert.equal(createdWorld?.style, "");
+    // Phase 1A：既有建世界路径（library create 命令）自动携带哨兵版本。
+    const createdVersion = await ownerPool.query<{ world_version: string }>(
+      `SELECT world_version FROM worlds WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, createdWorld.id],
+    );
+    assert.equal(createdVersion.rows[0]?.world_version, LOCAL_WORLD_VERSION);
+
+    // Phase 1B：非哨兵版本经同一 read model 读回 world-bound binding。
+    // （装载生命周期属后续阶段；此处直接 UPDATE 模拟已挂载 RealmWorld 身份，
+    // 验证 Library 读边界的映射，不改变任何写入语义。）
+    await ownerPool.query(
+      `UPDATE worlds SET world_version = '1.4.0'
+       WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, createdWorld.id],
+    );
+    const boundSnapshot = await service.list(scope);
+    const boundWorld = boundSnapshot.worlds.find(
+      (world) => world.id === createdWorld.id,
+    );
+    assert.equal(boundWorld?.worldVersion, "1.4.0");
+    assert.deepEqual(boundWorld?.binding, {
+      kind: "world",
+      worldId: createdWorld.id,
+      worldVersion: "1.4.0",
+    });
+
+    // Phase 1B fail-closed：0054 CHECK 只挡全空白版本，首尾空白身份可落库；
+    // 读取必须 fail-closed（RealmSaveError），绝不静默降级为 base。
+    await ownerPool.query(
+      `UPDATE worlds SET world_version = ' 1.4.0 '
+       WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, createdWorld.id],
+    );
+    await assert.rejects(
+      service.list(scope),
+      (error: unknown) =>
+        error instanceof RealmSaveError && error.code === "INVALID_SAVE",
+    );
+    // 映射层对缺失 worldId 同样 fail-closed（不得回退 base）。
+    assert.throws(
+      () => worldBindingFromWorldIdentity({ worldId: "", worldVersion: "1.4.0" }),
+      (error: unknown) =>
+        error instanceof RealmSaveError && error.code === "INVALID_SAVE",
+    );
+    // 恢复合法 world-bound 身份，证明后续读写路径不受 binding 输出影响。
+    await ownerPool.query(
+      `UPDATE worlds SET world_version = '1.4.0'
+       WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, createdWorld.id],
+    );
 
     // 批次 U：预设世界模板一键创建，直接返回可玩记录。
     const presetResult = await service.create(scope, {
@@ -703,6 +822,12 @@ test(
     assert.equal(genesisWorld.worldlines.length, 1);
     assert.equal(genesisWorld.stories[0]?.id, genesis.storyId);
     assert.equal(genesisWorld.stories[0]?.records[0]?.id, genesis.recordId);
+    // Phase 1A：genesis 路径同样自动携带哨兵版本。
+    const genesisVersion = await ownerPool.query<{ world_version: string }>(
+      `SELECT world_version FROM worlds WHERE workspace_id = $1 AND id = $2`,
+      [LOCAL_RECORD_SCOPE.workspaceId, genesis.worldId],
+    );
+    assert.equal(genesisVersion.rows[0]?.world_version, LOCAL_WORLD_VERSION);
     // 阵容定义含自动装配的人类玩家与草稿同伴，无任何演示世界角色。
     assert.deepEqual(
       genesisWorld.characters.map((character) => character.name).sort(),
@@ -732,6 +857,300 @@ test(
       genesisEnvelope.record.records.map((record) => record.title),
       ["靠岸"],
     );
+    // 无 Goal 的旧 genesis/base 路径无行为变化：不产生任何
+    // goal_instances / goal_assessment_jobs。
+    const legacyGoalRows = await ownerPool.query<{ instances: string }>(
+      `SELECT
+         (SELECT count(*) FROM goal_instances
+           WHERE workspace_id = $1 AND record_id = $2)::text AS instances`,
+      [scope.workspaceId, genesis.recordId],
+    );
+    assert.equal(legacyGoalRows.rows[0]?.instances, "0");
+    const legacyGoalJobs = await ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM goal_assessment_jobs
+       WHERE workspace_id = $1 AND record_id = $2`,
+      [scope.workspaceId, genesis.recordId],
+    );
+    assert.equal(legacyGoalJobs.rows[0]?.count, "0");
+
+    const realmWorldPlan: RealmWorldRuntimeInstantiationPlan = {
+      binding: { kind: "world", worldId: "world_harbor_engine", worldVersion: "1.2.0" },
+      world: {
+        name: "灰烬港",
+        era: "长风暴之后",
+        summary: "一座等待内容继续生长的公共引擎世界。",
+        settings: {
+          era: "长风暴之后",
+          language: "zh-CN",
+          style: "classical",
+          weather: "盐雨",
+          tension: "安静的压力",
+          displayTime: "夜哨",
+        },
+      },
+      story: { title: "港湾故事", premise: "潮线重新出现。" },
+      record: { title: "第一夜" },
+      scene: {
+        title: "北码头",
+        location: "北码头",
+        objective: "等待潮汐",
+        tension: "风暴逼近",
+        weather: "盐雨",
+        displayTime: "夜哨",
+      },
+      playerRole: "守潮人",
+      playerStance: "player",
+      characters: [{
+        characterKey: "scout",
+        displayName: "玛拉",
+        role: "斥候",
+        summary: "读懂潮痕。",
+        profile: { temperament: "careful" },
+      }],
+      // 本批（Goal runtime materialization）：声明式 Goal 沿 genesis 事务
+      // 物化为 Record-scoped goal_instances；定义/rubric 留在内容层。
+      goals: [
+        {
+          goalKey: "ack-tide",
+          policyVersion: "v1",
+          mode: "deterministic",
+          visible: true,
+          rubric: {
+            kind: "event_count",
+            eventKind: "narration.committed",
+            progressKey: "narrations",
+            threshold: 1,
+          },
+          outcome: { result: "tide acknowledged" },
+        },
+        {
+          goalKey: "harbor-omen",
+          policyVersion: "v2",
+          mode: "semantic",
+          visible: false,
+          rubric: { kind: "semantic", promptKey: "harbor-omen" },
+          outcome: { result: "omen resolved" },
+        },
+      ],
+    };
+    const realmInstance = await service.instantiateRealmWorld(
+      scope,
+      realmWorldPlan,
+      "realmworld-application-fixture",
+    );
+    assert.equal(realmInstance.worldId, realmWorldPlan.binding.worldId);
+    assert.equal(realmInstance.replayed, false);
+    const realmReplay = await service.instantiateRealmWorld(
+      scope,
+      realmWorldPlan,
+      "realmworld-application-fixture",
+    );
+    assert.equal(realmReplay.replayed, true);
+    assert.deepEqual(
+      {
+        worldId: realmReplay.worldId,
+        worldlineId: realmReplay.worldlineId,
+        storyId: realmReplay.storyId,
+        recordId: realmReplay.recordId,
+      },
+      {
+        worldId: realmInstance.worldId,
+        worldlineId: realmInstance.worldlineId,
+        storyId: realmInstance.storyId,
+        recordId: realmInstance.recordId,
+      },
+    );
+    await assert.rejects(
+      service.instantiateRealmWorld(
+        scope,
+        {
+          ...realmWorldPlan,
+          binding: { kind: "world", worldId: "world_harbor_engine", worldVersion: "2.0.0" },
+        },
+        "realmworld-application-fixture",
+      ),
+      (error: unknown) => error instanceof LibraryServiceError
+        && error.code === "REALMWORLD_IDENTITY_CONFLICT",
+    );
+    const conflictRows = await ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM records
+       WHERE workspace_id = $1 AND world_id = $2`,
+      [scope.workspaceId, realmInstance.worldId],
+    );
+    assert.equal(conflictRows.rows[0]?.count, "1");
+    const realmWorldRow = await ownerPool.query<{ world_version: string; settings: Record<string, unknown> }>(
+      `SELECT world_version, settings
+       FROM worlds
+       WHERE workspace_id = $1 AND id = $2`,
+      [scope.workspaceId, realmInstance.worldId],
+    );
+    assert.equal(realmWorldRow.rows[0]?.world_version, "1.2.0");
+    assert.equal(realmWorldRow.rows[0]?.settings.weather, "盐雨");
+    const realmRecord = await recordService.loadRecord(realmInstance.recordId);
+    assert.equal(realmRecord.record.record.id, realmInstance.recordId);
+    assert.equal(realmRecord.record.record.title, "第一夜");
+    assert.deepEqual(
+      realmRecord.record.cast.map((member) => member.name).sort(),
+      ["测试旅人", "玛拉"].sort(),
+    );
+    const realmScene = await ownerPool.query<{ title: string; display_time: string }>(
+      `SELECT title, display_time
+       FROM scenes
+       WHERE workspace_id = $1 AND record_id = $2`,
+      [scope.workspaceId, realmInstance.recordId],
+    );
+    assert.equal(realmScene.rows[0]?.title, "北码头");
+    assert.equal(realmScene.rows[0]?.display_time, "夜哨");
+
+    // ===== Goal runtime materialization（本批）=====
+    // 声明式 Goal 在创建 Record 的同一事务内物化为 goal_instances：
+    // 只有 Record-scoped runtime state（goal key、policy version、active/
+    // revision/progress/outcome），定义与 rubric 留在 RealmWorld 内容层。
+    const goalScope = {
+      workspaceId: scope.workspaceId,
+      worldId: realmInstance.worldId,
+      worldlineId: realmInstance.worldlineId,
+      recordId: realmInstance.recordId,
+    };
+    const goalInstances = await ownerPool.query<{
+      id: string;
+      goal_key: string;
+      state: string;
+      revision: string;
+      progress: Record<string, unknown>;
+      outcome: unknown;
+      policy_version: string;
+    }>(
+      `SELECT id, goal_key, state, revision::text AS revision,
+              progress, outcome, policy_version
+       FROM goal_instances
+       WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+         AND record_id = $4
+       ORDER BY goal_key`,
+      [goalScope.workspaceId, goalScope.worldId, goalScope.worldlineId, goalScope.recordId],
+    );
+    // 幂等 replay（上方 realmReplay）不得重复创建：仍然恰好 2 行。
+    assert.equal(goalInstances.rows.length, 2);
+    for (const goal of realmWorldPlan.goals) {
+      const row = goalInstances.rows.find((item) => item.goal_key === goal.goalKey);
+      assert.ok(row, `goal_instances must materialize ${goal.goalKey}`);
+      // instance id 规则（代码内注释同款说明）：sha256 域分隔 digest 由
+      // Record scope + goalKey 派生——确定性（重放稳定）且 digest 碰撞
+      // 会令 PK/UNIQUE 冲突直接中止事务（fail-closed），绝不静默合并。
+      assert.equal(
+        row.id,
+        goalInstanceIdFor(goalScope, goal.goalKey),
+        "goal instance id 必须是确定性 scope 派生",
+      );
+      assert.equal(row.state, "active");
+      assert.equal(row.revision, "0");
+      assert.deepEqual(row.progress, {});
+      assert.equal(row.outcome, null);
+      assert.equal(row.policy_version, goal.policyVersion);
+    }
+    // 初始 opening event：每个 active Goal 同事务 enqueue 一条 durable
+    // assessment job，source_event_id 必须是真实已提交的 opening 事件。
+    const realmOpeningEvent = await ownerPool.query<{ id: string }>(
+      `SELECT id
+       FROM events
+       WHERE workspace_id = $1 AND record_id = $2
+         AND event_kind = 'narration.committed'
+       ORDER BY record_ordinal
+       LIMIT 1`,
+      [scope.workspaceId, realmInstance.recordId],
+    );
+    assert.equal(realmOpeningEvent.rows.length, 1);
+    const openingJobs = await ownerPool.query<{
+      id: string;
+      world_id: string;
+      worldline_id: string;
+      record_id: string;
+      goal_instance_id: string;
+      source_event_id: string;
+      state: string;
+    }>(
+      `SELECT id, world_id, worldline_id, record_id,
+              goal_instance_id, source_event_id, state
+       FROM goal_assessment_jobs
+       WHERE workspace_id = $1 AND record_id = $2
+       ORDER BY goal_instance_id`,
+      [scope.workspaceId, realmInstance.recordId],
+    );
+    // 幂等 replay 同样不得重复 enqueue：仍然恰好 2 行。
+    assert.equal(openingJobs.rows.length, 2);
+    for (const jobRow of openingJobs.rows) {
+      assert.equal(jobRow.world_id, goalScope.worldId);
+      assert.equal(jobRow.worldline_id, goalScope.worldlineId);
+      assert.equal(jobRow.record_id, goalScope.recordId);
+      assert.equal(jobRow.source_event_id, realmOpeningEvent.rows[0]!.id);
+      assert.equal(jobRow.state, "pending");
+      assert.equal(
+        jobRow.id,
+        goalAssessmentJobIdFor(
+          scope.workspaceId,
+          jobRow.goal_instance_id,
+          realmOpeningEvent.rows[0]!.id,
+        ),
+        "goal assessment job id 必须是确定性派生",
+      );
+    }
+    // identity conflict（上方 2.0.0 同键拒绝）不得残留任何 Goal 行。
+    const conflictGoalRows = await ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM goal_instances
+       WHERE workspace_id = $1 AND world_id = $2`,
+      [scope.workspaceId, realmInstance.worldId],
+    );
+    assert.equal(conflictGoalRows.rows[0]?.count, "2");
+
+    // 事务失败零残留：重复 goalKey 的声明 fail-closed（INVALID_COMMAND），
+    // worlds/worldlines/stories/records/goal_instances/jobs 全无残留。
+    await assert.rejects(
+      service.instantiateRealmWorld(
+        scope,
+        {
+          ...realmWorldPlan,
+          binding: { kind: "world", worldId: "world_harbor_dup_goal", worldVersion: "1.0.0" },
+          goals: [realmWorldPlan.goals[0]!, { ...realmWorldPlan.goals[0]! }],
+        },
+        "realmworld-application-duplicate-goal",
+      ),
+      (error: unknown) => error instanceof LibraryServiceError
+        && error.code === "INVALID_COMMAND",
+    );
+    const residue = await ownerPool.query<{
+      worlds: string;
+      worldlines: string;
+      stories: string;
+      records: string;
+      goal_instances: string;
+      goal_jobs: string;
+    }>(
+      `SELECT
+         (SELECT count(*) FROM worlds
+           WHERE workspace_id = $1 AND id = 'world_harbor_dup_goal')::text AS worlds,
+         (SELECT count(*) FROM worldlines
+           WHERE workspace_id = $1 AND world_id = 'world_harbor_dup_goal')::text AS worldlines,
+         (SELECT count(*) FROM stories
+           WHERE workspace_id = $1 AND world_id = 'world_harbor_dup_goal')::text AS stories,
+         (SELECT count(*) FROM records
+           WHERE workspace_id = $1 AND world_id = 'world_harbor_dup_goal')::text AS records,
+         (SELECT count(*) FROM goal_instances
+           WHERE workspace_id = $1 AND world_id = 'world_harbor_dup_goal')::text AS goal_instances,
+         (SELECT count(*) FROM goal_assessment_jobs
+           WHERE workspace_id = $1 AND world_id = 'world_harbor_dup_goal')::text AS goal_jobs`,
+      [scope.workspaceId],
+    );
+    assert.deepEqual(residue.rows[0], {
+      worlds: "0",
+      worldlines: "0",
+      stories: "0",
+      records: "0",
+      goal_instances: "0",
+      goal_jobs: "0",
+    });
 
     // ===== 批次 S · 需求三：观察者创世 + 卷首旁白 =====
     const observerGenesis = await service.createGenesis(scope, {

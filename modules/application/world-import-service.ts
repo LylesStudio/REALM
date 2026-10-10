@@ -36,6 +36,7 @@ import {
   PACK_TABLE_ORDER,
   matrixRow,
 } from "../world-transfer/export-matrix.ts";
+import { LOCAL_WORLD_VERSION } from "../world-transfer/realm-save.ts";
 
 export type ImportErrorCode =
   | "INVALID_REQUEST"
@@ -145,7 +146,7 @@ function topoSortRows(table: string, rows: InsertRow[]): InsertRow[] {
 // enrichment（包行 → 落库行：copy 重映射 + 身份/principal 规则 + codec）
 // ---------------------------------------------------------------------------
 
-interface Enrichment {
+export interface Enrichment {
   newWorldId: string;
   /** 每表 insert-codec 行（拓扑序）。 */
   tables: Map<string, InsertRow[]>;
@@ -155,7 +156,7 @@ interface Enrichment {
   worldStatusRedacted: boolean;
 }
 
-function enrichPack(
+export function enrichPack(
   pack: ValidatedPack,
   columnsByTable: ReadonlyMap<string, readonly PackColumnSpec[]>,
   options: {
@@ -262,6 +263,37 @@ function enrichPack(
           remap,
         );
       }
+      const hasWorldVersionColumn = table === "worlds"
+        && columns.some((column) => column.name === "world_version");
+      // Phase 4D：records 行同规——0057 之后导出的包 records 行携带
+      // worldVersion（Record 级 binding）；目标库未应用 0057 时显式拒绝。
+      const hasRecordWorldVersionColumn = table === "records"
+        && columns.some((column) => column.name === "world_version");
+      // 0054 之后导出的包带有 worldVersion；目标库若尚未拥有
+      // world_version，必须显式拒绝，不能静默丢弃内容身份。旧包没有该键，
+      // 则保留 0054 之前的旧导入语义。
+      if (
+        table === "worlds"
+        && !hasWorldVersionColumn
+        && remapped.worldVersion !== undefined
+        && remapped.worldVersion !== null
+      ) {
+        throw new WorldImportError(
+          "INVALID_PACK",
+          "world identity requires migration 0054 (world_version)",
+        );
+      }
+      if (
+        table === "records"
+        && !hasRecordWorldVersionColumn
+        && remapped.worldVersion !== undefined
+        && remapped.worldVersion !== null
+      ) {
+        throw new WorldImportError(
+          "INVALID_PACK",
+          "record binding requires migration 0057 (records.world_version)",
+        );
+      }
       let converted: InsertRow;
       try {
         converted = packRowToInsertRow(columns, remapped, (fileId) => {
@@ -307,12 +339,41 @@ function enrichPack(
   // 世界只读封存不经导入恢复；重写记 redaction）。
   let worldStatusRedacted = false;
   const worldRows = tables.get("worlds");
+  const worldColumns = columnsByTable.get("worlds") ?? [];
+  const hasWorldVersionColumn = worldColumns.some((column) => column.name === "world_version");
   if (worldRows) {
     for (const row of worldRows) {
       if (row.status !== "active") {
         row.status = "active";
         worldStatusRedacted = true;
       }
+      if (hasWorldVersionColumn) {
+        // Phase 1A（0054）：0054 之前导出的旧包 worlds 行没有 world_version
+        // 键（insert codec 对缺键收敛为 null）；按 0054 的同一确定性哨兵回
+        // 填，bootstrap 键集等值校验才能对 0054 之后的库通过（语义 =
+        // pre-contract 本地世界）。已携带 world_version 的新包原样保留。
+        if (row.world_version === undefined || row.world_version === null) {
+          row.world_version = LOCAL_WORLD_VERSION;
+        }
+      }
+    }
+  }
+
+  // Phase 4D：records 行同规则——包内缺 world_version 的记录按其世界在
+  // 包内（回填后）的版本回填；旧包（世界也无版本）与 base 一律落哨兵。
+  const recordRows = tables.get("records");
+  if (recordRows && hasWorldVersionColumn) {
+    const versionByWorldId = new Map();
+    for (const row of worldRows ?? []) {
+      if (typeof row.id === "string" && typeof row.world_version === "string" && row.world_version) {
+        versionByWorldId.set(row.id, row.world_version);
+      }
+    }
+    for (const row of recordRows) {
+      if (row.world_version !== undefined && row.world_version !== null) continue;
+      row.world_version = (typeof row.world_id === "string"
+        ? versionByWorldId.get(row.world_id)
+        : undefined) ?? LOCAL_WORLD_VERSION;
     }
   }
 

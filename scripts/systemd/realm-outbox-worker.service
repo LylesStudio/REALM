@@ -1,0 +1,30 @@
+# REALM transactional Outbox worker —— systemd unit template.
+#
+# This is a repository template, not an installed unit. Installation/enabling is
+# an operator action and is intentionally not performed by development tests:
+#   cp scripts/systemd/realm-outbox-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now realm-outbox-worker.service
+#
+# Configure REALM_OUTBOX_DELIVERY_URL and optional workspace/topic settings in
+# the operator environment. The endpoint must be credential-free HTTP(S); this
+# template never stores a connection string, token, or API key.
+#
+# The worker has its own PG advisory lock and lifecycle. It does not start with
+# realm-dev.service and a delivery outage cannot block Web requests.
+
+[Unit]
+Description=REALM transactional Outbox worker (HTTP delivery consumer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/works/REALM
+# .env.local is operator-managed; no secret values belong in this template.
+# Adjust the checkout and Node path for the operator's installation if needed.
+ExecStart=%h/.hermes/node/bin/node --env-file-if-exists=.env.local --experimental-strip-types scripts/outbox-worker.mjs
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

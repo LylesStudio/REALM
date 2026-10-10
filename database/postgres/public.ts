@@ -2,6 +2,7 @@ export {
   createPostgresRuntimeRepository,
   type PostgresCommittedEventKind,
   type PostgresActionStateWrite,
+  type PostgresCommittedFormalEvents,
   type PostgresFormalEventMappingContext,
   type PostgresFormalEventWrite,
   type PostgresObservationDraft,
@@ -52,6 +53,19 @@ export {
 } from "./realm-dev-pool.ts";
 export { createPostgresCharacterMemoryRepository } from "./memory-repository.ts";
 export {
+  createPostgresGoalAssessmentJobQueue,
+  GoalRuntimeRepositoryError,
+  type GoalAssessmentEnqueueInput,
+  type PostgresGoalAssessmentJobQueue,
+  type PostgresGoalAssessmentJobQueueOptions,
+} from "./goal-assessment-job-queue.ts";
+export {
+  enqueueGoalAssessmentJobsForCommittedEvents,
+  materializeGoalInstances,
+  type GoalCommittedEventScope,
+  type GoalMaterializationDeclaration,
+} from "./goal-runtime-materialization.ts";
+export {
   createPostgresActionAffordanceCatalog,
   createPostgresCharacterSkillProvider,
 } from "./action-state.ts";
@@ -76,6 +90,17 @@ export {
   type GraphInvalidationScope,
 } from "./graph-invalidation.ts";
 export { createPostgresPropagationRepository } from "./propagation-repository.ts";
+export {
+  RECORD_COMMITTED_CHANNEL,
+  listenRecordCommitted,
+  parseRecordCommittedWakeup,
+  recordCommittedWakeupPayload,
+  withRecordCommittedNotify,
+  type RecordCommittedListenClient,
+  type RecordCommittedWakeup,
+  type RecordCommittedWakeupScope,
+  type RecordCommittedWakeupSource,
+} from "./record-events.ts";
 export {
   createPostgresPropagationNodeAudienceGovernance,
   PropagationNodeAudienceError,
@@ -106,6 +131,27 @@ export {
   createPostgresRecordRuntimeScopeRepository,
   type RecordRuntimeScope,
   type RecordRuntimeScopeRepository,
+  type RuntimeWorldBinding,
   type RuntimeActor,
   type WorldSceneBrief,
 } from "./record-scope.ts";
+export {
+  buildRealmRuntimeSaveBytes,
+  createPostgresRealmRuntimeSaveReader,
+  createPostgresRealmRuntimeSaveRestorer,
+  RealmRuntimeSaveRepositoryError,
+  type RealmRuntimeSaveReader,
+  type RealmRuntimeSaveRestoreInput,
+  type RealmRuntimeSaveRestoreResult,
+  type RealmRuntimeSaveRestorer,
+  type RealmRuntimeSaveRestorerOptions,
+  type RealmRuntimeSaveWorldBinding,
+  type RealmRuntimeSaveWorldBindingValidator,
+} from "./realm-runtime-save-repository.ts";
+export {
+  createPostgresGoalProjectionRepository,
+  GoalProjectionRepositoryError,
+  type GoalProjectionReadResult,
+  type GoalProjectionRepository,
+  type GoalProjectionRepositoryErrorCode,
+} from "./goal-projection-repository.ts";

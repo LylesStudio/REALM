@@ -64,9 +64,11 @@ test("the panel subscribes the graph-specific SSE route and never record events"
   assert.doesNotMatch(panel, /setInterval/);
 });
 
-test("the SSE route set is exactly record events, record preview, lobby and graph invalidation", () => {
+test("the SSE route set includes record, Goal, lobby and graph invalidation streams", () => {
   // 全 app/api 的 SSE route 清单——出现未登记的新推送通道即评审。
   // record/events 与 record/preview 语义不变（record-scoped）；
+  // bridge/v1/record/events 与 bridge/v1/record/goals/events 是
+  // Bridge v1 别名 SSE 门面（由 tests/local-record-api-v1.test.ts 覆盖）；
   // lobby/events 是大厅失效唤醒（帧只携带 workspace 标记，无房间内容）；
   // world-knowledge/events 走账本重放。
   const sseRoutes = [];
@@ -76,8 +78,11 @@ test("the SSE route set is exactly record events, record preview, lobby and grap
     }
   }
   assert.deepEqual(sseRoutes.sort(), [
+    "app/api/bridge/v1/record/events/route.ts",
+    "app/api/bridge/v1/record/goals/events/route.ts",
     "app/api/lobby/events/route.ts",
     "app/api/record/events/route.ts",
+    "app/api/record/goals/events/route.ts",
     "app/api/record/preview/route.ts",
     "app/api/world-knowledge/events/route.ts",
   ]);

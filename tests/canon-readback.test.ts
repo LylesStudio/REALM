@@ -75,7 +75,7 @@ test("canon readout enters the DM plan prompt only when present (backward compat
         return {
           model: "fake",
           content: JSON.stringify({
-            goal: "推进一幕",
+            turnIntent: "推进一幕",
             activatedCharacterInstanceIds: [],
             narratorEnabled: true,
           }),

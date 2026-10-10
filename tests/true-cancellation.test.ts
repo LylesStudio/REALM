@@ -255,7 +255,7 @@ test("model-powered: abort during stream empty-retry stops without chat fallback
       }
       if (system.includes("DM Controller")) {
         return jsonResponse({
-          goal: "回应玩家的自然询问",
+          turnIntent: "回应玩家的自然询问",
           activatedCharacterInstanceIds: ["scout-instance"],
           narratorEnabled: false,
         });

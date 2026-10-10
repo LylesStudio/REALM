@@ -413,6 +413,19 @@ test(
     );
     assert.equal(exitSignal, null);
 
+    // stop() 经共享 host 释放 advisory lock（专用连接已关闭）。
+    const locksAfterExit = await ownerPool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_locks
+       WHERE locktype = 'advisory' AND granted
+         AND classid = ((hashtext('realm_propagation_worker')::bigint >> 32) & x'ffffffff'::bigint)::bigint
+         AND objid = (hashtext('realm_propagation_worker')::bigint & x'ffffffff'::bigint)::bigint`,
+    );
+    assert.equal(
+      locksAfterExit.rows[0]?.n,
+      0,
+      "SIGTERM stop must release the propagation advisory lock",
+    );
+
     // 安全证据：仅 [propagation-worker] 前缀的无凭据状态行。
     for (const line of stdoutText.split("\n")) {
       if (line.startsWith("[propagation-worker]")) t.diagnostic(line);
