@@ -54,6 +54,24 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-11
+
+### Added
+
+- RealmWorld 生命周期、升级/降级与跨版本运行。
+- Record 版本绑定、持久化 topology、幂等 instantiate/replay 与 fail-closed 回滚。
+- 声明式 Goal runtime materialization、durable assessment enqueue、真实 semantic Judge provider。
+- 统一 durable worker host。
+- branch/fork/reconcile、restore 全量运行态。
+- trust-store operator lifecycle。
+- WebUI Bridge 生产接线。
+- Local Record API Bridge v1。
+- base provider 统一内容层及 nested fail-closed correction。
+- runtime-save v2 完整链路：action receipts、character effects、observations、memory、outbox、first-night、self-play 的 save/restore/replay。
+- worldline merge 对 action receipts / character effects / observations 的完整物化。
+- 真实 branch/fork → origin/branch 双线 run → merge back 生命周期独立验收。
+- OpenRouter 与 LM Studio 真实 HTTP 网络验证。
+
 ### Security
 
 - 接受 7 个 high severity npm audit advisory（`braces`/`micromatch`/`fast-glob` 链）为已知风险。这些依赖只用于 lint/build 阶段，默认 self-hosted 单用户场景下没有远程可触发路径；上游 `braces` 目前无修复版本，强制降级反而可能破坏构建。
