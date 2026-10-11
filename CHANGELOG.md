@@ -54,6 +54,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- 接受 7 个 high severity npm audit advisory（`braces`/`micromatch`/`fast-glob` 链）为已知风险。这些依赖只用于 lint/build 阶段，默认 self-hosted 单用户场景下没有远程可触发路径；上游 `braces` 目前无修复版本，强制降级反而可能破坏构建。
+
 ## [0.5.0] - 2026-10-04
 
 ### Added

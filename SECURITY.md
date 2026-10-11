@@ -27,3 +27,5 @@ REALM 当前公开准备版本是 self-hosted single-user / research preview。
 ## 依赖和供应链
 
 依赖更新应通过锁文件提交，并在 CI 中运行完整测试。引入新的运行时依赖时，请在 Pull Request 中说明许可证、来源和必要性。
+
+- `npm audit` 当前报告 7 个 high severity advisory，集中在 `braces`/`micromatch`/`fast-glob` 链（`@next/eslint-plugin-next`、`vinext` 的构建依赖）。这些包只在 lint/build 时使用，默认 self-hosted 场景没有远程触发面；上游 `braces` 尚无修复版本，因此作为已知风险接受。
