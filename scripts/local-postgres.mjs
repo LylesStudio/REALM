@@ -189,12 +189,21 @@ function controlStatus() {
   });
 }
 
-function readiness() {
-  return run(
-    "pg_isready",
-    ["-h", host, "-p", port, "-d", database],
-    { allowFailure: true, capture: true },
-  );
+async function readiness() {
+  // macOS 上 pg_isready 也可能被 Gatekeeper SIGKILL，因此用 Node pg 驱动探测。
+  const client = new pg.Client({
+    host,
+    port: Number(port),
+    user: "postgres",
+    database: "postgres",
+  });
+  try {
+    await client.connect();
+    await client.end();
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
 }
 
 function initialize() {
@@ -277,7 +286,7 @@ switch (action) {
     initialize();
     mkdirSync(socketDirectory, { recursive: true });
     if (controlStatus().status !== 0) {
-      if (readiness().status === 0) {
+      if ((await readiness()).ok) {
         throw new Error(
           `${host}:${port} is already used by a PostgreSQL server outside this project cluster.`,
         );
@@ -285,7 +294,7 @@ switch (action) {
       startServer();
     }
     await ensureDatabase();
-    if (readiness().status !== 0) {
+    if (!(await readiness()).ok) {
       throw new Error("Realm PostgreSQL started but did not become ready.");
     }
     console.log(`Realm PostgreSQL is local-only at ${host}:${port}/${database}.`);
@@ -308,12 +317,12 @@ switch (action) {
       break;
     }
     const controlled = controlStatus();
-    const ready = readiness();
-    if (controlled.status === 0 && ready.status === 0) {
+    const ready = await readiness();
+    if (controlled.status === 0 && ready.ok) {
       process.stdout.write(controlled.stdout);
-      process.stdout.write(ready.stdout);
+      console.log(`Realm PostgreSQL is ready at ${host}:${port}/${database}.`);
     } else {
-      const detail = [controlled.stderr, ready.stdout, ready.stderr]
+      const detail = [controlled.stderr]
         .filter(Boolean)
         .join("\n")
         .trim();
