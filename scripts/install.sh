@@ -7,7 +7,9 @@
 #
 # Conservative by design:
 # - nothing is installed without an explicit confirmation (or --yes);
-# - piped execution without --yes reattaches /dev/tty so prompts stay usable;
+# - piped execution without --yes reads prompts from /dev/tty while the script
+#   input stays on the pipe (a global exec 0</dev/tty would steal stdin and
+#   the rest of the script would never be read);
 # - all state lives under ${REALM_HOME:-~/.realm}; no sudo, no system changes;
 # - re-running updates an existing clone in place.
 #
@@ -51,13 +53,9 @@ done
 log() { printf '\033[1;36m[realm]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[realm] error:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --- piped curl|bash: reattach the terminal so confirmations stay possible ---
-if [[ ! -t 0 && "$AUTO_YES" != 1 ]]; then
-  if ! exec 0</dev/tty 2>/dev/null; then
-    die "stdin is a pipe and no terminal is available; rerun with --yes for unattended installs"
-  fi
-fi
-
+# --- piped curl|bash: keep the script input on the pipe but read prompts from
+#     the controlling terminal when available. A global `exec 0</dev/tty` would
+#     steal stdin from bash and the rest of the script would never be read.
 confirm() {
   local prompt="$1"
   if [[ "$AUTO_YES" == 1 ]]; then
@@ -65,7 +63,13 @@ confirm() {
     return 0
   fi
   local answer
-  read -r -p "$prompt [y/N] " answer
+  if [[ -t 0 ]]; then
+    read -r -p "$prompt [y/N] " answer
+  elif read -r -p "$prompt [y/N] " answer < /dev/tty 2>/dev/null; then
+    :
+  else
+    die "no interactive terminal available for confirmation; rerun with --yes for unattended installs"
+  fi
   [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
@@ -303,4 +307,10 @@ if [[ "${REALM_INSTALL_SKIP_SETUP:-0}" == 1 ]]; then
   log "REALM_INSTALL_SKIP_SETUP=1 → stopping before setup-web"
   exit 0
 fi
-exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"
+# setup-web.sh 也使用 `read` 做交互式确认；curl|bash 场景下把子进程的 stdin
+# 接到 /dev/tty，而不是把安装脚本自己的 stdin 接走。
+if [[ "$AUTO_YES" == 1 ]]; then
+  exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"
+else
+  exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}" < /dev/tty
+fi

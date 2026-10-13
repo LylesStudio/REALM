@@ -16,8 +16,10 @@ const windowsInstaller = readFileSync(join(projectRoot, "scripts/install.ps1"), 
 
 test("install.sh is defensive by default", () => {
   assert.match(installer, /set -euo pipefail/);
-  // 管道执行且非 --yes 时必须拒绝静默自动化，而不是无确认继续。
-  assert.match(installer, /stdin is a pipe and no terminal is available/);
+  // 管道执行且非 --yes 时，确认函数优先从 /dev/tty 读取，而不是把脚本自己的
+  // stdin 接走；无终端可确认时必须给出清晰错误并指引 --yes。
+  assert.match(installer, /read -r -p "\$prompt \[y\/N\] " answer < \/dev\/tty/);
+  assert.match(installer, /no interactive terminal available for confirmation/);
   // 无 sudo 调用（注释里提到 "no sudo" 不算），状态固定在 REALM_HOME 之下。
   assert.doesNotMatch(installer, /^[ \t]*sudo[ \t]/m);
   assert.match(installer, /REALM_HOME:-\$HOME\/.realm/);
