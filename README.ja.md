@@ -32,6 +32,9 @@ iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/script
 
 どちらのコマンドも、プラットフォーム別の組み込み PostgreSQL 17+pgvector アーティファクト（linux-x64 / darwin-arm64 / windows-x64。GitHub Actions ビルド＋SHA256 チェックサム付き）を自動でダウンロードしてユーザーディレクトリにインストールし、初期設定まで全部済ませます。
 
+> インストーラーは各ステップ（Node のダウンロード、ソースのクローン、PostgreSQL のインストールなど）で `[y/N]` プロンプトを表示し、`y` を入力するまで待機します。プロンプトが見えない場合は、対話型ターミナルで実行しているか確認してください。すべての確認をスキップするには、コマンドの末尾に `--yes` を追加してください。
+> npm のインストール段階で `high severity vulnerabilities` が数件報告されますが、これらは既知のビルドツールチェーン依存の警告です。**`npm audit fix --force` は実行しないでください**。ビルドツールチェーンを壊す可能性があります。
+
 **すでに PostgreSQL 17 + pgvector をお持ちの方、Docker を使う方**は `--embedded-pg` を外してください。インストーラーが既存環境を自動で検出します。
 
 ```bash

@@ -32,6 +32,9 @@ iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/script
 
 以上命令会自动下载对应平台的嵌入式 PostgreSQL 17+pgvector 构件（linux-x64 / darwin-arm64 / windows-x64，由 GitHub Actions 构建并附 SHA256 校验），装进用户目录、完成全部初始化。
 
+> 安装器会在每一步（下载 Node、克隆源码、安装 PostgreSQL 等）显式打印 `[y/N]` 提示，输入 `y` 后才会继续。如果终端上看不到提示，请检查是否使用了交互式终端；想跳过所有确认，可在命令末尾加上 `--yes`。
+> npm 安装阶段会报告数个 `high severity vulnerabilities`，均为构建工具链的已知依赖风险，**不要**运行 `npm audit fix --force`，以免破坏构建工具链。
+
 **已经有 PostgreSQL 17 + pgvector，或者用 Docker 的进阶用户**，去掉 `--embedded-pg` 即可，安装器会自动探测现有环境：
 
 ```bash

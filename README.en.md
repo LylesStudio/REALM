@@ -32,6 +32,9 @@ iex "& { $(irm https://raw.githubusercontent.com/Silver-Aurora/REALM/main/script
 
 These commands download the per-platform embedded PostgreSQL 17+pgvector artifact (linux-x64 / darwin-arm64 / windows-x64, built by GitHub Actions with SHA256 checksums), install it into your user directory, and finish the whole setup.
 
+> The installer prints an explicit `[y/N]` prompt at every step (download Node, clone source, install PostgreSQL, etc.) and waits for you to type `y`. If you do not see a prompt, make sure you are running in an interactive terminal. To skip all confirmations, append `--yes`.
+> npm will report a few `high severity vulnerabilities`; these are known build-toolchain dependency advisories. **Do not** run `npm audit fix --force`, as that can break the build toolchain.
+
 **Already have PostgreSQL 17 + pgvector, or prefer Docker?** Drop `--embedded-pg` — the installer detects your existing environment automatically:
 
 ```bash

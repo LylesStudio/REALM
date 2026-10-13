@@ -312,7 +312,15 @@ fi
 # setup-web.sh 也使用 `read` 做交互式确认；curl|bash 场景下把子进程的 stdin
 # 接到 /dev/tty，而不是把安装脚本自己的 stdin 接走。
 if [[ "$AUTO_YES" == 1 ]]; then
-  exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"
+  if [[ ${#SETUP_ARGS[@]} -eq 0 ]]; then
+    exec bash "$APP_DIR/scripts/setup-web.sh"
+  else
+    exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"
+  fi
 else
-  exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}" < /dev/tty
+  if [[ ${#SETUP_ARGS[@]} -eq 0 ]]; then
+    exec bash "$APP_DIR/scripts/setup-web.sh" < /dev/tty
+  else
+    exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}" < /dev/tty
+  fi
 fi
