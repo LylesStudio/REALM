@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
+import pg from "pg";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 // 数据目录解析优先级：
@@ -216,27 +217,28 @@ function initialize() {
   ]);
 }
 
-function ensureDatabase() {
-  // 集群超级用户固定为 postgres（initdb --username=postgres）；psql/
-  // createdb 缺省按 OS 用户连接，fresh 集群上 role 不存在。
-  const lookup = run(
-    "psql",
-    [
-      "-h",
-      host,
-      "-p",
-      port,
-      "-U",
-      "postgres",
-      "-d",
-      "postgres",
-      "-tAc",
-      `SELECT 1 FROM pg_database WHERE datname = '${database}'`,
-    ],
-    { capture: true },
-  );
-  if (lookup.stdout.trim() === "1") return;
-  run("createdb", ["-h", host, "-p", port, "-U", "postgres", database]);
+async function ensureDatabase() {
+  // 集群超级用户固定为 postgres（initdb --username=postgres）。
+  // macOS 上从网络下载的 psql/createdb 可能被 Gatekeeper SIGKILL，因此直接用
+  // Node pg 驱动连接 postgres 数据库做存在性检查与创建。
+  const client = new pg.Client({
+    host,
+    port: Number(port),
+    user: "postgres",
+    database: "postgres",
+  });
+  try {
+    await client.connect();
+    const { rows } = await client.query(
+      "SELECT 1 FROM pg_database WHERE datname = $1",
+      [database],
+    );
+    if (rows.length > 0) return;
+    const safeDatabase = /^[a-zA-Z0-9_]+$/.test(database) ? database : "realm_local";
+    await client.query(`CREATE DATABASE ${pg.escapeIdentifier(safeDatabase)}`);
+  } finally {
+    await client.end().catch(() => {});
+  }
 }
 
 function startServer() {
@@ -282,7 +284,7 @@ switch (action) {
       }
       startServer();
     }
-    ensureDatabase();
+    await ensureDatabase();
     if (readiness().status !== 0) {
       throw new Error("Realm PostgreSQL started but did not become ready.");
     }
