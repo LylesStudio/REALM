@@ -18,7 +18,9 @@ test("install.sh is defensive by default", () => {
   assert.match(installer, /set -euo pipefail/);
   // 管道执行且非 --yes 时，确认函数优先从 /dev/tty 读取，而不是把脚本自己的
   // stdin 接走；无终端可确认时必须给出清晰错误并指引 --yes。
-  assert.match(installer, /read -r -p "\$prompt \[y\/N\] " answer < \/dev\/tty/);
+  assert.match(installer, /\{ true < \/dev\/tty; \} 2>\/dev\/null/);
+  assert.match(installer, /read -r answer < \/dev\/tty/);
+  assert.match(installer, /printf '%s \[y\/N\] ' "\$prompt" >&2/);
   assert.match(installer, /no interactive terminal available for confirmation/);
   // 无 sudo 调用（注释里提到 "no sudo" 不算），状态固定在 REALM_HOME 之下。
   assert.doesNotMatch(installer, /^[ \t]*sudo[ \t]/m);
@@ -30,7 +32,7 @@ test("install.sh follows detect → explain → confirm → install", () => {
   // 显式确认（或 --yes），与 setup-web 同一套保守语义。
   assert.match(installer, /confirm\(\)/);
   assert.match(installer, /--yes/);
-  assert.match(installer, /read -r -p/);
+  assert.match(installer, /read -r answer/);
 });
 
 test("install.sh ends at setup-web.sh, never skips the bootstrap", () => {

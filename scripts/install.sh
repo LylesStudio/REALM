@@ -64,9 +64,11 @@ confirm() {
   fi
   local answer
   if [[ -t 0 ]]; then
-    read -r -p "$prompt [y/N] " answer
-  elif read -r -p "$prompt [y/N] " answer < /dev/tty 2>/dev/null; then
-    :
+    printf '%s [y/N] ' "$prompt" >&2
+    read -r answer
+  elif { true < /dev/tty; } 2>/dev/null; then
+    printf '%s [y/N] ' "$prompt" >&2
+    read -r answer < /dev/tty
   else
     die "no interactive terminal available for confirmation; rerun with --yes for unattended installs"
   fi
