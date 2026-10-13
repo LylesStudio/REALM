@@ -7,6 +7,7 @@ import {
   serializeRealmWorldManifestSigningPayload,
   type RealmWorldManifestV1,
 } from "./realmworld-manifest.ts";
+import { parseRealmWorldVersion } from "./realmworld-version.ts";
 import type { RealmWorldSignatureVerifier } from "./realmworld-loader.ts";
 
 export type RealmWorldTrustedKeyMaterial =
@@ -23,10 +24,24 @@ export interface RealmWorldTrustStoreKeyV1 {
   notAfter?: string;
 }
 
+/**
+ * Trust-store 的 engine base 内容版本段（Slice 5 operator lifecycle）：
+ * operator 显式 activate/switch/rollback 的记录。activeVersion 是包兼容闸
+ *（manifest `engineCompat.baseRange`）评估所对照的活动 base 版本；
+ * previousVersion 是最近一次 switch/activate 前的活动版本（rollback 目标）。
+ * 文档校验只做结构/严格 semver 检查；目标版本必须属于引擎可 serve 集合
+ * 的约束由 operator 变更函数（realmworld-trust-store.ts）执行。
+ */
+export interface RealmWorldTrustStoreBaseV1 {
+  activeVersion: string;
+  previousVersion?: string;
+}
+
 export interface RealmWorldTrustStoreDocumentV1 {
   format: "realmworld-trust-store";
   version: 1;
   keys: readonly RealmWorldTrustStoreKeyV1[];
+  base?: RealmWorldTrustStoreBaseV1;
 }
 
 export class RealmWorldTrustStoreError extends Error {
@@ -36,7 +51,12 @@ export class RealmWorldTrustStoreError extends Error {
     | "TRUST_STORE_KEY_NOT_FOUND"
     | "TRUST_STORE_KEY_CONFLICT"
     | "TRUST_STORE_UNREADABLE"
-    | "TRUST_STORE_WRITE_FAILED";
+    | "TRUST_STORE_WRITE_FAILED"
+    | "BASE_VERSION_INVALID"
+    | "BASE_VERSION_UNSUPPORTED"
+    | "BASE_ALREADY_ACTIVE"
+    | "BASE_NOT_ACTIVE"
+    | "BASE_ROLLBACK_UNAVAILABLE";
 
   constructor(
     code: RealmWorldTrustStoreError["code"],
@@ -144,7 +164,7 @@ export function validateRealmWorldTrustStoreDocument(
       throw new RealmWorldTrustStoreError("TRUST_STORE_INVALID", "trust store is not valid JSON");
     }
   }
-  if (!isPlainObject(value) || !exactKeys(value, ["format", "version", "keys"])) {
+  if (!isPlainObject(value) || !exactKeys(value, ["format", "version", "keys", "base"])) {
     throw new RealmWorldTrustStoreError("TRUST_STORE_INVALID", "trust store shape is invalid");
   }
   if (value.format !== "realmworld-trust-store" || value.version !== 1 || !Array.isArray(value.keys)) {
@@ -190,10 +210,38 @@ export function validateRealmWorldTrustStoreDocument(
       ...(notAfter === undefined ? {} : { notAfter }),
     }));
   }
+  let base: RealmWorldTrustStoreBaseV1 | undefined;
+  if (value.base !== undefined) {
+    if (
+      !isPlainObject(value.base)
+      || !exactKeys(value.base, ["activeVersion", "previousVersion"])
+    ) {
+      throw new RealmWorldTrustStoreError("TRUST_STORE_INVALID", "trust store base shape is invalid");
+    }
+    const activeVersion = trustStoreText(value.base.activeVersion, "base.activeVersion");
+    if (!parseRealmWorldVersion(activeVersion)) {
+      throw new RealmWorldTrustStoreError("TRUST_STORE_INVALID", "trust store base activeVersion is invalid");
+    }
+    let previousVersion: string | undefined;
+    if (value.base.previousVersion !== undefined) {
+      previousVersion = trustStoreText(value.base.previousVersion, "base.previousVersion");
+      if (!parseRealmWorldVersion(previousVersion) || previousVersion === activeVersion) {
+        throw new RealmWorldTrustStoreError(
+          "TRUST_STORE_INVALID",
+          "trust store base previousVersion is invalid",
+        );
+      }
+    }
+    base = Object.freeze({
+      activeVersion,
+      ...(previousVersion === undefined ? {} : { previousVersion }),
+    });
+  }
   return Object.freeze({
     format: "realmworld-trust-store",
     version: 1,
     keys: Object.freeze(keys),
+    ...(base === undefined ? {} : { base }),
   });
 }
 

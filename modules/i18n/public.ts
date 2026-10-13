@@ -21,10 +21,11 @@ export function normalizeUiLanguage(value: unknown): UiLanguage {
 
 type MessageTable = Record<UiLanguage, string>;
 
-/** 批次注册表：按面板分批维护（settings 设置页 / panels 图谱与世界库 / demo 演示世界）。 */
+/** 批次注册表：按面板分批维护（settings 设置页 / panels 图谱与世界库）。
+ *  演示世界固定模板文本已迁入内容解析层（modules/content-resolution
+ *  base bundle "ember-coast"）——世界内容不是界面固定文案。 */
 import { SETTINGS_MESSAGES } from "./messages-settings.ts";
 import { PANEL_MESSAGES } from "./messages-panels.ts";
-import { DEMO_MESSAGES } from "./messages-demo.ts";
 
 function interpolate(template: string, params?: Record<string, string>): string {
   if (!params) return template;
@@ -582,7 +583,7 @@ const MESSAGES: Record<string, MessageTable> = {
 };
 
 /** 批次注册表：按面板分批维护，统一并入主表（契约测试覆盖全部 key）。 */
-for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES, ...DEMO_MESSAGES }) as [string, MessageTable][]) {
+for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES }) as [string, MessageTable][]) {
   if (!(key in MESSAGES)) MESSAGES[key] = table;
 }
 

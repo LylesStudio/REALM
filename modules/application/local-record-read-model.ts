@@ -254,9 +254,10 @@ export function writeScope(
   recordId: string,
   characterInstanceId: string | null,
   principalId?: string,
+  workspaceId?: string,
 ): WriteScope {
   return {
-    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+    workspaceId: workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId,
     recordId,
     principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
     characterInstanceId,
@@ -283,6 +284,11 @@ export interface LocalRecordReadModelDependencies {
     PostgresDeliveryProjectionRepository,
     "loadDeliveryForPlayer"
   >;
+  /**
+   * Slice 2.5：本地运行工作区身份（RLS 事务边界）。由装配根显式注入；
+   * 缺省回落本地 demo 工作区（无 DB 装配的内存/demo 模式语义不变）。
+   */
+  workspaceId?: string;
   runtimeScopeProvider?: Pick<RecordRuntimeScopeRepository, "resolve">;
   /**
    * 批次 T1：初夜状态读取与调度；缺省不启用（内存测试零变化）。
@@ -315,14 +321,27 @@ export async function loadConsistentSnapshot(
   dependencies: LocalRecordReadModelDependencies,
   recordId: string,
   principalId?: string,
+  /**
+   * Slice 2.5：调用方已解析的 runtime scope 作为读取身份来源——携带后
+   * 快照读以 scope 的 workspace/principal 为准（任意 Record 经
+   * runtimeScopeProvider 解析后的真实身份），不再回落演示身份；缺省
+   * 保持本地 demo 回落（无 provider 的内存/demo 模式语义不变）。
+   */
+  scope?: RecordRuntimeScope,
 ): Promise<ConsistentSnapshot> {
+  const workspaceId = scope?.workspaceId
+    ?? dependencies.workspaceId
+    ?? LOCAL_RECORD_SCOPE.workspaceId;
+  const principal = principalId
+    ?? scope?.principalId
+    ?? LOCAL_RECORD_SCOPE.principalId;
   for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt += 1) {
     const before = await dependencies.repository.loadRecordHead(recordId);
     if (!before) throw notInitialized();
     const delivery = await dependencies.projection.loadDeliveryForPlayer({
-      ...LOCAL_RECORD_SCOPE,
+      workspaceId,
       recordId,
-      principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
+      principalId: principal,
     });
     if (!delivery) throw notInitialized();
     const after = await dependencies.repository.loadRecordHead(recordId);
@@ -351,6 +370,10 @@ export async function resolveRuntimeScope(
   recordId: string,
   principalId?: string,
 ): Promise<RecordRuntimeScope> {
+  // Slice 2.5：无 provider 时仅本地 demo Record 可用（demoRecordRuntimeScope
+  // 是本地 demo 模式的唯一回落）；其余 recordId fail-closed NOT_FOUND。
+  // 有 provider 时任意 recordId 均经 provider 解析 scope/principal/viewer
+  // ——本函数不再按演示 ID 白名单放行。
   if (!dependencies.runtimeScopeProvider) {
     if (recordId !== LOCAL_RECORD_SCOPE.recordId) {
       throw new LocalRecordServiceError("NOT_FOUND", "Record not found.");
@@ -358,7 +381,7 @@ export async function resolveRuntimeScope(
     return demoRecordRuntimeScope();
   }
   const scope = await dependencies.runtimeScopeProvider.resolve({
-    workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+    workspaceId: dependencies.workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId,
     principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
     recordId,
   });
@@ -462,7 +485,9 @@ export async function loadConsistentEnvelope(
   const sceneImageQueue = dependencies.sceneImageQueue;
   const firstNight = createFirstNightCoordinator(dependencies.firstNight);
   const [snapshot, affordances, firstNightState, selfPlay, sceneImage, sceneImageJob] = await Promise.all([
-    loadConsistentSnapshot(dependencies, recordId, principalId),
+    // Slice 2.5：快照读复用已解析 scope 的 workspace/principal（任意
+    // Record 的真实身份），不再从演示常量二次派生。
+    loadConsistentSnapshot(dependencies, recordId, principalId, scope),
     listAuthorizedAffordances(actionCatalog, scope),
     firstNight.load(recordId),
     loadSelfPlayState(dependencies, recordId),
@@ -501,7 +526,12 @@ export async function loadConsistentEnvelope(
   return {
     record: snapshot.projection,
     writeToken: tokens.issue(
-      writeScope(recordId, snapshot.viewer.characterInstanceId, principalId),
+      writeScope(
+        recordId,
+        snapshot.viewer.characterInstanceId,
+        principalId ?? scope.principalId,
+        scope.workspaceId,
+      ),
       snapshot.canonicalVersion,
     ),
     viewer: snapshot.viewer,

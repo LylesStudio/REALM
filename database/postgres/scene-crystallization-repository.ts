@@ -113,8 +113,9 @@ export function createPostgresSceneCrystallizationStore(
         database,
         scope.workspaceId,
         async (client) => {
-          // v37 §D.0/§E.1：统一锁序 worlds(KEY SHARE)→records(FOR UPDATE)
-          // →record_heads→worldlines；archived 世界/记录在此拒绝（C 面）。
+          // v37 §D.0/§E.1 + Slice 5 统一锁序：worlds(KEY SHARE)→records
+          // (FOR UPDATE)→worldlines(FOR UPDATE)→record_heads(FOR UPDATE)；
+          // archived 世界/记录在此拒绝（C 面）。
           await gateWorldWrite(client, {
             workspaceId: scope.workspaceId,
             worldId: scope.worldId,
@@ -123,6 +124,20 @@ export function createPostgresSceneCrystallizationStore(
             workspaceId: scope.workspaceId,
             recordId: scope.recordId,
           });
+          // Slice 5：worldlines 显式行锁前移到 record_heads 之前（锁内
+          // 重读存在性）；cursor 语义不变——事件游标仍取自 Record head
+          // 的 last_world_*（本 Record 的已提交因果边界）。
+          const worldlineHead = await client.query<{
+            head_tick: string;
+            head_ordinal: string;
+          }>(
+            `SELECT head_tick, head_ordinal
+             FROM worldlines
+             WHERE workspace_id = $1 AND id = $2
+             FOR UPDATE`,
+            [scope.workspaceId, scope.worldlineId],
+          );
+          if (!worldlineHead.rows[0]) throw new Error("Worldline is missing.");
           const head = await client.query<{
             record_version: string;
             next_record_ordinal: string;
@@ -317,16 +332,8 @@ export function createPostgresSceneCrystallizationStore(
               ordinal.toString(),
             ],
           );
-          // v37 §E.1：head writer 统一显式 FOR UPDATE worldlines
-          //（锁内重读，执行期补显式锁）。
-          const worldlineHead = await client.query(
-            `SELECT head_tick, head_ordinal
-             FROM worldlines
-             WHERE workspace_id = $1 AND id = $2
-             FOR UPDATE`,
-            [scope.workspaceId, scope.worldlineId],
-          );
-          if (!worldlineHead.rows[0]) throw new Error("Worldline is missing.");
+          // Slice 5：worldlines 行锁已在 record_heads 之前取得（统一锁序
+          // worlds→records→worldlines→record_heads）；此处仅推进 head。
           await client.query(
             `UPDATE worldlines
              SET head_tick = $3, head_ordinal = $4, updated_at = CURRENT_TIMESTAMP

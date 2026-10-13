@@ -19,9 +19,17 @@
  *            --new-public-key-file <path> [--not-before <iso>] [--not-after <iso>]
  *            [--revoke-old] [--expire-old <iso>]
  *   revoke   --store <path> --key-id <id> [--not-after <iso>]
+ *   base-status   --store <path>
+ *   base-activate --store <path> --version <semver>
+ *   base-switch   --store <path> --version <semver>
+ *   base-rollback --store <path>
  *
  * rotate adds the replacement key active first; pass --revoke-old and/or
  * --expire-old to retire the previous key (staged rotation is supported).
+ * The base-* commands manage the operator-active engine base content version
+ * recorded in the trust store (the version RealmWorld package
+ * engineCompat.baseRange declarations are evaluated against); targets must be
+ * servable by this engine build.
  * All writes go through the atomic same-directory writer with restrictive
  * permissions; a failed mutation leaves the previous document intact.
  *
@@ -31,11 +39,15 @@ import { readFile } from "node:fs/promises";
 import { RealmWorldTrustStoreError } from "../modules/world-transfer/realmworld-signature.ts";
 import {
   activateRealmWorldTrustStoreKey,
+  activateRealmWorldTrustStoreBase,
   addRealmWorldTrustStoreKey,
   mutateRealmWorldTrustStoreFile,
   readRealmWorldTrustStoreFile,
+  resolveEngineBaseActiveVersion,
   revokeRealmWorldTrustStoreKey,
+  rollbackRealmWorldTrustStoreBase,
   rotateRealmWorldTrustStoreKey,
+  switchRealmWorldTrustStoreBase,
 } from "../modules/world-transfer/realmworld-trust-store.ts";
 
 const USAGE = `usage: realmworld-trust-store <command> [options]
@@ -43,12 +55,17 @@ const USAGE = `usage: realmworld-trust-store <command> [options]
   add --store <path> --key-id <id> --public-key-file <path> [--status active|revoked] [--not-before <iso>] [--not-after <iso>]
   activate --store <path> --key-id <id> [--not-before <iso>] [--not-after <iso>]
   rotate --store <path> --old-key-id <id> --new-key-id <id> --new-public-key-file <path> [--not-before <iso>] [--not-after <iso>] [--revoke-old] [--expire-old <iso>]
-  revoke --store <path> --key-id <id> [--not-after <iso>]`;
+  revoke --store <path> --key-id <id> [--not-after <iso>]
+  base-status --store <path>
+  base-activate --store <path> --version <semver>
+  base-switch --store <path> --version <semver>
+  base-rollback --store <path>`;
 
 const VALUE_FLAGS = new Set([
   "--store",
   "--key-id",
   "--public-key-file",
+  "--version",
   "--status",
   "--not-before",
   "--not-after",
@@ -119,6 +136,14 @@ function report(document, action) {
   }
 }
 
+function reportBase(document, action) {
+  const base = document.base;
+  console.log(
+    `ok: ${action} (base active=${bounded(base?.activeVersion ?? "engine-default")}`
+      + `${base?.previousVersion ? ` previous=${bounded(base.previousVersion)}` : ""})`,
+  );
+}
+
 try {
   const { command, options } = parseArgs(process.argv.slice(2));
   const store = required(options, "--store");
@@ -186,6 +211,31 @@ try {
           notAfter: optional(options, "--not-after"),
         }));
       report(document, `revoked key ${bounded(keyId)}`);
+      break;
+    }
+    case "base-status": {
+      const document = await readRealmWorldTrustStoreFile(store);
+      reportBase(document, `base active version ${bounded(resolveEngineBaseActiveVersion(document))}`);
+      break;
+    }
+    case "base-activate": {
+      const version = required(options, "--version");
+      const document = await mutateRealmWorldTrustStoreFile(store, (current) =>
+        activateRealmWorldTrustStoreBase({ document: current, version }));
+      reportBase(document, `activated base ${bounded(version)}`);
+      break;
+    }
+    case "base-switch": {
+      const version = required(options, "--version");
+      const document = await mutateRealmWorldTrustStoreFile(store, (current) =>
+        switchRealmWorldTrustStoreBase({ document: current, targetVersion: version }));
+      reportBase(document, `switched base to ${bounded(version)}`);
+      break;
+    }
+    case "base-rollback": {
+      const document = await mutateRealmWorldTrustStoreFile(store, (current) =>
+        rollbackRealmWorldTrustStoreBase({ document: current }));
+      reportBase(document, "rolled back base version");
       break;
     }
     default:

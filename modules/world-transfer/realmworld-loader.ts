@@ -21,6 +21,10 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { zipSync, type ZipOptions } from "fflate";
 import {
+  ENGINE_BASE_CONTENT_VERSION,
+  isEngineBaseVersionSatisfied,
+} from "./engine-base.ts";
+import {
   RealmPackError,
   validateStrictZipArchive,
 } from "./realm-pack.ts";
@@ -36,10 +40,21 @@ export type RealmWorldLoaderErrorCode =
   | "SYMLINK_NOT_ALLOWED"
   | "CONTENT_SCHEMA_INVALID"
   | "CONTENT_HASH_MISMATCH"
+  | "BASE_VERSION_INCOMPATIBLE"
   | "SIGNATURE_VERIFIER_REQUIRED"
   | "SIGNATURE_INVALID"
   | "WORLD_NOT_INSTALLED"
   | "INSTALL_CONFLICT";
+
+/**
+ * 引擎 base 内容版本上下文：install/mount/load 均按该版本评估包的
+ * `engineCompat.baseRange`；缺省为当前引擎构建版本。operator 切换/回滚
+ * base 后，路由/worker 以解析出的活动版本显式传入；不兼容一律
+ * fail-closed（BASE_VERSION_INCOMPATIBLE），绝不静默继续。
+ */
+export interface RealmWorldBaseCompatOptions {
+  engineBaseVersion?: string;
+}
 
 export class RealmWorldLoaderError extends Error {
   readonly code: RealmWorldLoaderErrorCode;
@@ -378,6 +393,7 @@ async function verifyLoadedPackage(
   manifestBytes: Uint8Array,
   files: ReadonlyMap<string, Uint8Array>,
   verifySignature?: RealmWorldSignatureVerifier,
+  engineBaseVersion?: string,
 ): Promise<void> {
   const contentHash = computeRealmWorldContentHash(files);
   if (contentHash !== manifest.contentHash) {
@@ -396,6 +412,19 @@ async function verifyLoadedPackage(
   }
   if (!verified) {
     throw new RealmWorldLoaderError("SIGNATURE_INVALID", "RealmWorld signature is invalid");
+  }
+  // base 兼容闸：签名验真之后评估（伪造包得不到任何 compat 信息）；
+  // 区间不匹配当前/活动引擎 base 版本即 fail-closed。
+  if (
+    !isEngineBaseVersionSatisfied(
+      manifest.engineCompat.baseRange,
+      engineBaseVersion ?? ENGINE_BASE_CONTENT_VERSION,
+    )
+  ) {
+    throw new RealmWorldLoaderError(
+      "BASE_VERSION_INCOMPATIBLE",
+      "RealmWorld package is not compatible with the active engine base version",
+    );
   }
 }
 
@@ -442,7 +471,7 @@ export function buildRealmWorldArchive(input: {
 
 export async function loadRealmWorldArchive(
   bytes: Uint8Array,
-  options: { verifySignature?: RealmWorldSignatureVerifier } = {},
+  options: { verifySignature?: RealmWorldSignatureVerifier } & RealmWorldBaseCompatOptions = {},
 ): Promise<LoadedRealmWorldDirectory> {
   let decoded: ReadonlyMap<string, Uint8Array>;
   try {
@@ -475,25 +504,38 @@ export async function loadRealmWorldArchive(
     assertAllowedPackagePath(path);
     files.set(path, fileBytes);
   }
-  await verifyLoadedPackage(manifest, manifestBytes, files, options.verifySignature);
+  await verifyLoadedPackage(
+    manifest,
+    manifestBytes,
+    files,
+    options.verifySignature,
+    options.engineBaseVersion,
+  );
   return { manifest, manifestBytes, rootDir: null, files };
 }
 
 export async function loadRealmWorldDirectory(
   sourceDir: string,
-  options: { verifySignature?: RealmWorldSignatureVerifier } = {},
+  options: { verifySignature?: RealmWorldSignatureVerifier } & RealmWorldBaseCompatOptions = {},
 ): Promise<LoadedRealmWorldDirectory> {
   const rootDir = resolve(sourceDir);
   await assertDirectory(rootDir);
   const { manifest, bytes: manifestBytes } = await loadManifest(rootDir);
   const files = await readPackageFiles(rootDir);
-  await verifyLoadedPackage(manifest, manifestBytes, files, options.verifySignature);
+  await verifyLoadedPackage(
+    manifest,
+    manifestBytes,
+    files,
+    options.verifySignature,
+    options.engineBaseVersion,
+  );
   return { manifest, manifestBytes, rootDir, files };
 }
 
 async function existingInstalledPackage(
   installDir: string,
   verifySignature: RealmWorldSignatureVerifier,
+  engineBaseVersion?: string,
 ): Promise<(LoadedRealmWorldDirectory & { rootDir: string }) | null> {
   try {
     const stats = await lstat(installDir);
@@ -508,7 +550,7 @@ async function existingInstalledPackage(
     if (errorCode(error) === "ENOENT") return null;
     throw new RealmWorldLoaderError("INSTALL_CONFLICT", "installed RealmWorld cannot be inspected");
   }
-  return loadRealmWorldDirectory(installDir, { verifySignature }) as Promise<
+  return loadRealmWorldDirectory(installDir, { verifySignature, engineBaseVersion }) as Promise<
     LoadedRealmWorldDirectory & { rootDir: string }
   >;
 }
@@ -517,6 +559,7 @@ async function installLoadedRealmWorld(input: {
   loaded: LoadedRealmWorldDirectory;
   installRoot: string;
   verifySignature: RealmWorldSignatureVerifier;
+  engineBaseVersion?: string;
 }): Promise<InstalledRealmWorld> {
   const installRoot = resolve(input.installRoot);
   await mkdir(installRoot, { recursive: true });
@@ -525,7 +568,11 @@ async function installLoadedRealmWorld(input: {
   await mkdir(worldRoot, { recursive: true });
   await assertDirectory(worldRoot);
   const installDir = join(worldRoot, input.loaded.manifest.worldVersion);
-  const existing = await existingInstalledPackage(installDir, input.verifySignature);
+  const existing = await existingInstalledPackage(
+    installDir,
+    input.verifySignature,
+    input.engineBaseVersion,
+  );
   if (existing) {
     if (existing.manifest.contentHash !== input.loaded.manifest.contentHash) {
       throw new RealmWorldLoaderError("INSTALL_CONFLICT", "different content already installed at World identity");
@@ -546,12 +593,17 @@ async function installLoadedRealmWorld(input: {
     }
     const verified = await loadRealmWorldDirectory(temporaryDir, {
       verifySignature: input.verifySignature,
+      engineBaseVersion: input.engineBaseVersion,
     });
     try {
       await rename(temporaryDir, installDir);
     } catch (error) {
       if (errorCode(error) !== "EEXIST" && errorCode(error) !== "ENOTEMPTY") throw error;
-      const raced = await existingInstalledPackage(installDir, input.verifySignature);
+      const raced = await existingInstalledPackage(
+        installDir,
+        input.verifySignature,
+        input.engineBaseVersion,
+      );
       if (!raced || raced.manifest.contentHash !== verified.manifest.contentHash) {
         throw new RealmWorldLoaderError("INSTALL_CONFLICT", "World identity was installed concurrently");
       }
@@ -567,17 +619,20 @@ export async function installRealmWorldDirectory(input: {
   sourceDir: string;
   installRoot: string;
   verifySignature?: RealmWorldSignatureVerifier;
+  engineBaseVersion?: string;
 }): Promise<InstalledRealmWorld> {
   if (!input.verifySignature) {
     throw new RealmWorldLoaderError("SIGNATURE_VERIFIER_REQUIRED", "RealmWorld signature verifier is required");
   }
   const loaded = await loadRealmWorldDirectory(input.sourceDir, {
     verifySignature: input.verifySignature,
+    engineBaseVersion: input.engineBaseVersion,
   });
   return installLoadedRealmWorld({
     loaded,
     installRoot: input.installRoot,
     verifySignature: input.verifySignature,
+    engineBaseVersion: input.engineBaseVersion,
   });
 }
 
@@ -585,17 +640,20 @@ export async function installRealmWorldArchive(input: {
   archiveBytes: Uint8Array;
   installRoot: string;
   verifySignature?: RealmWorldSignatureVerifier;
+  engineBaseVersion?: string;
 }): Promise<InstalledRealmWorld> {
   if (!input.verifySignature) {
     throw new RealmWorldLoaderError("SIGNATURE_VERIFIER_REQUIRED", "RealmWorld signature verifier is required");
   }
   const loaded = await loadRealmWorldArchive(input.archiveBytes, {
     verifySignature: input.verifySignature,
+    engineBaseVersion: input.engineBaseVersion,
   });
   return installLoadedRealmWorld({
     loaded,
     installRoot: input.installRoot,
     verifySignature: input.verifySignature,
+    engineBaseVersion: input.engineBaseVersion,
   });
 }
 
@@ -604,6 +662,7 @@ export async function mountRealmWorld(input: {
   worldId: string;
   worldVersion: string;
   verifySignature?: RealmWorldSignatureVerifier;
+  engineBaseVersion?: string;
 }): Promise<LoadedRealmWorldDirectory> {
   if (!input.verifySignature) {
     throw new RealmWorldLoaderError("SIGNATURE_VERIFIER_REQUIRED", "RealmWorld signature verifier is required");
@@ -623,5 +682,8 @@ export async function mountRealmWorld(input: {
     }
     throw new RealmWorldLoaderError("INVALID_PACKAGE", "installed RealmWorld cannot be inspected");
   }
-  return loadRealmWorldDirectory(installDir, { verifySignature: input.verifySignature });
+  return loadRealmWorldDirectory(installDir, {
+    verifySignature: input.verifySignature,
+    engineBaseVersion: input.engineBaseVersion,
+  });
 }

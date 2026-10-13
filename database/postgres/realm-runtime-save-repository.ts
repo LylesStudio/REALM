@@ -42,6 +42,7 @@ export type RealmRuntimeSaveRepositoryErrorCode =
   | "REALMWORLD_PACKAGE_MISSING"
   | "REALMWORLD_PACKAGE_UNTRUSTED"
   | "REALMWORLD_IDENTITY_MISMATCH"
+  | "BASE_VERSION_INCOMPATIBLE"
   | "RUNTIME_SAVE_INVALID"
   | "RUNTIME_SAVE_FAILED";
 
@@ -128,6 +129,14 @@ export interface RealmRuntimeSaveRestorerOptions {
    * bypass package trust verification. Base saves never invoke it.
    */
   validateWorldBinding?: RealmRuntimeSaveWorldBindingValidator;
+  /**
+   * Base→world-bound 升级路径（Slice 5）：base 存档显式恢复到非 base 版本
+   * 的目标 World 时，在任何写入前验证目标精确 binding（已安装、验签/
+   * content-hash 有效、当前可信且 engineCompat.baseRange 兼容活动 base
+   * 版本）。base→base 恢复绝不调用；缺 seam 而目标 world-bound 时
+   * fail-closed（REALMWORLD_VALIDATION_UNAVAILABLE）。
+   */
+  validateUpgradeTarget?: RealmRuntimeSaveWorldBindingValidator;
 }
 
 interface RecordRow extends QueryResultRow {
@@ -2220,6 +2229,50 @@ export function createPostgresRealmRuntimeSaveRestorer(
           );
         }
       }
+      // Base→world-bound 升级闸：base 存档显式指向非 base 版本的目标
+      // World 时，目标精确 binding（worldId + 目标 World 当前版本）必须先
+      // 证明为已安装、验签有效且与活动引擎 base 版本兼容——在任何 restore
+      // 写入（含幂等重放短路）之前 fail-closed。版本在事务外预读、事务内
+      // FOR KEY SHARE 复核，漂移即 RESTORE_CONFLICT。
+      let upgradeTargetBinding: RealmRuntimeSaveWorldBinding | null = null;
+      if (input.archive.manifest.mode === "base") {
+        // 预读在独立只读 workspace 事务内执行（RLS GUC 作用域要求）。
+        const preWorld = await withWorkspaceTransaction(
+          database,
+          input.workspaceId,
+          async (client) => {
+            const preRead = await client.query<{ world_version: string }>(
+              `SELECT world_version
+               FROM worlds
+               WHERE workspace_id = $1 AND id = $2`,
+              [input.workspaceId, targetWorldId],
+            );
+            return preRead.rows[0] ?? null;
+          },
+          { readOnly: true },
+        );
+        if (preWorld && preWorld.world_version !== LOCAL_WORLD_VERSION) {
+          if (!options.validateUpgradeTarget) {
+            throw new RealmRuntimeSaveRepositoryError(
+              "REALMWORLD_VALIDATION_UNAVAILABLE",
+              "RealmWorld package validation is not configured.",
+            );
+          }
+          upgradeTargetBinding = {
+            worldId: targetWorldId,
+            worldVersion: preWorld.world_version,
+          };
+          try {
+            await options.validateUpgradeTarget(upgradeTargetBinding);
+          } catch (error) {
+            if (error instanceof RealmRuntimeSaveRepositoryError) throw error;
+            throw new RealmRuntimeSaveRepositoryError(
+              "REALMWORLD_PACKAGE_UNTRUSTED",
+              "RealmWorld package validation failed.",
+            );
+          }
+        }
+      }
       const token = restoreIdempotencyToken(input, targetWorldId);
       const targetRecordId = `record_restore_${token}`;
       const targetWorldlineId = `worldline_restore_${token}`;
@@ -2307,10 +2360,17 @@ export function createPostgresRealmRuntimeSaveRestorer(
           throw new RealmRuntimeSaveRepositoryError("WORLD_NOT_FOUND", "World not found.");
         }
         if (input.archive.manifest.mode === "base" && world.world_version !== LOCAL_WORLD_VERSION) {
-          throw new RealmRuntimeSaveRepositoryError(
-            "RESTORE_INVALID_TARGET",
-            "A base save requires a base-version World.",
-          );
+          // 升级路径：仅当事务外预读的 binding 与本事务锁定读一致才允许；
+          // 版本漂移 fail-closed（RESTORE_CONFLICT），绝不绑定未验证版本。
+          if (
+            !upgradeTargetBinding
+            || upgradeTargetBinding.worldVersion !== world.world_version
+          ) {
+            throw new RealmRuntimeSaveRepositoryError(
+              "RESTORE_CONFLICT",
+              "Target world version changed during restore.",
+            );
+          }
         }
         const versionMismatch = input.archive.manifest.mode === "world-bound"
           && input.archive.manifest.world?.worldVersion !== world.world_version;
@@ -2429,7 +2489,10 @@ export function createPostgresRealmRuntimeSaveRestorer(
         );
         // Phase 4D：恢复出的 Record 绑定=存档 manifest 记录的制作版本
         //（base 存档=哨兵；world-bound=存档版本），绝不取目标世界当前值。
+        // Slice 5 升级路径例外：base→world-bound 显式升级绑定事务内锁定
+        // 复核过的目标 World 版本（upgradeTargetBinding）。
         const restoredWorldVersion = input.archive.manifest.world?.worldVersion
+          ?? upgradeTargetBinding?.worldVersion
           ?? LOCAL_WORLD_VERSION;
         await client.query(
           `INSERT INTO records (

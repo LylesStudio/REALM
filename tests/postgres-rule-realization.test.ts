@@ -470,7 +470,7 @@ test(
       return result.rows[0]!;
     }
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const kit = initial.affordances.find((item) => item.id === "asset.travel_kit");
     assert.ok(kit, "travel_kit should be listed before use");
     assert.match(kit!.description, /剩余 2 次/);

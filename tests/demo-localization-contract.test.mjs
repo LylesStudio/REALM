@@ -1,8 +1,12 @@
 /**
- * 演示世界多语化契约：
+ * 演示世界多语化契约（内容解析层版本）：
  * - app/demo-content.ts 的 DEMO_IDS 必须与 database/postgres/demo-seed.ts
  *   的 POSTGRES_DEMO_IDS 一致（按 id 匹配的根基）；
- * - ui.demo.* 的 zh 值必须与种子原文逐字一致（防键表与种子漂移）；
+ * - 演示世界文案的唯一事实来源是内容解析层 base bundle "ember-coast"
+ *   （modules/content-resolution）；zh-CN 规范值必须与本文件的锚定原文
+ *   逐字一致（防内容层漂移）；
+ * - demo-seed.ts 必须经 base resolver 取内容（兼容 shim），不得回退为
+ *   硬编码文案；
  * - 助手对演示 id 返回三语不同文本，对非演示实体原样透传（同引用）。
  */
 
@@ -17,7 +21,7 @@ const readProjectFile = (relativePath) =>
   readFileSync(join(projectRoot, relativePath), "utf8");
 
 const seedSource = readProjectFile("database/postgres/demo-seed.ts");
-const definitionsSource = readProjectFile("modules/actions/demo-definitions.ts");
+const demoContentSource = readProjectFile("app/demo-content.ts");
 
 test("DEMO_IDS stay in lockstep with POSTGRES_DEMO_IDS", async () => {
   const { DEMO_IDS } = await import("../app/demo-content.ts");
@@ -34,43 +38,61 @@ test("DEMO_IDS stay in lockstep with POSTGRES_DEMO_IDS", async () => {
   assert.deepEqual({ ...DEMO_IDS }, expected);
 });
 
-test("ui.demo.* zh values match the seed literals verbatim", async () => {
-  const { uiMessageTable } = await import("../modules/i18n/public.ts");
+test("base content layer owns the canonical demo texts (zh-CN verbatim anchors)", async () => {
+  const { BASE_CONTENT_RESOLVER } = await import("../modules/content-resolution/base-resolver.ts");
+  const { BASE_DEMO_CONTENT_KEY } = await import("../modules/content-resolution/base-content-data.ts");
+  const { baseContentRequestBase } = await import("../modules/content-resolution/public.ts");
+  const scope = baseContentRequestBase("zh-CN", BASE_DEMO_CONTENT_KEY);
+  const messages = BASE_CONTENT_RESOLVER.resolveMessages(scope);
+  assert.ok(messages, "demo message bundle must resolve");
   const pairs = [
-    ["ui.demo.worldName", "烬海诸国"],
-    ["ui.demo.worldSummary", "人魔停战十七年后，海上的无声钟再次响起。"],
-    ["ui.demo.worldEra", "停战纪元 17 年"],
-    ["ui.demo.worldWeather", "冷雾，无风"],
-    ["ui.demo.worldTension", "钟声已经响过三次"],
-    ["ui.demo.worldDisplayTime", "停战纪元17年 · 雾月12日 · 入夜"],
-    ["ui.demo.worldlineLabel", "原初世界线"],
-    ["ui.demo.storyTitle", "无声钟的来客"],
-    ["ui.demo.storyPremise", "北岸灯塔在无风夜自行点亮，一封不属于任何阵营的密函被送上岸。"],
-    ["ui.demo.recordTitle", "第一幕 · 雾港来信"],
-    ["ui.demo.sceneLocation", "灰鲸港 · 北防波堤"],
-    ["ui.demo.sceneObjective", "决定是否当众拆开密函"],
-    ["ui.demo.charPlayerRole", "人类使节"],
-    ["ui.demo.charPlayerSummary", "停战议会派来的年轻调停人。"],
-    ["ui.demo.charScoutRole", "港卫斥候"],
-    ["ui.demo.charScoutSummary", "熟悉灰鲸港每一条暗巷，对异常极度警觉。"],
-    ["ui.demo.charScholarRole", "魔族铭文学者"],
-    ["ui.demo.charScholarSummary", "温和寡言，能辨认战前的禁忌铭文。"],
-    ["ui.demo.narrator", "旁白"],
+    ["world.name", "烬海诸国"],
+    ["world.summary", "人魔停战十七年后，海上的无声钟再次响起。"],
+    ["world.era", "停战纪元 17 年"],
+    ["world.weather", "冷雾，无风"],
+    ["world.tension", "钟声已经响过三次"],
+    ["world.displayTime", "停战纪元17年 · 雾月12日 · 入夜"],
+    ["worldline.origin.label", "原初世界线"],
+    ["story.title", "无声钟的来客"],
+    ["story.premise", "北岸灯塔在无风夜自行点亮，一封不属于任何阵营的密函被送上岸。"],
+    ["record.title", "第一幕 · 雾港来信"],
+    ["scene.location", "灰鲸港 · 北防波堤"],
+    ["scene.objective", "决定是否当众拆开密函"],
+    ["character.player.role", "人类使节"],
+    ["character.player.summary", "停战议会派来的年轻调停人。"],
+    ["character.scout.role", "港卫斥候"],
+    ["character.scout.summary", "熟悉灰鲸港每一条暗巷，对异常极度警觉。"],
+    ["character.scholar.role", "魔族铭文学者"],
+    ["character.scholar.summary", "温和寡言，能辨认战前的禁忌铭文。"],
+    ["opening.speaker", "旁白"],
   ];
   for (const [key, expected] of pairs) {
-    const table = uiMessageTable(key);
-    assert.ok(table, `${key} 缺失`);
-    assert.equal(table["zh-CN"], expected, `${key} zh 值与种子原文漂移`);
-    assert.ok(table.en.trim().length > 0, `${key} en 为空`);
-    assert.ok(table.ja.trim().length > 0, `${key} ja 为空`);
+    assert.equal(messages[key], expected, `${key} zh 规范值漂移`);
   }
-  // 种子原文必须仍存在于种子/定义源（本地化不回写 DB，锚定两边同源）。
-  for (const literal of pairs.map(([, value]) => value)) {
+  // en/ja 必须非空且与 zh 不同（角色名等专有名词除外）。
+  for (const language of ["en", "ja"]) {
+    const localized = BASE_CONTENT_RESOLVER.resolveMessages(
+      baseContentRequestBase(language, BASE_DEMO_CONTENT_KEY),
+    );
+    for (const [key, zhValue] of pairs) {
+      assert.ok(localized[key].trim().length > 0, `${key}/${language} 为空`);
+      assert.notEqual(localized[key], zhValue, `${key}/${language} 未翻译`);
+    }
+  }
+});
+
+test("demo seed is a compatibility shim over the base content layer", () => {
+  // shim 必须经内容解析层取内容，且不再硬编码世界文案原文。
+  assert.match(seedSource, /content-resolution\/base-resolver\.ts/);
+  assert.match(seedSource, /content-resolution\/base-content-data\.ts/);
+  for (const literal of ["烬海诸国", "无声钟的来客", "灰鲸港 · 北防波堤"]) {
     assert.ok(
-      seedSource.includes(literal) || definitionsSource.includes(literal),
-      `种子/定义源中找不到原文：${literal}`,
+      !seedSource.includes(literal),
+      `demo-seed 不得硬编码世界文案：${literal}`,
     );
   }
+  // 渲染层映射只引用内容层消息键，不再经过 ui.demo.* 界面文案层。
+  assert.ok(!demoContentSource.includes("ui.demo."), "demo-content 不得再引用 ui.demo.* 键");
 });
 
 test("demo helpers localize demo entities and pass through everything else", async () => {

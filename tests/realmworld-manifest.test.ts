@@ -20,6 +20,7 @@ const validManifest: RealmWorldManifestV1 = {
       "0054_world_version_identity.sql",
       "0055_goal_runtime.sql",
     ],
+    baseRange: ">=1.0.0 <2.0.0",
   },
   contentHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   signature: {
@@ -37,7 +38,7 @@ test("RealmWorld manifest serializes with a frozen canonical shape and round-tri
   const bytes = serializeRealmWorldManifest(validManifest);
   assert.equal(
     bytes,
-    '{"format":"realmworld","formatVersion":1,"worldId":"world-harbor","worldVersion":"1.2.0","engineCompat":{"schemaLatest":"0055_goal_runtime.sql","requiresMigrations":["0054_world_version_identity.sql","0055_goal_runtime.sql"]},"contentHash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":{"algorithm":"ed25519","keyId":"realmworld-key-1","value":"signature-value"},"webui":{"entry":"ui/index.html","bridgeMajor":1}}',
+    '{"format":"realmworld","formatVersion":1,"worldId":"world-harbor","worldVersion":"1.2.0","engineCompat":{"schemaLatest":"0055_goal_runtime.sql","requiresMigrations":["0054_world_version_identity.sql","0055_goal_runtime.sql"],"baseRange":">=1.0.0 <2.0.0"},"contentHash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","signature":{"algorithm":"ed25519","keyId":"realmworld-key-1","value":"signature-value"},"webui":{"entry":"ui/index.html","bridgeMajor":1}}',
   );
   assert.deepEqual(parseRealmWorldManifest(bytes), validManifest);
 });

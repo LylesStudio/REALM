@@ -475,6 +475,175 @@ test(
 );
 
 test(
+  "semantic Goal e2e: rejected verdict settles with an immutable ledger row and no Goal fact",
+  { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
+  async (t) => {
+    const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    const suffix = randomUUID().replaceAll("-", "");
+    const goalInstanceId = `goal_sem_rej_${suffix}`;
+    const jobId = `goal_job_sem_rej_${suffix}`;
+    const leaseOwner = `test-semantic-worker-${suffix}`;
+    const definition = semanticDefinition(goalInstanceId);
+    t.after(async () => {
+      await cleanup(ownerPool, [goalInstanceId]);
+      await runtimePool.end();
+      await ownerPool.end();
+    });
+
+    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
+    const committedEvents = await readCommittedEvents(ownerPool);
+    assert.ok(committedEvents.length > 0);
+    const headBefore = await readRecordHead(ownerPool);
+    const evidenceEvent = committedEvents[0]!;
+    const sourceEventId = committedEvents[committedEvents.length - 1]!.eventId;
+
+    const queue = createPostgresGoalAssessmentJobQueue({
+      pool: runtimePool,
+      workspaceId: POSTGRES_DEMO_IDS.workspace,
+      leaseOwner,
+      leaseDurationMs: 30_000,
+    });
+    assert.equal(
+      await queue.enqueue(enqueueInput(goalInstanceId, jobId, sourceEventId)),
+      "inserted",
+    );
+
+    // The Judge decides the Goal is not yet satisfied: the worker settles a
+    // rejected decision (ledger evidence, no transition, no instance change).
+    const gateway = fakeGateway(async () => ({
+      content: JSON.stringify({
+        decision: "continue",
+        evidenceEventIds: [evidenceEvent.eventId],
+        progress: { verdict: "not yet satisfied" },
+        outcome: null,
+      }),
+    }));
+    const judge = createModelGoalJudge({ getGateway: async () => gateway });
+
+    const reports = await runGoalAssessmentWorkerCycle({
+      slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
+      resolveDefinition: async () => definition,
+      judge,
+      now: now(),
+    });
+    assert.deepEqual(reports.get(POSTGRES_DEMO_IDS.workspace), {
+      kind: "settled",
+      status: "rejected",
+    });
+    assert.equal(gateway.requests.length, 1);
+
+    // The rejected settle writes exactly one immutable assessment ledger row
+    // chained to the real committed source event and observed head.
+    const assessment = await ownerPool.query<{
+      id: string;
+      assessment_job_id: string | null;
+      source_event_id: string;
+      source: string;
+      status: string;
+      result: Record<string, JsonValue>;
+      evidence_event_ids: string[];
+      evidence_head_version: string | number | null;
+      evidence_head_ordinal: string | number | null;
+      evidence_snapshot_hash: string;
+      policy_version: string;
+    } & pg.QueryResultRow>(
+      `SELECT id, assessment_job_id, source_event_id, source, status, result,
+              evidence_event_ids, evidence_head_version, evidence_head_ordinal,
+              evidence_snapshot_hash, policy_version
+       FROM goal_assessments WHERE workspace_id = $1 AND goal_instance_id = $2`,
+      [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
+    );
+    assert.equal(assessment.rowCount, 1);
+    const assessmentRow = assessment.rows[0]!;
+    assert.equal(assessmentRow.id, `goal-assessment:${jobId}:1`);
+    assert.equal(assessmentRow.assessment_job_id, jobId);
+    assert.equal(assessmentRow.source, "judge");
+    assert.equal(assessmentRow.status, "rejected");
+    assert.deepEqual(assessmentRow.result, { kind: "rejected", decision: "continue" });
+    assert.equal(assessmentRow.source_event_id, sourceEventId);
+    assert.deepEqual(assessmentRow.evidence_event_ids, [evidenceEvent.eventId]);
+    assert.equal(Number(assessmentRow.evidence_head_version), headBefore.recordVersion);
+    assert.equal(Number(assessmentRow.evidence_head_ordinal), headBefore.ordinal);
+    assert.match(assessmentRow.evidence_snapshot_hash, /^[0-9a-f]{64}$/);
+    assert.equal(assessmentRow.policy_version, definition.policyVersion);
+    await assert.rejects(
+      ownerPool.query(
+        `UPDATE goal_assessments SET result = '{}'::jsonb
+         WHERE workspace_id = $1 AND goal_instance_id = $2`,
+        [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
+      ),
+      /immutable evidence/,
+    );
+
+    // The durable job row is settled clean: completed, lease cleared, and —
+    // critically for the rejected path — NULL error columns (regression: the
+    // settle UPDATE must type its nullable error parameter explicitly).
+    const jobRow = await ownerPool.query<{
+      state: string;
+      lease_owner: string | null;
+      lease_expires_at: string | null;
+      last_error_code: string | null;
+      last_error_message: string | null;
+      completed_at: string | null;
+    } & pg.QueryResultRow>(
+      `SELECT state, lease_owner, lease_expires_at,
+              last_error_code, last_error_message, completed_at
+       FROM goal_assessment_jobs WHERE workspace_id = $1 AND id = $2`,
+      [POSTGRES_DEMO_IDS.workspace, jobId],
+    );
+    assert.equal(jobRow.rows[0]?.state, "completed");
+    assert.equal(jobRow.rows[0]?.lease_owner, null);
+    assert.equal(jobRow.rows[0]?.lease_expires_at, null);
+    assert.equal(jobRow.rows[0]?.last_error_code, null);
+    assert.equal(jobRow.rows[0]?.last_error_message, null);
+    assert.ok(jobRow.rows[0]?.completed_at !== null);
+
+    // No Goal fact: the instance stays active, no transition event commits,
+    // and the record head does not advance.
+    const instance = await ownerPool.query<{
+      state: string;
+      revision: string | number;
+      progress: Record<string, JsonValue>;
+      completed_at: string | null;
+    } & pg.QueryResultRow>(
+      `SELECT state, revision, progress, completed_at
+       FROM goal_instances WHERE workspace_id = $1 AND id = $2`,
+      [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
+    );
+    assert.equal(instance.rows[0]?.state, "active");
+    assert.equal(Number(instance.rows[0]?.revision), 0);
+    assert.deepEqual(instance.rows[0]?.progress, {});
+    assert.equal(instance.rows[0]?.completed_at, null);
+    const transitionCount = await ownerPool.query<{ n: number } & pg.QueryResultRow>(
+      `SELECT count(*)::int AS n FROM events
+       WHERE workspace_id = $1 AND event_kind = 'goal.transition.committed'
+         AND payload -> '__realmRuntimePayload' ->> 'goalInstanceId' = $2`,
+      [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
+    );
+    assert.equal(transitionCount.rows[0]?.n, 0);
+    assert.deepEqual(await readRecordHead(ownerPool), headBefore);
+
+    // Re-running the cycle neither re-claims the settled job nor duplicates
+    // the ledger row.
+    const idleReports = await runGoalAssessmentWorkerCycle({
+      slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
+      resolveDefinition: async () => definition,
+      judge,
+      now: now(),
+    });
+    assert.deepEqual(idleReports.get(POSTGRES_DEMO_IDS.workspace), { kind: "idle" });
+    assert.equal(gateway.requests.length, 1, "no second model call for a settled job");
+    const assessmentCount = await ownerPool.query<{ n: number } & pg.QueryResultRow>(
+      `SELECT count(*)::int AS n FROM goal_assessments
+       WHERE workspace_id = $1 AND goal_instance_id = $2`,
+      [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
+    );
+    assert.equal(assessmentCount.rows[0]?.n, 1);
+  },
+);
+
+test(
   "semantic Goal e2e: provider failure fails closed with GOAL_JUDGE_FAILED and writes no Goal fact",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {

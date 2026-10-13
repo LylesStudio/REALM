@@ -265,7 +265,7 @@ test("service path: MODEL_AUTH_FAILED → disposition failed + 诊断 code 保�
       getGateway: async () => counting,
     }),
   });
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await assert.rejects(
     service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
@@ -451,7 +451,7 @@ test("service path: 连接失败 → TURN_FAILED + 诊断 code/文案指引检�
       getGateway: async () => counting,
     }),
   });
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await assert.rejects(
     service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,

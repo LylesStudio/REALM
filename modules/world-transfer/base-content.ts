@@ -1,6 +1,6 @@
 import type { GoalDefinition } from "../goals/public.ts";
 import type { JsonValue } from "../runtime/public.ts";
-import { LOCAL_WORLD_VERSION } from "./realm-save.ts";
+import { ENGINE_BASE_WORLD } from "./engine-base.ts";
 
 export interface BaseGoalDefinitionRequest {
   worldId: string;
@@ -48,7 +48,7 @@ export function createBaseGoalDefinitionResolver(
     byKey.set(definition.goalKey, definition);
   }
   return (request) => {
-    if (request.worldVersion !== LOCAL_WORLD_VERSION) return null;
+    if (request.worldVersion !== ENGINE_BASE_WORLD.worldVersion) return null;
     return byKey.get(request.goalKey) ?? null;
   };
 }
@@ -313,8 +313,8 @@ export function createBaseInstantiationPlan(
     seenGoalKeys.add(rawKey);
     // base binding 下 worldId 不参与绑定（§6）；哨兵版本是唯一合法通道。
     const definition = resolveGoal({
-      worldId: "",
-      worldVersion: LOCAL_WORLD_VERSION,
+      worldId: ENGINE_BASE_WORLD.worldId,
+      worldVersion: ENGINE_BASE_WORLD.worldVersion,
       goalKey: rawKey,
     });
     if (!definition) {

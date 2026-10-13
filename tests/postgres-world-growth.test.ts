@@ -228,7 +228,7 @@ test(
     const baselineScenes = await sceneCount();
 
     // ---- 回合 1（公开）：growth 写回 world_claims + profileNotes ----
-    const first = await service.loadRecord();
+    const first = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const turn1 = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "塞娜说她认得灯塔上的刻痕。",
@@ -345,7 +345,7 @@ test(
     );
 
     // ---- 回合 2（公开，同一提取结果）：重复调度幂等 ----
-    const second = await service.loadRecord();
+    const second = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const turn2 = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "塞娜又提起灯塔的刻痕。",
@@ -364,7 +364,7 @@ test(
     assert.equal((await profileNotes()).length, 1, "重复 note 精确去重");
 
     // ---- 回合 3（restricted）：不产生公共增长 ----
-    const third = await service.loadRecord();
+    const third = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     let proposalId = "";
     await assert.rejects(
       service.submitMessage({

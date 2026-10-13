@@ -54,6 +54,7 @@ async function createFixture(root: string, options: { signature?: string } = {})
     engineCompat: {
       schemaLatest: "0055_goal_runtime.sql",
       requiresMigrations: ["0055_goal_runtime.sql"],
+      baseRange: ">=1.0.0 <2.0.0",
     },
     contentHash: computeRealmWorldContentHash(files),
     signature: {

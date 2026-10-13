@@ -244,6 +244,14 @@ export function createPostgresWorldlineMergeRepository(
                FROM record_self_play_sessions
                WHERE workspace_id = $1 AND world_id = $2 AND record_id = ANY($4)
                UNION ALL
+               -- 统一 durable job 队列（0058，无 worldline 列，按 record
+               -- 归属）：只有在途行（pending/claimed）不可安全重映射——
+               -- 合并后它们会对源 Record 作用域触发，必须 fail-closed。
+               SELECT record_id, 'durable_jobs' AS reason
+               FROM realm_durable_jobs
+               WHERE workspace_id = $1 AND record_id = ANY($4)
+                 AND state IN ('pending', 'claimed')
+               UNION ALL
                -- 记忆运行态以世界线为作用域（observer continuity）：任一
                -- 存在即归属到该世界线全部 Record（整体拒绝，报告全覆盖）。
                SELECT source_record.id, 'memory_conclusions'

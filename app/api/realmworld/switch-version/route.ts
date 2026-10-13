@@ -101,6 +101,7 @@ export async function POST(request: Request): Promise<Response> {
     installRoot: verifier.installRoot,
     verifySignature: verifier.verifySignature,
     locale: "zh-CN",
+    engineBaseVersion: verifier.engineBaseVersion,
   });
   const service = createRealmWorldBindingService({
     database: getSharedRuntimePool(runtimeUrl),
@@ -129,6 +130,9 @@ export async function POST(request: Request): Promise<Response> {
     );
   } catch (error) {
     if (error instanceof RealmWorldLoaderError) {
+      if (error.code === "BASE_VERSION_INCOMPATIBLE") {
+        return errorResponse("BASE_VERSION_INCOMPATIBLE", "RealmWorld package is not compatible with the active engine base version.", 409);
+      }
       return errorResponse(error.code, "RealmWorld target content is not installed or trusted.", 503);
     }
     if (error instanceof RealmWorldRuntimeContentError) {

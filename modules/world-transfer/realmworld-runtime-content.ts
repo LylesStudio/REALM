@@ -313,6 +313,7 @@ export function createInstalledRealmWorldInstantiationResolver(input: {
   installRoot: string;
   verifySignature: RealmWorldSignatureVerifier;
   locale: string;
+  engineBaseVersion?: string;
 }): (binding: WorldBinding) => Promise<RealmWorldRuntimeInstantiationPlan | null> {
   return createRealmWorldInstantiationResolver({
     locale: input.locale,
@@ -322,6 +323,7 @@ export function createInstalledRealmWorldInstantiationResolver(input: {
         worldId: binding.worldId,
         worldVersion: binding.worldVersion,
         verifySignature: input.verifySignature,
+        engineBaseVersion: input.engineBaseVersion,
       }),
     },
   });

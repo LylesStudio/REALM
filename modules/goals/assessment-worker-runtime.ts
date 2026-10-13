@@ -71,6 +71,8 @@ export function createGoalAssessmentWorkerRuntime(options: {
   workspaces: readonly string[];
   judge?: GoalJudge;
   baseResolver?: (job: RealmWorldDefinitionResolutionJob) => GoalDefinition | null | Promise<GoalDefinition | null>;
+  /** operator 活动 base 内容版本（包兼容闸）；缺省引擎当前版本。 */
+  engineBaseVersion?: string;
   leaseDurationMs?: number;
   retryDelayMs?: number;
   idleMinMs?: number;
@@ -124,6 +126,7 @@ export function createGoalAssessmentWorkerRuntime(options: {
     installRoot,
     verifySignature: options.verifySignature,
     baseResolver: options.baseResolver ?? resolveBaseGoalDefinition,
+    engineBaseVersion: options.engineBaseVersion,
   });
   const slots = workspaces.map((workspaceId) => ({
     workspaceId,

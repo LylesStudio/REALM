@@ -12,6 +12,13 @@ export {
   type PostgresWorldCursor,
   type PostgresWorldCursorAllocationContext,
 } from "./runtime-repository.ts";
+export {
+  createPostgresWorldCommandRepository,
+  type PostgresWorldCommandRepository,
+  type PostgresWorldCommandRepositoryHooks,
+  type PostgresWorldCommandRepositoryOptions,
+  type WorldCommandRecordScope,
+} from "./world-command-repository.ts";
 
 export {
   createPostgresDeliveryProjectionRepository,
@@ -70,6 +77,7 @@ export {
   createPostgresCharacterSkillProvider,
 } from "./action-state.ts";
 export {
+  createPostgresRuleDefinitionProvider,
   createPostgresRulePack,
   type PostgresRulePackScope,
 } from "./rule-pack.ts";
@@ -115,6 +123,10 @@ export {
   type PropagationTopologySnapshot,
 } from "./propagation-topology.ts";
 export { createPostgresPropagationJobQueue } from "./propagation-job-queue.ts";
+export {
+  createPostgresDurableJobQueue,
+  DurableJobQueueError,
+} from "./durable-job-queue.ts";
 export { createPostgresSemanticConflictEvidenceStore } from "./semantic-conflict-repository.ts";
 export {
   AccountAuthError,

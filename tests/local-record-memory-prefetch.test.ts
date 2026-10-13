@@ -384,7 +384,7 @@ test("普通回合：begin 先于编排、按既有角色顺序 consume、end �
     onDraft: (observation) => drafts.push(observation),
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -427,7 +427,7 @@ test("replay 回合不发起预取（无模型调用）", async () => {
   const spy = createPrefetchSpy();
   const { service } = createFixture({ memoryPrefetch: spy });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "先不要拆信。",
@@ -467,7 +467,7 @@ test("回合失败/异常：finally 一律 end 清理预取会话", async () => 
     memoryPrefetch: spy,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await assert.rejects(
     service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
@@ -498,7 +498,7 @@ test("插话回合：开始即 begin 自有会话、按 record/角色语义消�
     onDraft: (observation) => drafts.push(observation),
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "塞娜，你怎么看这封信？",
@@ -543,7 +543,7 @@ test("fail-closed：recall 永久 pending 时 consume 返回空串——回合�
     onDraft: (observation) => drafts.push(observation),
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -571,7 +571,7 @@ test("fail-closed：recall 拒绝时 consume 返回空串——回合照常提�
     onDraft: (observation) => drafts.push(observation),
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",

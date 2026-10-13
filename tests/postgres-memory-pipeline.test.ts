@@ -404,7 +404,7 @@ test(
       }),
     });
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const committed = await service.submitMessage({
       recordId: POSTGRES_DEMO_IDS.record,
       content: "先不要拆信，检查信使离开的方向。",

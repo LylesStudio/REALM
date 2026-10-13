@@ -70,6 +70,7 @@ export function createRealmWorldDefinitionResolver(input: {
 export function createInstalledRealmWorldDefinitionResolver(input: {
   installRoot: string;
   verifySignature: RealmWorldSignatureVerifier;
+  engineBaseVersion?: string;
   baseResolver?: (job: RealmWorldDefinitionResolutionJob) => GoalDefinition | null | Promise<GoalDefinition | null>;
 }): (job: RealmWorldDefinitionResolutionJob) => Promise<GoalDefinition | null> {
   return createRealmWorldDefinitionResolver({
@@ -79,6 +80,7 @@ export function createInstalledRealmWorldDefinitionResolver(input: {
       worldId: identity.worldId,
       worldVersion: identity.worldVersion,
       verifySignature: input.verifySignature,
+      engineBaseVersion: input.engineBaseVersion,
     }),
   });
 }

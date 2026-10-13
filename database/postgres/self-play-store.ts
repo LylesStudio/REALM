@@ -172,7 +172,10 @@ export function createPostgresSelfPlayStore(
     );
   }
 
-  async function completeBeat(sessionId: string): Promise<SelfPlaySession | null> {
+  async function completeBeat(
+    sessionId: string,
+    expectedBeat?: number,
+  ): Promise<SelfPlaySession | null> {
     return withWorkspaceTransaction(database, workspaceId, async (client) => {
       // v37 §D.0：C 面推进在途工作——sessionId→record 行两拍；archived 拒绝。
       const sessionScope = await client.query<{ record_id: string }>(
@@ -186,6 +189,20 @@ export function createPostgresSelfPlayStore(
 
       // running 与 stopping 都可计拍——stopping 下跑完的在途拍是真实提交，
       // 账目须反映实际落库拍数（取消在拍边界收束，不抹掉已完成的拍）。
+      // Slice 3：durable 拍以 expectedBeat 做 beats_completed CAS——崩溃
+      // 重放/租约回收后的重复落账返回 null 而非重复 +1（幂等）。
+      if (expectedBeat !== undefined) {
+        const result = await client.query<SessionRow>(
+          `UPDATE record_self_play_sessions
+           SET beats_completed = beats_completed + 1, updated_at = CURRENT_TIMESTAMP
+           WHERE workspace_id = $1 AND id = $2 AND state IN ('running', 'stopping')
+             AND beats_completed = $3
+           RETURNING ${SESSION_COLUMNS}`,
+          [workspaceId, sessionId, expectedBeat - 1],
+        );
+        const row = result.rows[0];
+        return row ? mapSession(row) : null;
+      }
       const result = await client.query<SessionRow>(
         `UPDATE record_self_play_sessions
          SET beats_completed = beats_completed + 1, updated_at = CURRENT_TIMESTAMP

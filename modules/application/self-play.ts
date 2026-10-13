@@ -103,8 +103,16 @@ export interface SelfPlayStore {
   }): Promise<{ session: SelfPlaySession; created: boolean }>;
   /** 按 id 读当前行（拍边界的 stopping/预算判定）。 */
   load(sessionId: string): Promise<SelfPlaySession | null>;
-  /** 拍完成：活动行（running/stopping）beats_completed+1 并心跳；终态行返回 null。 */
-  completeBeat(sessionId: string): Promise<SelfPlaySession | null>;
+  /**
+   * 拍完成：活动行（running/stopping）beats_completed+1 并心跳；终态行返回
+   * null。Slice 3 durable 拍携带 expectedBeat（= 拍号）：以
+   * beats_completed = beat-1 做 CAS——崩溃重放/租约回收后的重复落账返回
+   * null 而不是重复 +1（幂等）。
+   */
+  completeBeat(
+    sessionId: string,
+    expectedBeat?: number,
+  ): Promise<SelfPlaySession | null>;
   /** running → stopping；无 running 行返回 null（幂等）。 */
   requestStop(recordId: string): Promise<SelfPlaySession | null>;
   /** 终态收束：running/stopping → completed/failed/cancelled。 */

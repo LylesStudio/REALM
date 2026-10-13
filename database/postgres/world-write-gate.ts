@@ -7,9 +7,13 @@
  * gateRecordActive = records FOR UPDATE + status<>'archived' 断言——接在
  * worlds gate 之后，仅 record 级路径。
  *
- * 统一锁序：set_config → worlds(KEY SHARE) → records(FOR UPDATE) →
- * record_heads → worldlines →（completeRun：propagation_jobs FOR UPDATE）
- * → advisory/其余。
+ * 统一锁序（Slice 5 跨 Record 领域事务起，Worldline 先于 Record head）：
+ * set_config → worlds(KEY SHARE) → records(FOR UPDATE) → worldlines →
+ * world_command_groups 幂等台账行 → record_heads → 领域聚合/账本行
+ * （goal_instances、character_assets/character_effects 等，稳定序）→
+ * append-only 写入 →（completeRun：propagation_jobs FOR UPDATE）→
+ * advisory/其余。任何代码路径不得在持有领域聚合行后再回头锁 worldlines
+ * 或 record_heads；多 Record 锁定一律按 record_id 升序逐行取得。
  */
 import type { PoolClient } from "pg";
 

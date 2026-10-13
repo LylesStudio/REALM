@@ -30,6 +30,10 @@ const METHOD_PLANES = [
   ["database/postgres/runtime-repository.ts", "beginStageAttempt", "C", "gateRecordWritePath"],
   ["database/postgres/runtime-repository.ts", "restartTurn", "C", "gateRecordWritePath"],
   ["database/postgres/runtime-repository.ts", "commitRelease", "C", "gateRecordWritePath"],
+  // World Command：commitOnce 是携带 gate 的事务体（commitWorldCommand
+  // 仅为其有界 serialization 重试包装）。
+  ["database/postgres/world-command-repository.ts", "commitOnce", "C", "gateWorldWrite"],
+  ["database/postgres/world-command-repository.ts", "rejectWorldCommand", "C", "gateWorldWrite"],
   ["database/postgres/runtime-repository.ts", "markTurnFailure", "K", null],
   ["database/postgres/runtime-repository.ts", "claimOutbox", "K", null],
   ["database/postgres/runtime-repository.ts", "settleOutbox", "K", null],
@@ -198,6 +202,7 @@ test("D.0 分支创建 helper：world gate 先于 records/record_heads 锁与拓
 test("D.0 锁序：worlds gate 先于 record_heads/worldlines 锁", async () => {
   const checks = [
     ["database/postgres/runtime-repository.ts", "commitRelease", "gateRecordWritePath", "FROM record_heads"],
+    ["database/postgres/world-command-repository.ts", "commitOnce", "gateWorldWrite", "FROM record_heads"],
     ["database/postgres/first-night-store.ts", "commitPack", "gateRecordPath", "FROM record_heads"],
     ["database/postgres/scene-crystallization-repository.ts", "applyDelta", "gateWorldWrite", "FROM record_heads"],
     ["database/postgres/article-qualification-repository.ts", "qualifyOnce", "gateWorldWrite(", "pg_advisory_xact_lock("],
@@ -210,9 +215,10 @@ test("D.0 锁序：worlds gate 先于 record_heads/worldlines 锁", async () => 
     assert.ok(gateIndex !== -1 && laterIndex !== -1 && gateIndex < laterIndex,
       `${file}#${method}：${gate} 必须先于 ${later}`);
   }
-  // 四 head writer 显式 FOR UPDATE worldlines。
+  // 五 head writer 显式 FOR UPDATE worldlines。
   const headWriters = [
     "database/postgres/runtime-repository.ts",
+    "database/postgres/world-command-repository.ts",
     "database/postgres/first-night-store.ts",
     "database/postgres/scene-crystallization-repository.ts",
     "modules/application/library-service.ts",
@@ -272,6 +278,7 @@ test("D.0 worlds 行锁形围栏：内容面 KEY SHARE，仅归档/删除命令 
   // worlds FOR UPDATE 只允许出现在 K 面状态转换（world-archive/delete-world）。
   const files = [
     "database/postgres/runtime-repository.ts",
+    "database/postgres/world-command-repository.ts",
     "database/postgres/first-night-store.ts",
     "database/postgres/scene-crystallization-repository.ts",
     "database/postgres/memory-repository.ts",

@@ -118,6 +118,17 @@ export interface MemoryPrefetchHub {
   consume(recordId: string, characterInstanceId: string): string;
   /** 回合退出清理：仅当会话仍是该 record 的当前会话时移除（标识隔离）。 */
   end(handle: MemoryPrefetchHandle): void;
+  /**
+   * Slice 3 durable dispatch 模式的结果回灌：durable job handler 完成召回
+   * 后调用；仅当会话标识仍匹配当前会话时写入（跨会话/迟到结果丢弃）。
+   * 未走 dispatch 的 hub 实例上调用为 no-op。
+   */
+  deliver?(input: {
+    recordId: string;
+    sessionId: number;
+    characterInstanceId: string;
+    content: string;
+  }): void;
 }
 
 export function createMemoryPrefetchHub(options: {
@@ -129,6 +140,20 @@ export function createMemoryPrefetchHub(options: {
     characterInstanceId: string;
     query: string;
   }): Promise<string>;
+  /**
+   * Slice 3：durable 分派——装配后 begin 不再进程内直接召回，改为逐角色
+   * 入队 memory-prefetch durable job（重活在统一 host 执行）；结果经
+   * deliver 回灌当前会话。dispatch 必须同步返回、绝不抛错。
+   */
+  dispatch?(input: {
+    recordId: string;
+    workspaceId: string;
+    worldId: string;
+    worldlineId: string;
+    playerText: string;
+    characterInstanceId: string;
+    sessionId: number;
+  }): void;
 }): MemoryPrefetchHub {
   type Session = {
     id: number;
@@ -142,6 +167,28 @@ export function createMemoryPrefetchHub(options: {
       const session: Session = { id: nextSessionId++, ready: new Map() };
       sessions.set(input.recordId, session);
       for (const character of input.characters) {
+        if (options.dispatch) {
+          // durable 分派：重召回经统一 job host 执行，信封快路径不变
+          //（consume 仍同步读已就绪结果，pending/failed fail-closed ""）。
+          try {
+            options.dispatch({
+              recordId: input.recordId,
+              workspaceId: input.workspaceId,
+              worldId: input.worldId,
+              worldlineId: input.worldlineId,
+              playerText: input.playerText,
+              characterInstanceId: character.characterInstanceId,
+              sessionId: session.id,
+            });
+          } catch (error) {
+            console.warn(
+              `[realm] memory prefetch dispatch failed for character ${character.characterInstanceId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          continue;
+        }
         options
           .recall({
             workspaceId: input.workspaceId,
@@ -178,6 +225,13 @@ export function createMemoryPrefetchHub(options: {
       if (session && session.id === handle.sessionId) {
         sessions.delete(handle.recordId);
       }
+    },
+
+    deliver(delivered) {
+      const session = sessions.get(delivered.recordId);
+      // 会话标识隔离：被替换/已结束会话的迟到结果直接丢弃。
+      if (!session || session.id !== delivered.sessionId) return;
+      session.ready.set(delivered.characterInstanceId, delivered.content);
     },
   };
 }

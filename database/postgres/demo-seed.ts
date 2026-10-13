@@ -5,9 +5,53 @@ import {
   DEMO_STANCE_DEFINITION,
 } from "../../modules/actions/demo-definitions.ts";
 import {
+  BASE_CONTENT_RESOLVER,
+} from "../../modules/content-resolution/base-resolver.ts";
+import {
+  BASE_DEMO_CONTENT_KEY,
+} from "../../modules/content-resolution/base-content-data.ts";
+import {
+  baseContentRequestBase,
+} from "../../modules/content-resolution/public.ts";
+import {
   withWorkspaceTransaction,
   type WorkspaceDatabase,
 } from "./workspace-transaction.ts";
+
+/**
+ * 兼容种子 shim（deprecated-as-shim）：演示世界内容已迁入内容解析层
+ * （modules/content-resolution 的 base bundle "ember-coast"，zh-CN 为规范
+ * 语言）；本模块只负责把 base resolver 产出的内容实例化进 DB（固定运行
+ * 身份见 POSTGRES_DEMO_IDS），不再持有任何硬编码世界文案。后续 slice 在
+ * genesis 归一后评估移除。
+ */
+
+/** DB 规范语言：种子与断言恒定 zh-CN（渲染层本地化见 app/demo-content.ts）。 */
+const SEED_LANGUAGE = "zh-CN";
+
+function requireSeedContent<T>(value: T | null, what: string): T {
+  if (value === null) {
+    throw new Error(`base content for the demo world is missing: ${what}`);
+  }
+  return value;
+}
+
+const seedScope = baseContentRequestBase(SEED_LANGUAGE, BASE_DEMO_CONTENT_KEY);
+const DEMO_WORLD = requireSeedContent(
+  BASE_CONTENT_RESOLVER.resolveWorld(seedScope), "world");
+const DEMO_STORY = requireSeedContent(
+  BASE_CONTENT_RESOLVER.resolveStory(seedScope), "story");
+const DEMO_SCENE = requireSeedContent(
+  BASE_CONTENT_RESOLVER.resolveScene(seedScope), "scene");
+const DEMO_CHARACTERS = Object.fromEntries(
+  BASE_CONTENT_RESOLVER.listCharacters(seedScope)
+    .map((character) => [character.characterKey, character] as const),
+);
+
+/** SQL 字符串字面量转义（内容为 engine-owned 常量，仍按数据对待）。 */
+function sqlText(value: string): string {
+  return value.replaceAll("'", "''");
+}
 
 export const POSTGRES_DEMO_IDS = {
   workspace: "ws_demo",
@@ -112,9 +156,9 @@ export async function seedPostgresDemoPropagationTopology(
       `INSERT INTO propagation_nodes (
          workspace_id, world_id, worldline_id, node_key, clearance, active
        ) VALUES
-         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'canon_origin', 'public', TRUE),
-         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'harbor_tavern', 'public', TRUE),
-         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'market_square', 'public', TRUE)
+        ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'canon_origin', 'public', TRUE),
+        ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'harbor_tavern', 'public', TRUE),
+        ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'market_square', 'public', TRUE)
        ON CONFLICT DO NOTHING`,
       [workspaceId],
     );
@@ -123,10 +167,10 @@ export async function seedPostgresDemoPropagationTopology(
          workspace_id, world_id, worldline_id, id,
          from_node, to_node, channel, distance, recipient
        ) VALUES
-         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'route_demo_bulletin',
-          'canon_origin', 'harbor_tavern', 'official_bulletin', 1, NULL),
-         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'route_demo_rumor',
-          'harbor_tavern', 'market_square', 'market_rumor', 1, NULL)
+        ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'route_demo_bulletin',
+         'canon_origin', 'harbor_tavern', 'official_bulletin', 1, NULL),
+        ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}', 'route_demo_rumor',
+         'harbor_tavern', 'market_square', 'market_rumor', 1, NULL)
        ON CONFLICT DO NOTHING`,
       [workspaceId],
     );
@@ -150,7 +194,28 @@ async function assertDemoFixture(
 }
 
 const TICK = 17_121_219;
-const DISPLAY_TIME = "停战纪元17年 · 雾月12日 · 入夜";
+const DISPLAY_TIME = DEMO_SCENE.displayTime;
+const WORLD_SETTINGS_SQL = JSON.stringify({
+  era: DEMO_WORLD.era,
+  weather: DEMO_WORLD.weather,
+  tension: DEMO_WORLD.tension,
+  displayTime: DEMO_WORLD.displayTime,
+  style: DEMO_WORLD.style,
+});
+const CHARACTER_PROFILES = {
+  player: JSON.stringify({
+    role: DEMO_CHARACTERS["player"]!.role,
+    summary: DEMO_CHARACTERS["player"]!.summary,
+  }),
+  scout: JSON.stringify({
+    role: DEMO_CHARACTERS["scout"]!.role,
+    summary: DEMO_CHARACTERS["scout"]!.summary,
+  }),
+  scholar: JSON.stringify({
+    role: DEMO_CHARACTERS["scholar"]!.role,
+    summary: DEMO_CHARACTERS["scholar"]!.summary,
+  }),
+} as const;
 const workspaceValues = (input: RequiredDemoFixture) => [input.workspaceId];
 
 const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
@@ -159,9 +224,9 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
       INSERT INTO worlds (
         workspace_id, id, name, status, calendar_id, summary, settings
       ) VALUES (
-        $1, '${POSTGRES_DEMO_IDS.world}', '烬海诸国', 'active',
-        'truce_calendar', '人魔停战十七年后，海上的无声钟再次响起。',
-        '{"era":"停战纪元 17 年","weather":"冷雾，无风","tension":"钟声已经响过三次","displayTime":"${DISPLAY_TIME}","style":"classical"}'::jsonb
+        $1, '${POSTGRES_DEMO_IDS.world}', '${sqlText(DEMO_WORLD.name)}', 'active',
+        '${sqlText(DEMO_WORLD.calendarId)}', '${sqlText(DEMO_WORLD.summary)}',
+        '${sqlText(WORLD_SETTINGS_SQL)}'::jsonb
       ) ON CONFLICT (workspace_id, id) DO NOTHING
     `,
     values: workspaceValues,
@@ -172,7 +237,7 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         workspace_id, world_id, id, label, status, head_tick, head_ordinal
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}',
-        '原初世界线', 'active', ${TICK}, 1
+        '${sqlText(DEMO_WORLD.worldlineLabel)}', 'active', ${TICK}, 1
       ) ON CONFLICT (workspace_id, id) DO NOTHING
     `,
     values: workspaceValues,
@@ -184,8 +249,8 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         start_tick, start_ordinal
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}',
-        '${POSTGRES_DEMO_IDS.story}', '无声钟的来客', 'active',
-        '北岸灯塔在无风夜自行点亮，一封不属于任何阵营的密函被送上岸。',
+        '${POSTGRES_DEMO_IDS.story}', '${sqlText(DEMO_STORY.title)}', 'active',
+        '${sqlText(DEMO_STORY.premise)}',
         ${TICK}, 0
       ) ON CONFLICT (workspace_id, id) DO NOTHING
     `,
@@ -199,7 +264,7 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}',
         '${POSTGRES_DEMO_IDS.story}', '${POSTGRES_DEMO_IDS.record}',
-        '第一幕 · 雾港来信', 'active', ${TICK}, 0
+        '${sqlText(DEMO_STORY.recordTitle)}', 'active', ${TICK}, 0
       ) ON CONFLICT (workspace_id, id) DO NOTHING
     `,
     values: workspaceValues,
@@ -211,8 +276,8 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         location, objective, start_tick, start_ordinal
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}',
-        '${POSTGRES_DEMO_IDS.record}', '${POSTGRES_DEMO_IDS.scene}', '北防波堤',
-        'active', '灰鲸港 · 北防波堤', '决定是否当众拆开密函', ${TICK}, 0
+        '${POSTGRES_DEMO_IDS.record}', '${POSTGRES_DEMO_IDS.scene}', '${sqlText(DEMO_SCENE.title)}',
+        'active', '${sqlText(DEMO_SCENE.location)}', '${sqlText(DEMO_SCENE.objective)}', ${TICK}, 0
       ) ON CONFLICT (workspace_id, id) DO NOTHING
     `,
     values: workspaceValues,
@@ -239,11 +304,11 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         workspace_id, world_id, id, display_name, profile
       ) VALUES
         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.playerDefinition}',
-         '洛川', '{"role":"人类使节","summary":"停战议会派来的年轻调停人。"}'::jsonb),
+         '${sqlText(DEMO_CHARACTERS["player"]!.displayName)}', '${sqlText(CHARACTER_PROFILES.player)}'::jsonb),
         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.scoutDefinition}',
-         '塞娜', '{"role":"港卫斥候","summary":"熟悉灰鲸港每一条暗巷，对异常极度警觉。"}'::jsonb),
+         '${sqlText(DEMO_CHARACTERS["scout"]!.displayName)}', '${sqlText(CHARACTER_PROFILES.scout)}'::jsonb),
         ($1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.scholarDefinition}',
-         '弥洛', '{"role":"魔族铭文学者","summary":"温和寡言，能辨认战前的禁忌铭文。"}'::jsonb)
+         '${sqlText(DEMO_CHARACTERS["scholar"]!.displayName)}', '${sqlText(CHARACTER_PROFILES.scholar)}'::jsonb)
       ON CONFLICT (workspace_id, id) DO NOTHING
     `,
     values: workspaceValues,
@@ -326,8 +391,8 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         metadata
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.observationSkill}',
-        '${DEMO_SKILL_DEFINITION.skillKey}', '${DEMO_SKILL_DEFINITION.title}',
-        '${DEMO_SKILL_DEFINITION.description}', '${DEMO_SKILL_DEFINITION.rulePackKey}',
+        '${DEMO_SKILL_DEFINITION.skillKey}', '${sqlText(DEMO_SKILL_DEFINITION.title)}',
+        '${sqlText(DEMO_SKILL_DEFINITION.description)}', '${DEMO_SKILL_DEFINITION.rulePackKey}',
         $2::jsonb
       ) ON CONFLICT (workspace_id, id) DO UPDATE
         SET metadata = EXCLUDED.metadata
@@ -364,8 +429,8 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         rule_pack_key, consumable, metadata
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.signalLanternAsset}',
-        '${DEMO_ASSET_DEFINITION.assetKey}', '${DEMO_ASSET_DEFINITION.title}',
-        '${DEMO_ASSET_DEFINITION.description}', '${DEMO_ASSET_DEFINITION.rulePackKey}',
+        '${DEMO_ASSET_DEFINITION.assetKey}', '${sqlText(DEMO_ASSET_DEFINITION.title)}',
+        '${sqlText(DEMO_ASSET_DEFINITION.description)}', '${DEMO_ASSET_DEFINITION.rulePackKey}',
         ${DEMO_ASSET_DEFINITION.consumable}, $2::jsonb
       ) ON CONFLICT (workspace_id, id) DO UPDATE
         SET metadata = EXCLUDED.metadata
@@ -394,8 +459,8 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
         rule_pack_key, effect_kind, metadata
       ) VALUES (
         $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.guardedWatchEffect}',
-        '${DEMO_STANCE_DEFINITION.effectKey}', '${DEMO_STANCE_DEFINITION.title}',
-        '${DEMO_STANCE_DEFINITION.description}', '${DEMO_STANCE_DEFINITION.rulePackKey}',
+        '${DEMO_STANCE_DEFINITION.effectKey}', '${sqlText(DEMO_STANCE_DEFINITION.title)}',
+        '${sqlText(DEMO_STANCE_DEFINITION.description)}', '${DEMO_STANCE_DEFINITION.rulePackKey}',
         '${DEMO_STANCE_DEFINITION.effectKind}', $2::jsonb
       ) ON CONFLICT (workspace_id, id) DO UPDATE
         SET metadata = EXCLUDED.metadata
@@ -403,6 +468,18 @@ const TOPOLOGY_INSERTS: readonly SeedInsert[] = [
     values: (input) => [input.workspaceId, JSON.stringify(DEMO_STANCE_DEFINITION.metadata)],
   },
 ];
+
+const OPENING_PAYLOAD_SQL = JSON.stringify({
+  presentation: {
+    schemaVersion: 1,
+    segments: DEMO_STORY.opening.segments.map((segment) => ({
+      id: segment.id,
+      kind: segment.kind,
+      content: segment.content,
+      speechMode: segment.speechMode,
+    })),
+  },
+});
 
 const OPENING_EVENT_SQL = `
   INSERT INTO events (
@@ -415,11 +492,11 @@ const OPENING_EVENT_SQL = `
     $1, '${POSTGRES_DEMO_IDS.world}', '${POSTGRES_DEMO_IDS.worldline}',
     '${POSTGRES_DEMO_IDS.record}', '${POSTGRES_DEMO_IDS.scene}',
     '${POSTGRES_DEMO_IDS.openingEvent}', 1, 1, 0, 'narration.committed',
-    NULL, '旁白',
-    '雾沿着石阶爬上防波堤。信使放下蜡封完好的黑色信函，远处灯塔的光随第三声钟鸣熄灭。',
-    '{"presentation":{"schemaVersion":1,"segments":[{"id":"environment-1","kind":"environment","content":"雾沿着石阶爬上防波堤。","speechMode":"narrator"},{"id":"story-1","kind":"story","content":"信使放下蜡封完好的黑色信函。","speechMode":"narrator"},{"id":"fact-1","kind":"fact","content":"远处灯塔的光随第三声钟鸣熄灭。","speechMode":"narrator"}]}}'::jsonb,
+    NULL, '${sqlText(DEMO_STORY.opening.speaker)}',
+    '${sqlText(DEMO_STORY.opening.content)}',
+    '${sqlText(OPENING_PAYLOAD_SQL)}'::jsonb,
     '${POSTGRES_DEMO_IDS.publicPolicy}', ${TICK}, 1,
-    'truce_calendar', '${DISPLAY_TIME}', CURRENT_TIMESTAMP
+    '${sqlText(DEMO_WORLD.calendarId)}', '${sqlText(DISPLAY_TIME)}', CURRENT_TIMESTAMP
   ) ON CONFLICT (workspace_id, id) DO NOTHING
 `;
 
@@ -442,8 +519,8 @@ const FIXTURE_ASSERTION_SQL = `
       SELECT 1 FROM worlds
       WHERE workspace_id = $1
         AND id = '${POSTGRES_DEMO_IDS.world}'
-        AND name = '烬海诸国'
-        AND calendar_id = 'truce_calendar'
+        AND name = '${sqlText(DEMO_WORLD.name)}'
+        AND calendar_id = '${sqlText(DEMO_WORLD.calendarId)}'
     )
     AND EXISTS (
       SELECT 1 FROM worldlines
@@ -540,7 +617,7 @@ const FIXTURE_ASSERTION_SQL = `
       WHERE owned_skill.workspace_id = $1
         AND owned_skill.record_id = '${POSTGRES_DEMO_IDS.record}'
         AND owned_skill.character_instance_id = '${POSTGRES_DEMO_IDS.playerInstance}'
-        AND skill.skill_key = 'careful_observation'
+        AND skill.skill_key = '${DEMO_SKILL_DEFINITION.skillKey}'
     )
     AND EXISTS (
       SELECT 1
@@ -552,7 +629,7 @@ const FIXTURE_ASSERTION_SQL = `
       WHERE owned_asset.workspace_id = $1
         AND owned_asset.record_id = '${POSTGRES_DEMO_IDS.record}'
         AND owned_asset.character_instance_id = '${POSTGRES_DEMO_IDS.playerInstance}'
-        AND asset.asset_key = 'signal_lantern'
+        AND asset.asset_key = '${DEMO_ASSET_DEFINITION.assetKey}'
         AND owned_asset.quantity >= 0
     )
     AND EXISTS (
@@ -560,8 +637,8 @@ const FIXTURE_ASSERTION_SQL = `
       WHERE workspace_id = $1
         AND world_id = '${POSTGRES_DEMO_IDS.world}'
         AND id = '${POSTGRES_DEMO_IDS.guardedWatchEffect}'
-        AND effect_key = 'guarded_watch'
-        AND effect_kind = 'stance'
+        AND effect_key = '${DEMO_STANCE_DEFINITION.effectKey}'
+        AND effect_kind = '${DEMO_STANCE_DEFINITION.effectKind}'
     )
     AND EXISTS (
       SELECT 1 FROM events

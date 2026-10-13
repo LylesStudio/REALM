@@ -9,7 +9,7 @@ import {
   createPostgresCharacterMemoryRepository,
   createPostgresActionAffordanceCatalog,
   createPostgresCharacterSkillProvider,
-  createPostgresRulePack,
+  createPostgresRuleDefinitionProvider,
   createPostgresRuntimeRepository,
   createPostgresRecordRuntimeScopeRepository,
   createPostgresSceneCrystallizationStore,
@@ -87,8 +87,36 @@ import {
   type ActionSelection,
   type ActionTransaction,
 } from "../actions/public.ts";
+import { createDataDrivenRulePack } from "../actions/rule-pack.ts";
+// Slice 2.5：运行时定义读取经内容解析层——按 Record 的 WorldBinding
+// 选定 ContentResolver（base → BaseContentResolver；world-bound → 已挂载
+// 签名 RealmWorld 包的 RealmWorldContentResolver），与 DB 物化定义组合。
+import {
+  createContentRuleDefinitionProvider,
+} from "../actions/content-rule-provider.ts";
+import {
+  createRecordContentResolverSource,
+  narrowWorldBinding,
+} from "./record-content-resolver.ts";
+import {
+  createRealmWorldSignatureVerifierFromTrustStoreFile,
+  readRealmWorldTrustStoreFile,
+} from "../world-transfer/realmworld-trust-store.ts";
+import type {
+  RealmWorldSignatureVerifier,
+} from "../world-transfer/realmworld-loader.ts";
 import { getModelSettingsService } from "./model-settings-service.ts";
 import { getFirstNightRuntime } from "./first-night-runtime.ts";
+import {
+  closeDurableJobRuntime,
+  getDurableJobRuntime,
+} from "./durable-job-runtime.ts";
+import {
+  parseMemoryPrefetchJobPayload,
+  type DurableJobEnqueueInput,
+  type DurableJobHandler,
+  type DurableJobKind,
+} from "./unified-durable-job-host.ts";
 import { createPostgresSelfPlayStore } from "../../database/postgres/self-play-store.ts";
 import { createPostgresWorldKnowledgeRepository } from "../../database/postgres/world-knowledge-repository.ts";
 import { createWorldKnowledgeService } from "../world-knowledge/public.ts";
@@ -102,6 +130,7 @@ import {
 // 依赖组装与 start/stopSelfPlay 公开 API 编排。
 import {
   createLocalSelfPlayCoordinator,
+  createSelfPlayBeatHandler,
 } from "./local-record-self-play.ts";
 // Phase 2F-B：回合 memory prefetch 生命周期（玩家回合仅非 replay begin、
 // 成功后按既有角色顺序 consume、提交/失败/异常 finally 一律 end；插话回合
@@ -266,7 +295,11 @@ export type OpenDefaultRecordResult =
   | { kind: "onboarding" };
 
 export interface LocalRecordService {
-  loadRecord(recordId?: string, principalId?: string): Promise<LocalRecordEnvelope>;
+  /**
+   * Slice 2.5：recordId 必填——公共方法不再以演示 Record 为缺省。
+   * 「打开上次记录/新手引导」的缺省入口是 openDefaultRecord。
+   */
+  loadRecord(recordId: string, principalId?: string): Promise<LocalRecordEnvelope>;
   /**
    * Preview/cancel 授权：Record scope + world membership + viewer 可见性
    * 的只读窄检查——无副作用（不写 account last-opened、不签发 writeToken、
@@ -339,6 +372,11 @@ export interface AccountMemoryStore {
 export interface LocalRecordServiceDependencies {
   repository: LocalRuntimeRepository;
   projection: PostgresDeliveryProjectionRepository;
+  /**
+   * Slice 2.5：本地运行工作区身份（RLS 事务边界/scope 解析入参）。
+   * 由装配根显式注入；缺省回落本地 demo 工作区（内存测试语义不变）。
+   */
+  workspaceId?: string;
   tokens?: WriteTokenRegistry;
   visibilityProposals?: VisibilityProposalRegistry;
   clock?: () => Date;
@@ -439,6 +477,16 @@ export interface LocalRecordServiceDependencies {
   selfPlayStore?: SelfPlayStore;
   /** 批次 T7：每次 start 的自演拍数预算；缺省 3，硬上限 5（可降不可升）。 */
   selfPlayBeatBudget?: number;
+  /**
+   * Slice 3：统一 durable job runtime（realm_durable_jobs，迁移 0058）。
+   * 装配后：self-play 拍调度入队 self-play-beat durable job（替代进程内
+   * ad-hoc 拍循环），并注册对应 beat handler；缺省保持既有进程内拍循环
+   * （内存/demo 装配零行为变化）。
+   */
+  durableJobRuntime?: {
+    enqueue(input: DurableJobEnqueueInput): Promise<unknown>;
+    registerHandler(kind: DurableJobKind, handler: DurableJobHandler): void;
+  };
   /**
    * 批次 T9：晶化入图谱（世界知识服务）；缺省不启用（内存测试零变化）。
    * 入图是晶化落库后的独立 best-effort 步骤：失败只留日志，不回滚晶化。
@@ -571,16 +619,67 @@ export function createLocalRecordService(
   );
   // Phase 2F-A：自演拍循环由独立 coordinator 承载；facade 只组装窄依赖
   // （快照/晶化走本文件既有函数，单飞守卫在 coordinator 内部）。
+  // Slice 3：装配 durable job runtime 时，拍调度改为入队 self-play-beat
+  // durable job（确定性 id 去重 + terminal 重排），并注册统一 host 的
+  // beat handler；缺省保持进程内拍循环（内存/demo 装配零行为变化）。
+  const selfPlayBeatQueue = dependencies.durableJobRuntime
+    ? {
+      enqueueBeat(input: {
+        sessionId: string;
+        recordId: string;
+        beat: number;
+        principalId?: string;
+      }) {
+        void dependencies.durableJobRuntime!.enqueue({
+          jobId: `self-play-beat:${input.sessionId}:${input.beat}`,
+          kind: "self-play-beat",
+          recordId: input.recordId,
+          payload: {
+            sessionId: input.sessionId,
+            beat: input.beat,
+            ...(input.principalId !== undefined
+              ? { principalId: input.principalId }
+              : {}),
+          },
+          requeueTerminal: true,
+        }).catch(() => {
+          // 入队失败只告警：会话保持 running，由 stale 恢复/链式修复收束。
+          console.warn("[realm] self-play beat enqueue failed");
+        });
+      },
+    }
+    : undefined;
   const selfPlayCoordinator = createLocalSelfPlayCoordinator({
     ...(dependencies.selfPlayStore ? { store: dependencies.selfPlayStore } : {}),
+    ...(selfPlayBeatQueue ? { beatQueue: selfPlayBeatQueue } : {}),
     turnControl,
     turnSignals,
     runtimeDependencies,
-    loadSnapshot: (recordId, principalId) =>
-      loadConsistentSnapshot(dependencies, recordId, principalId),
+    loadSnapshot: (recordId, principalId, scope) =>
+      loadConsistentSnapshot(dependencies, recordId, principalId, scope),
     ...(dependencies.memorySync ? { memorySync: dependencies.memorySync } : {}),
     scheduleSceneCrystallization,
   });
+  if (dependencies.durableJobRuntime && dependencies.selfPlayStore && selfPlayBeatQueue) {
+    dependencies.durableJobRuntime.registerHandler(
+      "self-play-beat",
+      createSelfPlayBeatHandler({
+        store: dependencies.selfPlayStore,
+        turnControl,
+        turnSignals,
+        runtimeDependencies,
+        loadSnapshot: (recordId, principalId, scope) =>
+          loadConsistentSnapshot(dependencies, recordId, principalId, scope),
+        ...(dependencies.memorySync ? { memorySync: dependencies.memorySync } : {}),
+        scheduleSceneCrystallization,
+        // durable 拍按 recordId+principal 现场重解析 scope（payload 不承载
+        // 大体量 scope；归档/权限变化在拍边界 fail-closed）。
+        resolveRuntimeScope: (recordId, principalId) =>
+          resolveRuntimeScope(dependencies, recordId, principalId),
+        beatQueue: selfPlayBeatQueue,
+      }),
+    );
+  }
   // Phase 2F-B：回合预取生命周期由独立 coordinator 承载；facade 只组装窄
   // 依赖（hub 仍是 LocalRecordServiceDependencies.memoryPrefetch 既有类型）。
   const memoryPrefetchCoordinator = createLocalMemoryPrefetchCoordinator({
@@ -1181,7 +1280,9 @@ export function createLocalRecordService(
         {
           workspaceId: input.runtimeScope.workspaceId,
           recordId: input.recordId,
-          principalId: input.principalId ?? LOCAL_RECORD_SCOPE.principalId,
+          // Slice 2.5：授权读身份以已解析 scope 的 principal 为准（任意
+          // Record 的真实身份），不再回落演示 principal。
+          principalId: input.principalId ?? input.runtimeScope.principalId,
         },
         6,
       );
@@ -1360,7 +1461,7 @@ export function createLocalRecordService(
   }
 
   return {
-    async loadRecord(recordId = LOCAL_RECORD_SCOPE.recordId, principalId) {
+    async loadRecord(recordId, principalId) {
       const envelope = await loadConsistentEnvelope(
         dependencies,
         tokens,
@@ -1370,6 +1471,8 @@ export function createLocalRecordService(
       );
       await rememberLastOpened(
         dependencies,
+        // 会话身份缺省仍为本地单用户 principal（与路由层一致）；
+        // Record 身份不再参与缺省推导。
         principalId ?? LOCAL_RECORD_SCOPE.principalId,
         envelope.record.world.id,
         envelope.record.record.id,
@@ -1386,8 +1489,9 @@ export function createLocalRecordService(
       // ① 先用 delivery META 验证 Record + membership（只读、无副作用）；
       // 非成员 / 不存在的 Record 同形为安全 404。
       const identity = principalId ?? LOCAL_RECORD_SCOPE.principalId;
+      const workspaceId = dependencies.workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId;
       const authorized = await dependencies.projection.hasViewerProjection({
-        ...LOCAL_RECORD_SCOPE,
+        workspaceId,
         recordId,
         principalId: identity,
       });
@@ -1400,7 +1504,7 @@ export function createLocalRecordService(
       // preview hub 会 fail-closed 丢弃该 viewer 的 chunk/end。
       const viewerCharacterInstanceId = dependencies.runtimeScopeProvider
         ? await dependencies.runtimeScopeProvider.resolveViewerCharacterInstanceId({
-            workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+            workspaceId,
             principalId: identity,
             recordId,
           })
@@ -1421,7 +1525,7 @@ export function createLocalRecordService(
       if (memory) {
         try {
           const last = await memory.findLastOpened(
-            LOCAL_RECORD_SCOPE.workspaceId,
+            dependencies.workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId,
             identity,
           );
           if (last?.recordId) {
@@ -1461,15 +1565,19 @@ export function createLocalRecordService(
     },
 
     async submitMessage(input) {
-      const before = await loadConsistentSnapshot(
-        dependencies,
-        input.recordId,
-        input.principalId,
-      );
+      // Slice 2.5：scope 先行（与 loadConsistentEnvelope 的 T12-B 语义同序）
+      // ——归档/不存在/非成员 Record 在此 fail-closed 为 NOT_FOUND；快照读
+      // 复用已解析 scope 的 workspace/principal，任意 Record 走同一身份链。
       const runtimeScope = await resolveRuntimeScope(
         dependencies,
         input.recordId,
         input.principalId,
+      );
+      const before = await loadConsistentSnapshot(
+        dependencies,
+        input.recordId,
+        input.principalId,
+        runtimeScope,
       );
       const profileUpdate = extractExplicitCharacterProfileUpdate(
         input.content,
@@ -1489,7 +1597,8 @@ export function createLocalRecordService(
           scope: writeScope(
             input.recordId,
             before.viewer.characterInstanceId,
-            input.principalId,
+            input.principalId ?? runtimeScope.principalId,
+            runtimeScope.workspaceId,
           ),
           canonicalVersion: before.canonicalVersion,
           idempotencyKey: input.idempotencyKey,
@@ -1526,7 +1635,8 @@ export function createLocalRecordService(
       const scope = writeScope(
         input.recordId,
         before.viewer.characterInstanceId,
-        input.principalId,
+        input.principalId ?? runtimeScope.principalId,
+        runtimeScope.workspaceId,
       );
       // 批次 T2 prefetch：回合开始并行发起各在场角色召回，与可见性裁决/DM
       // 规划等模型调用重叠；replay 回合没有模型调用，不预取。
@@ -1603,6 +1713,7 @@ export function createLocalRecordService(
               dependencies,
               input.recordId,
               input.principalId,
+              runtimeScope,
             );
             throw new LocalRecordServiceError(
               "WRITE_CONFLICT",
@@ -1743,13 +1854,14 @@ export function createLocalRecordService(
     async startSelfPlay(recordId, principalId) {
       const store = dependencies.selfPlayStore;
       if (!store) throw notInitialized();
-      // 权限链与读取路径同源：快照 + runtimeScope 解析（无 membership → 404 形态）。
-      await loadConsistentSnapshot(dependencies, recordId, principalId);
+      // 权限链与读取路径同源：runtimeScope 解析（无 membership → 404 形态）
+      // + 快照；快照读复用已解析 scope 的身份（Slice 2.5）。
       const runtimeScope = await resolveRuntimeScope(
         dependencies,
         recordId,
         principalId,
       );
+      await loadConsistentSnapshot(dependencies, recordId, principalId, runtimeScope);
       // 批次 T8：归档世界只读——不得开自演。
       if (runtimeScope.worldStatus === "archived") {
         throw new LocalRecordServiceError(
@@ -1778,7 +1890,12 @@ export function createLocalRecordService(
     async stopSelfPlay(recordId, principalId) {
       const store = dependencies.selfPlayStore;
       if (!store) throw notInitialized();
-      await loadConsistentSnapshot(dependencies, recordId, principalId);
+      const runtimeScope = await resolveRuntimeScope(
+        dependencies,
+        recordId,
+        principalId,
+      );
+      await loadConsistentSnapshot(dependencies, recordId, principalId, runtimeScope);
       const stopped = await store.requestStop(recordId);
       // 幂等：无活动会话 → 返回最近一条（含 null）。
       return stopped ?? store.findLatest(recordId);
@@ -1800,7 +1917,7 @@ export function createLocalRecordService(
         );
       }
       const projection = await dependencies.projection.loadForPlayer({
-        ...LOCAL_RECORD_SCOPE,
+        workspaceId: dependencies.workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId,
         recordId,
         principalId: principalId ?? LOCAL_RECORD_SCOPE.principalId,
       });
@@ -1937,7 +2054,7 @@ async function rememberLastOpened(
   if (!memory || !worldId.trim() || !recordId.trim()) return;
   try {
     await memory.saveLastOpened(
-      LOCAL_RECORD_SCOPE.workspaceId,
+      dependencies.workspaceId ?? LOCAL_RECORD_SCOPE.workspaceId,
       principalId,
       worldId,
       recordId,
@@ -2009,6 +2126,9 @@ export async function closeDefaultLocalRecordService(): Promise<void> {
   defaultService = undefined;
   const pool = defaultServicePool;
   defaultServicePool = undefined;
+  // Slice 3：统一 durable job host 随服务关停（advisory lock 释放、host
+  // 幂等 stop）；pool 由 host.close 负责。
+  await closeDurableJobRuntime().catch(() => undefined);
   await pool?.end().catch(() => undefined);
 }
 
@@ -2025,6 +2145,32 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
   const pool = createLocalPostgresPool(connectionString);
   defaultServicePool = pool;
   const modelSettings = getModelSettingsService();
+  // Slice 2.5：world-bound Record 的运行时定义读取经已挂载签名
+  // RealmWorld 包的 ContentResolver（与 app/api/realmworld/env.ts 同一
+  // 信任链环境变量）。安装根/trust-store 缺失或初始校验失败 → verifier
+  // 缺省（fail-closed：world-bound 内容层无贡献，绝不退化为未验签）。
+  const realmWorldInstallRoot = process.env.REALM_REALMWORLD_INSTALL_ROOT
+    ?? process.env.REALM_GOAL_WORKER_INSTALL_ROOT;
+  const realmWorldTrustStorePath = process.env.REALM_REALMWORLD_TRUST_STORE;
+  let realmWorldVerifier: RealmWorldSignatureVerifier | undefined;
+  if (realmWorldInstallRoot && realmWorldTrustStorePath) {
+    try {
+      await readRealmWorldTrustStoreFile(realmWorldTrustStorePath);
+      realmWorldVerifier = createRealmWorldSignatureVerifierFromTrustStoreFile({
+        path: realmWorldTrustStorePath,
+      });
+    } catch (error) {
+      console.warn(
+        `[realm] RealmWorld trust store unavailable; world-bound content resolution disabled: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+  const recordContentResolvers = createRecordContentResolverSource({
+    ...(realmWorldInstallRoot ? { installRoot: realmWorldInstallRoot } : {}),
+    ...(realmWorldVerifier ? { verifySignature: realmWorldVerifier } : {}),
+  });
   const memoryRepository = createPostgresCharacterMemoryRepository(pool);
   const memory = createCharacterMemoryService({
     repository: memoryRepository,
@@ -2032,31 +2178,86 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
   const memorySync = createMemorySyncScheduler({
     extract: (scope) => memoryRepository.extractAuthorized(scope),
   });
+  // Slice 3：统一 durable job runtime（realm_durable_jobs，迁移 0058）。
+  // first-night/self-play-beat/memory-prefetch 三类重活经它入队与执行；
+  // envelope/回合快路径不变（prefetch 消费仍同步 fail-closed）。
+  const durableJobs = getDurableJobRuntime(LOCAL_RECORD_SCOPE.workspaceId);
   // 批次 T2 prefetch：回合开始并行发起各在场角色召回，请求体组装时只消费
   // 已就绪结果（fail-closed）；注入位置与格式不变。
-  const memoryPrefetch = createMemoryPrefetchHub({
-    recall: async ({
+  const recallPrefetchedMemories = async ({
+    workspaceId,
+    worldId,
+    worldlineId,
+    recordId,
+    characterInstanceId,
+    query,
+  }: {
+    workspaceId: string;
+    worldId: string;
+    worldlineId: string;
+    recordId: string;
+    characterInstanceId: string;
+    query: string;
+  }) => {
+    const memories = await memory.recall({
       workspaceId,
       worldId,
       worldlineId,
       recordId,
       characterInstanceId,
       query,
-    }) => {
-      const memories = await memory.recall({
-        workspaceId,
-        worldId,
-        worldlineId,
-        recordId,
-        characterInstanceId,
-        query,
-        limit: 6,
+      limit: 6,
+    });
+    // Cleanup Phase 4 / Batch 2C：prefetch 注入统一走预算格式化（recall
+    // 顺序 + `- ...` 行形 + 320 token 预算），不再裸拼接；recall 的
+    // limit/授权/查询语义不变。
+    return formatMemoryPrefetchLines(memories.map((item) => item.content));
+  };
+  const memoryPrefetch = createMemoryPrefetchHub({
+    recall: recallPrefetchedMemories,
+    // Slice 3：重召回经 durable job host 执行；begin 只入队（fire-and-forget，
+    // 入队失败该角色本轮无预取，与召回失败同型 fail-closed）。
+    dispatch: (input) => {
+      void durableJobs.enqueue({
+        jobId: `memory-prefetch:${durableJobs.instanceId}:${input.recordId}:${input.sessionId}:${input.characterInstanceId}`,
+        kind: "memory-prefetch",
+        recordId: input.recordId,
+        payload: {
+          sessionId: input.sessionId,
+          worldId: input.worldId,
+          worldlineId: input.worldlineId,
+          characterInstanceId: input.characterInstanceId,
+          query: input.playerText.slice(0, 500),
+        },
+      }).catch(() => {
+        console.warn("[realm] memory prefetch enqueue failed");
       });
-      // Cleanup Phase 4 / Batch 2C：prefetch 注入统一走预算格式化（recall
-      // 顺序 + `- ...` 行形 + 320 token 预算），不再裸拼接；recall 的
-      // limit/授权/查询语义不变。
-      return formatMemoryPrefetchLines(memories.map((item) => item.content));
     },
+  });
+  // memory-prefetch claimed job：执行召回并把格式化结果回灌 hub 当前会话
+  //（会话标识隔离——被替换/已结束会话的迟到结果直接丢弃）。
+  durableJobs.registerHandler("memory-prefetch", async (job) => {
+    const payload = parseMemoryPrefetchJobPayload(job.payload);
+    if (!payload) {
+      throw Object.assign(
+        new Error("memory prefetch job payload invalid"),
+        { code: "PREFETCH_JOB_PAYLOAD_INVALID" },
+      );
+    }
+    const content = await recallPrefetchedMemories({
+      workspaceId: job.workspaceId,
+      worldId: payload.worldId,
+      worldlineId: payload.worldlineId,
+      recordId: job.recordId,
+      characterInstanceId: payload.characterInstanceId,
+      query: payload.query,
+    });
+    memoryPrefetch.deliver?.({
+      recordId: job.recordId,
+      sessionId: payload.sessionId,
+      characterInstanceId: payload.characterInstanceId,
+      content,
+    });
   });
   const previewHub = createLocalPreviewHub();
   const repository = createPostgresRuntimeRepository<
@@ -2097,6 +2298,9 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
     accountMemory: createPostgresAccountRepository(pool),
     // 批次 T7：自演会话账本（受限 realm_runtime 角色，0020 授权）。
     selfPlayStore: createPostgresSelfPlayStore(pool, LOCAL_RECORD_SCOPE.workspaceId),
+    // Slice 3：统一 durable job host——self-play 拍调度入队 durable job，
+    // beat handler 在本服务装配点注册（拍内仍走既有 executeTurn 编排）。
+    durableJobRuntime: durableJobs,
     // 批次 T9：晶化入图谱（世界知识服务，0010 既有表，无新迁移）。
     worldKnowledge: createWorldKnowledgeService(
       createPostgresWorldKnowledgeRepository(pool),
@@ -2144,63 +2348,82 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
       language: scope.language,
     }),
     characterMemory: memory,
-    orchestratorFactory: (scope) => createModelPoweredM2TurnOrchestrator({
-      characters: scope.aiCharacters,
-      getGateway: () => modelSettings.gateway(),
-      brief: scope.brief,
-      style: scope.style,
-      language: scope.language,
-      // 对话主体上下文：当前 Record 可寻址名册（player/NPC 复用既有
-      // participantId）+ 带主体信息的最近公开对话摘要（仅 public 事件，
-      // 由 record-scope 的授权查询保证）。
-      subjectContext: {
-        roster: [scope.playerActor, ...scope.aiCharacters].map((actor) => ({
-          participantId: actor.participantId,
-          characterInstanceId: actor.characterInstanceId,
-          displayName: actor.displayName,
-        })),
-        recentPublicDialogue: scope.recentPublicDialogue,
-        // 当前记录的 record_confirmed 知识（record-local 背景，绝非 canon）。
-        recordKnowledge: scope.recordKnowledge,
-      },
-      // 批次 T4：真实模型路径注入 PostgreSQL 数据驱动规则包——判定参数
-      // 来自 skill_definitions.metadata，扣减/状态经引擎工具走账本闭环。
-      actionResolver: createDeterministicActionResolver({
-        rulePack: createPostgresRulePack(pool, {
+    orchestratorFactory: (scope) => {
+      // Slice 2.5：运行时内容身份——base/缺省 → BaseContentResolver；
+      // world-bound（身份完整）→ 已挂载 RealmWorld 包的 resolver；畸形
+      // world binding → null（内容层禁用，仅 DB 物化定义，fail-closed）。
+      const contentBinding = narrowWorldBinding(scope.worldBinding);
+      return createModelPoweredM2TurnOrchestrator({
+        characters: scope.aiCharacters,
+        getGateway: () => modelSettings.gateway(),
+        brief: scope.brief,
+        style: scope.style,
+        language: scope.language,
+        // 对话主体上下文：当前 Record 可寻址名册（player/NPC 复用既有
+        // participantId）+ 带主体信息的最近公开对话摘要（仅 public 事件，
+        // 由 record-scope 的授权查询保证）。
+        subjectContext: {
+          roster: [scope.playerActor, ...scope.aiCharacters].map((actor) => ({
+            participantId: actor.participantId,
+            characterInstanceId: actor.characterInstanceId,
+            displayName: actor.displayName,
+          })),
+          recentPublicDialogue: scope.recentPublicDialogue,
+          // 当前记录的 record_confirmed 知识（record-local 背景，绝非 canon）。
+          recordKnowledge: scope.recordKnowledge,
+        },
+        // 批次 T4 + Slice 2.5：真实模型路径注入数据驱动规则包——定义读取
+        // 按 Record 的 WorldBinding 经内容解析层分流（base →
+        // BaseContentResolver；world-bound → 已挂载 RealmWorld 包的
+        // RealmWorldContentResolver），DB 物化定义（含账本 definitionId
+        // 与抽牌账本）在冲突时优先；扣减/状态经引擎工具走账本闭环。
+        actionResolver: createDeterministicActionResolver({
+          rulePack: createDataDrivenRulePack(
+            createContentRuleDefinitionProvider({
+              resolver: contentBinding
+                ? () => recordContentResolvers.forBinding(contentBinding, scope.language)
+                : null,
+              binding: contentBinding ?? { kind: "base" },
+              language: scope.language,
+              location: scope.brief.location,
+              fallback: createPostgresRuleDefinitionProvider(pool, {
+                workspaceId: scope.workspaceId,
+                worldId: scope.worldId,
+                worldlineId: scope.worldlineId,
+                recordId: scope.recordId,
+                location: scope.brief.location,
+              }),
+            }),
+          ),
+          dynamicDiscoveryGenerator: createModelDynamicDiscoveryGenerator({
+            getGateway: () => modelSettings.gateway(),
+            style: scope.style,
+            language: scope.language,
+          }),
+          dynamicDiscoveryContext: {
+            ...scope.brief,
+            language: scope.language,
+            canon: typeof scope.brief.canon === "string" ? scope.brief.canon : "",
+            recentPublicEvents: scope.recentPublicEvents,
+          },
+          allowStatefulReceipts: true,
+        }),
+        // 批次 T4：角色 use_skill 提示词按世界数据中的实际持有技能生成。
+        characterSkillProvider: createPostgresCharacterSkillProvider(pool, {
           workspaceId: scope.workspaceId,
           worldId: scope.worldId,
           worldlineId: scope.worldlineId,
           recordId: scope.recordId,
-          location: scope.brief.location,
         }),
-        dynamicDiscoveryGenerator: createModelDynamicDiscoveryGenerator({
-          getGateway: () => modelSettings.gateway(),
-          style: scope.style,
-          language: scope.language,
-        }),
-        dynamicDiscoveryContext: {
-          ...scope.brief,
-          language: scope.language,
-          canon: typeof scope.brief.canon === "string" ? scope.brief.canon : "",
-          recentPublicEvents: scope.recentPublicEvents,
+        previewSink: (event) => {
+          previewHub.publishChunk(scope.recordId, event.speaker, event.content);
         },
-        allowStatefulReceipts: true,
-      }),
-      // 批次 T4：角色 use_skill 提示词按世界数据中的实际持有技能生成。
-      characterSkillProvider: createPostgresCharacterSkillProvider(pool, {
-        workspaceId: scope.workspaceId,
-        worldId: scope.worldId,
-        worldlineId: scope.worldlineId,
-        recordId: scope.recordId,
-      }),
-      previewSink: (event) => {
-        previewHub.publishChunk(scope.recordId, event.speaker, event.content);
-      },
-      async recallMemory(character) {
-        // 批次 T2 prefetch：同步消费回合开始时的预取结果；pending/failed
-        // fail-closed 返回 ""——模型调用前不再挂任何数据库串行等待。
-        return memoryPrefetch.consume(scope.recordId, character.characterInstanceId);
-      },
-    }),
+        async recallMemory(character) {
+          // 批次 T2 prefetch：同步消费回合开始时的预取结果；pending/failed
+          // fail-closed 返回 ""——模型调用前不再挂任何数据库串行等待。
+          return memoryPrefetch.consume(scope.recordId, character.characterInstanceId);
+        },
+      });
+    },
   });
 }

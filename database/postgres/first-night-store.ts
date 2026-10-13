@@ -201,18 +201,8 @@ export function createPostgresFirstNightStore(
       const policyId = policyRow.rows[0]?.id;
       if (!policyId) return false;
 
-      const head = await client.query<{
-        record_version: string | number;
-        next_record_ordinal: string | number;
-      }>(
-        `SELECT record_version, next_record_ordinal
-         FROM record_heads
-         WHERE workspace_id = $1 AND record_id = $2
-         FOR UPDATE`,
-        [workspaceId, recordId],
-      );
-      const headRow = head.rows[0];
-      if (!headRow) return false;
+      // Slice 5 统一锁序：worldlines(FOR UPDATE) 先于 record_heads(FOR
+      // UPDATE)（与 commitRelease / World Command 同序）。
       const worldlineHead = await client.query<{
         head_tick: string | number;
         head_ordinal: string | number;
@@ -225,6 +215,18 @@ export function createPostgresFirstNightStore(
       );
       const worldlineRow = worldlineHead.rows[0];
       if (!worldlineRow) return false;
+      const head = await client.query<{
+        record_version: string | number;
+        next_record_ordinal: string | number;
+      }>(
+        `SELECT record_version, next_record_ordinal
+         FROM record_heads
+         WHERE workspace_id = $1 AND record_id = $2
+         FOR UPDATE`,
+        [workspaceId, recordId],
+      );
+      const headRow = head.rows[0];
+      if (!headRow) return false;
 
       const recordVersion = Number(headRow.record_version) + 1;
       const firstOrdinal = Number(headRow.next_record_ordinal);

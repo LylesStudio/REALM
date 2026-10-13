@@ -80,6 +80,9 @@ const MIGRATIONS = [
   "0056_runtime_save_restore_grants.sql",
   // Phase 4D：records.world_version（branch/genesis 写路径显式携带）。
   "0057_realmworld_record_binding.sql",
+  // Slice 3 统一 durable job 队列：merge 对在途（pending/claimed）行
+  // fail-closed 探针所依赖的表。
+  "0058_durable_job_queue.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -569,7 +572,7 @@ test(
 );
 
 test(
-  "merge still fails closed on memory/outbox/first-night/self-play/goal runtime state",
+  "merge still fails closed on memory/outbox/first-night/self-play/goal/durable-job runtime state",
   SKIP,
   async (t) => {
     const { ownerPool, restrictedPool } = await createMergeRuntimeDatabase(
@@ -718,6 +721,76 @@ test(
       [branchRecordId, world.id],
     );
     await expectUnsupported("record_first_nights");
+
+    // 统一 durable job 队列（0058）的在途行：pending job 合并后会对源
+    // Record 作用域触发，不可安全重映射，必须 fail-closed。
+    await ownerPool.query(
+      `INSERT INTO realm_durable_jobs (
+         workspace_id, id, job_kind, record_id, state
+       ) VALUES ('ws_demo', 'durable_fixture_1', 'first-night', $1, 'pending')`,
+      [branchRecordId],
+    );
+    await expectUnsupported("durable_jobs");
+  },
+);
+
+test(
+  "merge ignores terminal durable job rows (source operational history) and never copies them",
+  SKIP,
+  async (t) => {
+    const { ownerPool, restrictedPool } = await createMergeRuntimeDatabase(
+      t,
+      "durable-terminal",
+    );
+    const { world, origin, branch, branchRecordId } =
+      await createWorldWithBranch(ownerPool, "终态作业试验场");
+    // 终态 durable job（completed/failed）是源 Record 的运维历史：不阻塞
+    // 合并，也绝不复制进目标 Record。
+    await ownerPool.query(
+      `INSERT INTO realm_durable_jobs (
+         workspace_id, id, job_kind, record_id, state, attempt_count,
+         completed_at
+       ) VALUES
+         ('ws_demo', 'durable_terminal_1', 'first-night', $1, 'completed', 1,
+          CURRENT_TIMESTAMP),
+         ('ws_demo', 'durable_terminal_2', 'self-play-beat', $1, 'failed', 3,
+          CURRENT_TIMESTAMP)`,
+      [branchRecordId],
+    );
+    const service = createWorldlineMergeService({
+      repository: createPostgresWorldlineMergeRepository(restrictedPool),
+    });
+    const result = await service.merge({
+      workspaceId: "ws_demo",
+      worldId: world.id,
+      sourceA: origin.id,
+      sourceB: branch.id,
+      idempotencyKey: "runtime-durable-terminal-1",
+      operator: "tester",
+    });
+    assert.equal(result.status, "merged");
+    if (result.status !== "merged") return;
+
+    // 源侧不可变：终态行原样保留在源 Record 上。
+    const source = await ownerPool.query(
+      `SELECT id, state FROM realm_durable_jobs
+       WHERE workspace_id = 'ws_demo' AND record_id = $1 ORDER BY id`,
+      [branchRecordId],
+    );
+    assert.deepEqual(
+      source.rows.map((row) => `${row.id}:${row.state}`),
+      ["durable_terminal_1:completed", "durable_terminal_2:failed"],
+    );
+    // 目标 Record 不携带任何 durable job 行。
+    const copied = await ownerPool.query<{ n: number } & pg.QueryResultRow>(
+      `SELECT count(*)::int AS n FROM realm_durable_jobs
+       WHERE workspace_id = 'ws_demo' AND record_id IN (
+         SELECT id FROM records
+         WHERE workspace_id = 'ws_demo' AND worldline_id = $1
+       )`,
+      [result.mergedWorldlineId],
+    );
+    assert.equal(copied.rows[0]?.n, 0);
   },
 );
 

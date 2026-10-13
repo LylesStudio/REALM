@@ -217,7 +217,7 @@ test("接线契约：read-model 模块真实存在且被 facade 使用", () => {
 
 test("稳定快照：loadRecord 返回完整 envelope（writeToken/viewer/affordances/suggestions）", async () => {
   const { service, deliveryReads } = createService();
-  const envelope = await service.loadRecord();
+  const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
 
   assert.equal(envelope.record.id, LOCAL_RECORD_SCOPE.recordId);
   assert.equal(envelope.record.version, 3);
@@ -240,7 +240,7 @@ test("head 在读取期间变化：版本稳定后重试成功", async () => {
   const { service, deliveryReads } = createService({
     headVersions: [3, 4, 4, 4],
   });
-  const envelope = await service.loadRecord();
+  const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   assert.equal(envelope.record.id, LOCAL_RECORD_SCOPE.recordId);
   assert.equal(deliveryReads(), 2);
 });
@@ -249,7 +249,7 @@ test("head 持续变化：耗尽 SNAPSHOT_ATTEMPTS 后 WRITE_CONFLICT", async ()
   const { service, deliveryReads } = createService({
     headVersions: [1, 2, 3, 4, 5, 6, 7],
   });
-  await assert.rejects(service.loadRecord(), (error: unknown) => {
+  await assert.rejects(service.loadRecord(LOCAL_RECORD_SCOPE.recordId), (error: unknown) => {
     assert.ok(error instanceof LocalRecordServiceError);
     assert.equal(error.code, "WRITE_CONFLICT");
     assert.equal(
@@ -322,7 +322,7 @@ test("可选状态字段不泄露额外控制面数据", async () => {
       },
     },
   });
-  const envelope = await service.loadRecord();
+  const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
 
   // sceneImage：只有 fileId/fileUrl/status；fileUrl 恒为相对路径。
   assert.deepEqual(envelope.sceneImage, {

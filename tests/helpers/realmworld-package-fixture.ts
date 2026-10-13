@@ -32,6 +32,10 @@ export async function installSignedRealmWorldFixture(input: {
   recordTitle: string;
   keyId: string;
   keyPair: RealmWorldFixtureKeyPair;
+  /** manifest engineCompat.baseRange（缺省兼容引擎当前 base 版本段）。 */
+  baseRange?: string;
+  /** 传给 installRealmWorldDirectory 的 engineBaseVersion（缺省引擎当前版本）。 */
+  engineBaseVersion?: string;
 }): Promise<void> {
   const sourceDir = await mkdtemp(join(tmpdir(), "realm-vsrc-"));
   const files = new Map<string, Uint8Array>([
@@ -76,6 +80,7 @@ export async function installSignedRealmWorldFixture(input: {
     engineCompat: {
       schemaLatest: "0057_realmworld_record_binding.sql",
       requiresMigrations: ["0055_goal_runtime.sql"],
+      baseRange: input.baseRange ?? ">=1.0.0 <2.0.0",
     },
     contentHash: computeRealmWorldContentHash(files),
     signature: { algorithm: "ed25519", keyId: input.keyId, value: "placeholder" },
@@ -98,6 +103,7 @@ export async function installSignedRealmWorldFixture(input: {
   await installRealmWorldDirectory({
     sourceDir,
     installRoot: input.installRoot,
+    engineBaseVersion: input.engineBaseVersion,
     verifySignature: ({ manifest: candidate }: { manifest: RealmWorldManifestV1 }) =>
       candidate.signature.value === signature,
   });

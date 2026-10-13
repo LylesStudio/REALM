@@ -26,6 +26,7 @@ import {
 // server API 与测试 import 路径兼容，不复制两份 normalizer 逻辑。
 export {
   fallbackGenesisDraft,
+  genesisBindingFromDraft,
   GENESIS_LANGUAGES,
   normalizeGenesisLanguage,
   GENESIS_LIMITS,

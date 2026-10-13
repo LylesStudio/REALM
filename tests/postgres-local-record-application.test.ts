@@ -214,7 +214,7 @@ test(
       }),
     });
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const runtimeScopeRepository = createPostgresRecordRuntimeScopeRepository(runtimePool);
     const runtimeScope = await runtimeScopeRepository.resolve({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
@@ -736,7 +736,7 @@ test(
          (SELECT count(*)::text FROM visibility_policies WHERE id LIKE 'policy_restore_%') AS policies`,
     );
     assert.deepEqual(afterInvalidArchiveCounts.rows[0], restoredTargetCounts.rows[0]);
-    const stale = await service.loadRecord();
+    const stale = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     assert.equal(initial.record.events.length, 1);
     assert.deepEqual(
       initial.affordances.map((item) => item.kind),
@@ -776,7 +776,7 @@ test(
       throw error;
     }
 
-    const hidden = await service.loadRecord();
+    const hidden = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     assert.equal(hidden.viewer.dynamicKnowledgeVisible, false);
     assert.equal(hidden.record.scene.location, "");
     assert.equal(hidden.record.world.era, "");
@@ -918,7 +918,7 @@ test(
       throw error;
     }
 
-    const beforeAsset = await service.loadRecord();
+    const beforeAsset = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const asset = beforeAsset.affordances.find((item) => item.kind === "asset");
     assert.ok(asset);
     const assetCommand = {
@@ -1174,7 +1174,7 @@ test(
       }),
     });
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const proposalError = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "我悄悄跟她说：不要让其他人听到。",
@@ -1396,7 +1396,7 @@ test(
       }),
     });
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     // 回合 1：提交一条会成为观察/记忆素材的玩家输入。
     turnNo = 1;
     const first = await service.submitMessage({
@@ -1473,6 +1473,7 @@ async function installRealmWorldInstantiationFixture(input: {
       engineCompat: {
         schemaLatest: "0057_realmworld_record_binding.sql",
         requiresMigrations: ["0055_goal_runtime.sql"],
+        baseRange: ">=1.0.0 <2.0.0",
       },
       contentHash: computeRealmWorldContentHash(input2.files),
       signature: { algorithm: "ed25519", keyId: "route-fixture-key", value: "placeholder" },
@@ -1659,6 +1660,7 @@ async function installGoalProjectionFixture(input: {
     engineCompat: {
       schemaLatest: "0055_goal_runtime.sql",
       requiresMigrations: ["0055_goal_runtime.sql"],
+      baseRange: ">=1.0.0 <2.0.0",
     },
     contentHash: computeRealmWorldContentHash(files),
     signature: { algorithm: "ed25519", keyId: "fixture-key", value: "placeholder" },

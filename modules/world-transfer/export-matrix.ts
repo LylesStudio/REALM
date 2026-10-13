@@ -117,7 +117,7 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
       "actor_participant_id",
       "visibility_policy_id",
     ],
-    forcedNullColumns: ["causation_command_id", "turn_run_id"],
+    forcedNullColumns: ["causation_command_id", "turn_run_id", "command_group_id"],
   }),
   row("record_heads", "FA", "A", {
     rewriteColumns: ["record_id", "last_event_id"],
@@ -146,6 +146,11 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   // RealmWorld 版本），不是世界内容；绑定真相随 records.world_version
   // 走，审计行不进 .realm 包。
   row("realmworld_version_switches", "excluded", null),
+  // 0059 World Command 台账是跨 Record 提交的运行时幂等/结果 ledger
+  // （同 command_inbox/turn_runs/outbox 的 excluded 语义），不是世界
+  // 内容，不进 .realm 包。
+  row("world_command_groups", "excluded", null),
+  row("world_command_records", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [
       "observer_continuity_id",
@@ -180,6 +185,7 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   }),
   row("action_receipts", "FA", "A", {
     rewriteColumns: ["record_id", "actor_character_instance_id", "source_event_id"],
+    forcedNullColumns: ["command_group_id"],
   }),
   row("character_effects", "FA", "A", {
     rewriteColumns: [
@@ -280,6 +286,8 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("graph_invalidation_events", "excluded", null),
   row("record_first_nights", "excluded", null),
   row("record_self_play_sessions", "excluded", null),
+  // 0058：统一 durable job 队列是运行时操作状态（租约/尝试计数），永不导出。
+  row("realm_durable_jobs", "excluded", null),
   row("accounts", "excluded", null),
   row("realm_import_jobs", "excluded", null),
   row("realm_import_job_events", "excluded", null),

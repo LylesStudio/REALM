@@ -145,7 +145,9 @@ test("formal release uses the documented lock order and one transaction", () => 
   const outboxInsert = adapter.indexOf("INSERT INTO outbox");
   const completion = adapter.indexOf("run.state = \"completed\"");
 
-  assert.ok(headLock >= 0 && worldlineLock > headLock);
+  // Slice 5 统一锁序：Worldline 行锁先于 Record head（跨 Record World
+  // Command 与单 Record commitRelease 同一顺序，消除 AB-BA 死锁窗口）。
+  assert.ok(worldlineLock >= 0 && headLock > worldlineLock);
   assert.ok(eventInsert > worldlineLock);
   assert.ok(observationInsert > eventInsert);
   assert.ok(outboxInsert > observationInsert);

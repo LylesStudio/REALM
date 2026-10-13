@@ -253,7 +253,7 @@ test("interrupting a turn commits nothing and the draft can be resubmitted", asy
   });
   const { repository, service } = createFixture({ orchestrator });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const pending = service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我先观察四周。",
@@ -282,7 +282,7 @@ test("interrupting a turn commits nothing and the draft can be resubmitted", asy
   assert.equal(events.length, 0);
 
   // 恢复后可正常重新提交。
-  const reloaded = await service.loadRecord();
+  const reloaded = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我先观察四周。",
@@ -297,7 +297,7 @@ test("addressed-but-unactivated character interjects once, then cools down", asy
   const turnControl = createTurnControl({ now: () => now, cooldownMs: 60_000 });
   const { repository, service } = createFixture({ turnControl });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "弥洛，你怎么看这段铭文？",
@@ -315,7 +315,7 @@ test("addressed-but-unactivated character interjects once, then cools down", asy
 
   // 冷却期内再次点名不再插话。
   // 插话提交后记录版本已推进，先重新加载获取最新写入授权。
-  const reloaded = await service.loadRecord();
+  const reloaded = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const second = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "弥洛，再确认一次？",
@@ -331,7 +331,7 @@ test("addressed-but-unactivated character interjects once, then cools down", asy
 
 test("unaddressed characters stay silent after a public turn", async () => {
   const { repository, service } = createFixture();
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -474,7 +474,7 @@ test("cancelling during visibility assessment aborts the whole main chain", asyn
   };
   const { repository, service } = createFixture({ visibilityAssessor: assessor });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const pending = service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我先观察四周。",
@@ -514,7 +514,7 @@ test("cancelling during DM planning cancels before drafting", async () => {
   };
   const { repository, service } = createFixture({ orchestrator });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const pending = service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我先观察四周。",

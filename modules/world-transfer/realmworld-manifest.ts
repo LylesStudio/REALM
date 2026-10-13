@@ -5,6 +5,8 @@
  * files, verify signatures, install packages, or mount a World. Those actions
  * belong to the loader lifecycle and must consume this fail-closed boundary.
  */
+import { parseEngineBaseVersionRange } from "./engine-base.ts";
+import { LOCAL_WORLD_VERSION } from "./realm-save.ts";
 
 export const REALMWORLD_FORMAT = "realmworld" as const;
 export const REALMWORLD_FORMAT_VERSION = 1 as const;
@@ -27,6 +29,12 @@ export class RealmWorldManifestError extends Error {
 export interface RealmWorldEngineCompat {
   schemaLatest: string;
   requiresMigrations: readonly string[];
+  /**
+   * 包声明兼容的引擎 base 内容版本区间（有界确定性文法，见
+   * engine-base.ts）。引擎 base 版本变化后不再兼容的包在
+   * install/mount/restore 闸 fail-closed（BASE_VERSION_INCOMPATIBLE）。
+   */
+  baseRange: string;
 }
 
 export interface RealmWorldSignature {
@@ -232,11 +240,26 @@ function normalizeManifest(value: unknown): RealmWorldManifestV1 {
       "manifest engineCompat must be an object",
     );
   }
-  assertExactKeys(engineCompatRaw, ["schemaLatest", "requiresMigrations"], "engineCompat");
+  assertExactKeys(
+    engineCompatRaw,
+    ["schemaLatest", "requiresMigrations", "baseRange"],
+    "engineCompat",
+  );
   const schemaLatest = requireMigrationName(
     requireField(engineCompatRaw, "schemaLatest", "engineCompat"),
     "engineCompat.schemaLatest",
   );
+  const baseRange = requireBoundedString(
+    requireField(engineCompatRaw, "baseRange", "engineCompat"),
+    "engineCompat.baseRange",
+    MAX_SCHEMA_LENGTH,
+  );
+  if (!parseEngineBaseVersionRange(baseRange)) {
+    throw new RealmWorldManifestError(
+      "INVALID_MANIFEST",
+      "manifest engineCompat.baseRange must be a valid base version range",
+    );
+  }
   const migrationsRaw = requireField(
     engineCompatRaw,
     "requiresMigrations",
@@ -305,17 +328,29 @@ function normalizeManifest(value: unknown): RealmWorldManifestV1 {
     };
   }
 
+  const worldId = requireIdentity(requireField(value, "worldId", "manifest"), "worldId");
+  const worldVersion = requireIdentity(
+    requireField(value, "worldVersion", "manifest"),
+    "worldVersion",
+  );
+  // 用户包绝不可冒充 engine-owned base 哨兵身份（base 不安装、不可卸载，
+  // 见 engine-base.ts）。
+  if (worldVersion === LOCAL_WORLD_VERSION) {
+    throw new RealmWorldManifestError(
+      "INVALID_MANIFEST",
+      "manifest worldVersion must not claim the engine base sentinel",
+    );
+  }
+
   return {
     format: REALMWORLD_FORMAT,
     formatVersion: REALMWORLD_FORMAT_VERSION,
-    worldId: requireIdentity(requireField(value, "worldId", "manifest"), "worldId"),
-    worldVersion: requireIdentity(
-      requireField(value, "worldVersion", "manifest"),
-      "worldVersion",
-    ),
+    worldId,
+    worldVersion,
     engineCompat: {
       schemaLatest,
       requiresMigrations: [...requiresMigrations].sort(),
+      baseRange,
     },
     contentHash: requireHash(requireField(value, "contentHash", "manifest")),
     signature,
@@ -336,6 +371,7 @@ export function serializeRealmWorldManifest(
     engineCompat: {
       schemaLatest: valid.engineCompat.schemaLatest,
       requiresMigrations: [...valid.engineCompat.requiresMigrations],
+      baseRange: valid.engineCompat.baseRange,
     },
     contentHash: valid.contentHash,
     signature: {
@@ -369,6 +405,7 @@ export function serializeRealmWorldManifestSigningPayload(
     engineCompat: {
       schemaLatest: valid.engineCompat.schemaLatest,
       requiresMigrations: [...valid.engineCompat.requiresMigrations],
+      baseRange: valid.engineCompat.baseRange,
     },
     contentHash: valid.contentHash,
   };

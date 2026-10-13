@@ -174,6 +174,9 @@ export type MergeUnsupportedReason =
   | "outbox"
   | "record_first_nights"
   | "record_self_play_sessions"
+  // 仓库探测到的统一 durable job 队列在途行（pending/claimed；terminal
+  // 行是源 Record 的运维历史，留在不可变源侧不阻塞合并）。
+  | "durable_jobs"
   // 仓库探测到的世界线级记忆运行态（本 slice 不复制；世界线级行
   // 归属到该世界线全部 Record 报告，任一存在即整体拒绝）。
   | "memory_conclusions"

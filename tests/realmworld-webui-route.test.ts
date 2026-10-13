@@ -56,6 +56,7 @@ function signedManifest(spec: FixtureSpec, files: Map<string, Uint8Array>): Real
     engineCompat: {
       schemaLatest: "0055_goal_runtime.sql",
       requiresMigrations: ["0055_goal_runtime.sql"],
+      baseRange: ">=1.0.0 <2.0.0",
     },
     contentHash: computeRealmWorldContentHash(files),
     signature: { algorithm: "ed25519", keyId: "key-a", value: "placeholder" },

@@ -364,34 +364,6 @@ export async function generateFirstNightPack(
   }
 }
 
-/**
- * 初夜调度器：单飞守卫按 recordId 去重（路由触发与懒重试共用），
- * 任何异常只留日志，绝不影响调用方。
- */
-export function createFirstNightScheduler(options: {
-  runFirstNight: (recordId: string) => Promise<void>;
-}): (recordId: string) => void {
-  const inFlight = new Set<string>();
-  return (recordId) => {
-    const key = recordId.trim();
-    if (!key || inFlight.has(key)) return;
-    inFlight.add(key);
-    void (async () => {
-      try {
-        await options.runFirstNight(key);
-      } catch (error) {
-        console.warn(
-          `[realm] first night skipped: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      } finally {
-        inFlight.delete(key);
-      }
-    })();
-  };
-}
-
 /** 上下文快照损坏时的兜底草稿：降级包仍能给出「万象未定」场景旁白。 */
 export const BLANK_FIRST_NIGHT_CONTEXT: FirstNightContext = {
   world: { name: "未命名世界", era: "", summary: "" },

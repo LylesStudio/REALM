@@ -18,12 +18,20 @@ import {
   composeDeterministicOpening,
   type FirstNightContext,
 } from "./first-night.ts";
-import { getPresetWorld, getPresetWorldDraft } from "./preset-worlds.ts";
+import { genesisDraftFromResolvedContent } from "./preset-worlds.ts";
 import {
+  genesisBindingFromDraft,
   normalizeGenesisLanguage,
   type GenesisLanguage,
   type WorldGenesisDraft,
 } from "./world-genesis.ts";
+import {
+  createBaseContentResolver,
+} from "../content-resolution/base-resolver.ts";
+import type {
+  ContentResolver,
+  GenesisContentRequest,
+} from "../content-resolution/public.ts";
 import {
   LOCAL_WORLD_VERSION,
   worldBindingFromWorldIdentity,
@@ -237,6 +245,18 @@ export interface LibraryService {
     scope: LibraryScope,
     draft: WorldGenesisDraft,
   ): Promise<{ worldId: string; storyId: string; recordId: string }>;
+  /**
+   * 内容驱动的 genesis 入口（内容解析层 §2.2/§6）：按 WorldBinding +
+   * contentKey + language 经注入的 ContentResolver 解析完整创世内容，
+   * 再走与手稿相同的 plan → draft → createGenesis 物化契约。base mode
+   * 使用 BaseContentResolver；world-bound binding 必须走
+   * instantiateRealmWorld（此处 fail-closed）；未知 contentKey
+   * fail-closed（INVALID_COMMAND），零残留。
+   */
+  createGenesisFromContent(
+    scope: LibraryScope,
+    request: GenesisContentRequest,
+  ): Promise<{ worldId: string; storyId: string; recordId: string }>;
   /** Materializes a signed declarative RealmWorld plan through the existing genesis transaction. */
   instantiateRealmWorld(
     scope: LibraryScope,
@@ -383,7 +403,11 @@ const VISIBLE_WORLDLINE_RULE = `(
 export function createPostgresLibraryService(
   database: WorkspaceDatabase,
   writeDatabase: WorkspaceDatabase = database,
+  options: { contentResolver?: ContentResolver } = {},
 ): LibraryService {
+  // 内容解析层（§2.2）：base 内置内容默认走 engine-owned BaseContentResolver；
+  // 调用方可注入其它实现（测试/未来 RealmWorld 组合），绝不静默降级。
+  const contentResolver = options.contentResolver ?? createBaseContentResolver();
   return {
     async list(scope) {
       return withWorkspaceTransaction(
@@ -588,16 +612,19 @@ export function createPostgresLibraryService(
           }
 
           if (command.kind === "preset-world") {
-            const preset = getPresetWorld(command.presetKey);
-            if (!preset) {
-              throw new LibraryServiceError("INVALID_COMMAND", "Unknown preset world key.");
-            }
             const language = normalizeGenesisLanguage(command.language)
               ?? await resolveAccountLanguage(client, scope);
-            const draft = getPresetWorldDraft(command.presetKey, language);
-            if (!draft) {
-              throw new LibraryServiceError("INVALID_COMMAND", "Preset world language is unavailable.");
+            // 内容解析层：preset 内容经 ContentResolver 按 base binding +
+            // contentKey + language 解析（未知 key fail-closed，零残留）。
+            const content = contentResolver.resolveGenesisContent({
+              binding: { kind: "base" },
+              contentKey: command.presetKey,
+              language,
+            });
+            if (!content) {
+              throw new LibraryServiceError("INVALID_COMMAND", "Unknown preset world key.");
             }
+            const draft = genesisDraftFromResolvedContent(content, language);
             // base 统一内容层（§6）：preset 草稿降格为参数，经 base 内容
             // provider 生成 instantiation plan，再走与 signed RealmWorld
             // 相同的 plan → draft → createGenesis 物化契约。
@@ -994,6 +1021,30 @@ export function createPostgresLibraryService(
           const declaredGoals = validateGenesisGoalDeclarations(draft.goals);
           const contentLanguage = draft.language
             ?? await resolveAccountLanguage(client, scope);
+          // 内容解析层：草稿 → WorldBinding 一级分发。base 声明的 Goal
+          // 必须经 ContentResolver 解析到 engine-owned 定义且
+          // policyVersion 精确一致——未知/不符 fail-closed，绝不把未解析
+          // 的声明物化进运行态。world-bound 草稿的定义由
+          // instantiateRealmWorld 的包内容层解析（本 slice 之外），此处
+          // 保持既有声明校验。
+          const contentBinding = genesisBindingFromDraft(draft);
+          if (contentBinding.kind === "base") {
+            for (const goal of declaredGoals) {
+              const definition = contentResolver.resolveGoal({
+                binding: contentBinding,
+                worldId: "",
+                worldVersion: LOCAL_WORLD_VERSION,
+                language: contentLanguage,
+                goalKey: goal.goalKey,
+              });
+              if (!definition || definition.policyVersion !== goal.policyVersion) {
+                throw new LibraryServiceError(
+                  "INVALID_COMMAND",
+                  "Base genesis Goal declaration does not resolve to an engine-owned definition.",
+                );
+              }
+            }
+          }
           const worldId = draft.worldIdentity?.worldId
             ?? `world_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
           const worldlineId = draft.runtimeIdentity?.worldlineId
@@ -1232,6 +1283,37 @@ export function createPostgresLibraryService(
           return { worldId, storyId, recordId };
         },
       );
+    },
+
+    async createGenesisFromContent(scope, request) {
+      // world-bound 内容必须走 instantiateRealmWorld（签名包 + 精确身份 +
+      // 幂等键），绝不在此降级为 base 或绕过包内容层。
+      if (request?.binding?.kind !== "base") {
+        throw new LibraryServiceError(
+          "INVALID_COMMAND",
+          "Content-driven genesis requires an exact { kind: \"base\" } WorldBinding.",
+        );
+      }
+      const language = normalizeGenesisLanguage(request.language);
+      if (!language) {
+        throw new LibraryServiceError(
+          "INVALID_COMMAND",
+          "Content-driven genesis requires a supported language.",
+        );
+      }
+      const content = contentResolver.resolveGenesisContent({
+        binding: { kind: "base" },
+        ...(request.contentKey !== undefined ? { contentKey: request.contentKey } : {}),
+        language,
+      });
+      if (!content) {
+        throw new LibraryServiceError("INVALID_COMMAND", "Unknown base content key.");
+      }
+      // 与手稿/包内容相同的物化契约：content → draft → base 参数 → plan →
+      // createGenesis（fail-closed 校验在各层重复执行，零残留兜底）。
+      const draft = genesisDraftFromResolvedContent(content, language);
+      const plan = createBaseInstantiationPlan(baseGenesisParametersFromDraft(draft));
+      return this.instantiateBaseWorld(scope, plan);
     },
 
     async instantiateRealmWorld(scope, plan, idempotencyKey) {
@@ -1609,11 +1691,13 @@ function compareBranchCursor(
  * 场景继承取「覆盖 fork 点的场景」（最近一个 start<=fork），而非恒为
  * 首个 scene。events 不复制、源 record 不改写。
  *
- * 锁序（world-write-gate.ts:9-13）：worlds(KEY SHARE) → records(FOR
- * UPDATE) → goal_instances(FOR UPDATE，③b) → record_heads →
- * worldlines/stories/records 插入。goal_instances 锁点与 assessment
- * settle 路径同序（records → goal_instances → record_heads），避免
- * AB-BA 死锁。源 record FOR UPDATE 同时是幂等/并发的串行点：同一源
+ * 锁序（world-write-gate.ts 头注释）：worlds(KEY SHARE) → records(FOR
+ * UPDATE) → record_heads(FOR UPDATE) → goal_instances(FOR UPDATE) →
+ * worldlines/stories/records 插入。Slice 5 统一锁序后 record_heads 在
+ * goal_instances 之前——与 assessment settle 路径（records →
+ * worldlines → record_heads → goal_instances）的相对顺序一致；两条
+ * 路径都由共享 records(FOR UPDATE) gate 先行串行化，无 AB-BA 窗口。
+ * 源 record FOR UPDATE 同时是幂等/并发的串行点：同一源
  * record 的并发分叉在此排队，check-then-insert 无竞态。
  *
  * Goal runtime（0055）：Goal instances 是 Record-scoped 运行态，分支是
@@ -1723,18 +1807,6 @@ async function createRecordBranchInTransaction(
     );
   }
 
-  // ③b Goal runtime 行快照（FOR UPDATE）。锁点刻意放在 records(FOR
-  // UPDATE) 之后、record_heads 之前——与 assessment settle 路径
-  // （goal-assessment-job-queue.ts：records → goal_instances →
-  // record_heads → worldlines）同序，避免分支与并发 Goal settle 的
-  // AB-BA 死锁。门禁判定在 ⑥b（fork 解析之后、拓扑写入之前）执行；
-  // 源 Record 无 Goal 时此处仅为一次安全空读。
-  const branchGoalSources = await lockGoalInstancesForBranch(
-    client,
-    scope.workspaceId,
-    sourceRecordId,
-  );
-
   // ④ record_heads（FOR UPDATE）→ effective head = COALESCE(last, start)。
   const headRow = await client.query<{
     last_world_tick: string | null;
@@ -1745,6 +1817,19 @@ async function createRecordBranchInTransaction(
      WHERE workspace_id = $1 AND record_id = $2
      FOR UPDATE`,
     [scope.workspaceId, sourceRecordId],
+  );
+
+  // ③b Goal runtime 行快照（FOR UPDATE）。锁点在 record_heads 之后——
+  // 与 assessment settle 路径（goal-assessment-job-queue.ts：records →
+  // worldlines → record_heads → goal_instances）的 record_heads →
+  // goal_instances 相对顺序一致；两条路径另由共享 records(FOR UPDATE)
+  // gate 先行串行化，避免分支与并发 Goal settle 的 AB-BA 死锁。门禁
+  // 判定在 ⑥b（fork 解析之后、拓扑写入之前）执行；源 Record 无 Goal
+  // 时此处仅为一次安全空读。
+  const branchGoalSources = await lockGoalInstancesForBranch(
+    client,
+    scope.workspaceId,
+    sourceRecordId,
   );
   const start = {
     tick: Math.max(0, Number(sourceRow.start_tick) || 0),

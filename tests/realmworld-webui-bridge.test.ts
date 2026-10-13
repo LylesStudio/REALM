@@ -25,6 +25,7 @@ function manifestWithWebUi(webui?: RealmWorldManifestV1["webui"]): RealmWorldMan
     engineCompat: {
       schemaLatest: "0055_goal_runtime.sql",
       requiresMigrations: ["0055_goal_runtime.sql"],
+      baseRange: ">=1.0.0 <2.0.0",
     },
     contentHash: "a".repeat(64),
     signature: { algorithm: "ed25519", keyId: "fixture-key", value: "unused" },

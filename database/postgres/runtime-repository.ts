@@ -658,7 +658,8 @@ export function createPostgresRuntimeRepository<
       try {
         return await inWorkspaceTransaction(options.pool, workspaceId, async (client) => {
           // Record metadata is read without a row lock. Formal writer locks are
-          // then acquired in the one global order: Record head, Worldline.
+          // then acquired in the one global order (Slice 5 统一锁序):
+          // Worldline first, then Record head.
           const initial = await client.query<TurnRow>(
             `SELECT run_checkpoint FROM turn_runs
              WHERE workspace_id = $1 AND id = $2`,
@@ -669,7 +670,7 @@ export function createPostgresRuntimeRepository<
           }
           const initialRun = hydrateRun(initial.rows[0]!.run_checkpoint);
           // v37 §D.0：C 面两拍——worlds(KEY SHARE)→records(FOR UPDATE)
-          // gate 先于 record_heads/worldlines 锁（锁序全局一致）；
+          // gate 先于 worldlines/record_heads 锁（锁序全局一致）；
           // archived 世界/记录在此拒绝。
           await gateRecordWritePath(client, initialRun.command.recordId);
           const scope = await requireRecordScope(
@@ -677,19 +678,6 @@ export function createPostgresRuntimeRepository<
             workspaceId,
             initialRun.command.recordId,
           );
-          const headResult = await client.query<HeadRow>(
-            `SELECT record_version, next_record_ordinal
-             FROM record_heads
-             WHERE workspace_id = $1 AND record_id = $2
-             FOR UPDATE`,
-            [workspaceId, initialRun.command.recordId],
-          );
-          if (headResult.rowCount !== 1) {
-            throw new FatalTurnError(
-              "RECORD_NOT_FOUND",
-              "The target Record no longer exists.",
-            );
-          }
           const worldlineResult = await client.query<WorldlineHeadRow>(
             `SELECT head_tick, head_ordinal
              FROM worldlines
@@ -701,6 +689,19 @@ export function createPostgresRuntimeRepository<
             throw new FatalTurnError(
               "WORLDLINE_NOT_FOUND",
               "The target Worldline no longer exists.",
+            );
+          }
+          const headResult = await client.query<HeadRow>(
+            `SELECT record_version, next_record_ordinal
+             FROM record_heads
+             WHERE workspace_id = $1 AND record_id = $2
+             FOR UPDATE`,
+            [workspaceId, initialRun.command.recordId],
+          );
+          if (headResult.rowCount !== 1) {
+            throw new FatalTurnError(
+              "RECORD_NOT_FOUND",
+              "The target Record no longer exists.",
             );
           }
 

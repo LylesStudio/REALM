@@ -265,7 +265,7 @@ test(
       [ws],
     );
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     queries.length = 0;
     const committed = await service.submitMessage({
       recordId: POSTGRES_DEMO_IDS.record,

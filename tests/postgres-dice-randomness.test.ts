@@ -289,7 +289,7 @@ test(
     // 脚本顺序：2d6 [3,5] → percentile [38] → pool [6,2,5] → draw index 2（金币）。
     const script = scriptedRandom([3, 5, 38, 6, 2, 5, 2]);
     const service = createService(runtimePool, script.randomInt);
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
 
     async function submitSkill(
       skillId: string,
@@ -372,7 +372,7 @@ test(
     );
     assert.equal(afterReplay.rows[0]!.count, 4);
     // 重读投影（跨实例）→ 同一物化骰点（读库不重掷）。
-    const reread = await service.loadRecord();
+    const reread = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     assert.deepEqual(diceOf(reread), drawDice);
   },
 );
@@ -388,7 +388,7 @@ test(
     // → 剩余 [铜币] index 0（铜币）。
     const script = scriptedRandom([2, 1, 0]);
     const service = createService(runtimePool, script.randomInt);
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
 
     const drawn: string[] = [];
     let writeToken = initial.writeToken;

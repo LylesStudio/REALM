@@ -22,8 +22,10 @@ import { LOCAL_WORLD_VERSION } from "../../../../modules/world-transfer/realm-sa
 import { resolveBaseGoalDefinition } from "../../../../modules/world-transfer/base-content.ts";
 import {
   createRealmWorldSignatureVerifierFromTrustStoreDocument,
+  validateRealmWorldTrustStoreDocument,
   type RealmWorldTrustStoreDocumentV1,
 } from "../../../../modules/world-transfer/realmworld-signature.ts";
+import { resolveEngineBaseActiveVersion } from "../../../../modules/world-transfer/realmworld-trust-store.ts";
 import { resolveRequestPrincipal, unauthorizedResponse } from "../../auth-context.ts";
 
 export const runtime = "nodejs";
@@ -110,11 +112,16 @@ export async function createProjectionDefinitionResolver() {
     return null;
   }
   let verifySignature;
+  let engineBaseVersion;
   try {
+    const validDocument = validateRealmWorldTrustStoreDocument(
+      document as RealmWorldTrustStoreDocumentV1,
+    );
     verifySignature = createRealmWorldSignatureVerifierFromTrustStoreDocument({
-      document: document as RealmWorldTrustStoreDocumentV1,
+      document: validDocument,
       now: new Date(),
     });
+    engineBaseVersion = resolveEngineBaseActiveVersion(validDocument);
   } catch {
     return null;
   }
@@ -122,5 +129,6 @@ export async function createProjectionDefinitionResolver() {
     installRoot,
     verifySignature,
     baseResolver: resolveBaseGoalDefinition,
+    engineBaseVersion,
   });
 }

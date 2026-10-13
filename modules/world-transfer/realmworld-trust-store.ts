@@ -12,14 +12,20 @@ import { constants } from "node:fs";
 import { lstat, open, rename, rm, type FileHandle } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
+import {
+  ENGINE_BASE_CONTENT_VERSION,
+  ENGINE_BASE_CONTENT_VERSIONS,
+} from "./engine-base.ts";
 import type {
   RealmWorldSignatureVerifier,
   RealmWorldSignatureVerifierInput,
 } from "./realmworld-loader.ts";
+import { parseRealmWorldVersion } from "./realmworld-version.ts";
 import {
   createRealmWorldSignatureVerifierFromTrustStoreDocument,
   RealmWorldTrustStoreError,
   validateRealmWorldTrustStoreDocument,
+  type RealmWorldTrustStoreBaseV1,
   type RealmWorldTrustStoreDocumentV1,
   type RealmWorldTrustStoreKeyV1,
   type RealmWorldTrustStoreStatus,
@@ -106,11 +112,13 @@ function rejectExistingKey(
 /** Validate the candidate document before it may be activated or persisted. */
 function commitKeys(
   keys: readonly RealmWorldTrustStoreKeyV1[],
+  base?: RealmWorldTrustStoreBaseV1,
 ): RealmWorldTrustStoreDocumentV1 {
   return validateRealmWorldTrustStoreDocument({
     format: "realmworld-trust-store",
     version: 1,
     keys,
+    ...(base === undefined ? {} : { base }),
   });
 }
 
@@ -143,7 +151,7 @@ export function addRealmWorldTrustStoreKey(input: {
       status: input.status ?? "active",
       ...optionalWindow(input.notBefore, input.notAfter),
     },
-  ]);
+  ], document.base);
 }
 
 /** Pure mutation: (re)activate an existing key, optionally setting its window. */
@@ -157,7 +165,7 @@ export function activateRealmWorldTrustStoreKey(input: {
   requireKey(document, input.keyId);
   return commitKeys(document.keys.map((key) => key.keyId === input.keyId
     ? { ...key, status: "active", ...optionalWindow(input.notBefore, input.notAfter) }
-    : key));
+    : key), document.base);
 }
 
 /** Pure mutation: revoke an existing key, optionally expiring it at a time. */
@@ -170,7 +178,7 @@ export function revokeRealmWorldTrustStoreKey(input: {
   requireKey(document, input.keyId);
   return commitKeys(document.keys.map((key) => key.keyId === input.keyId
     ? { ...key, status: "revoked", ...(input.notAfter === undefined ? {} : { notAfter: input.notAfter }) }
-    : key));
+    : key), document.base);
 }
 
 /**
@@ -205,7 +213,7 @@ export function rotateRealmWorldTrustStoreKey(input: {
     status: "active",
     ...optionalWindow(input.notBefore, input.notAfter),
   });
-  return commitKeys(keys);
+  return commitKeys(keys, document.base);
 }
 
 /**
@@ -278,4 +286,121 @@ export function createRealmWorldSignatureVerifierFromTrustStoreFile(input: {
       return false;
     }
   };
+}
+
+// ---------------------------------------------------------------------------
+// Engine base 内容版本 operator lifecycle（Slice 5）
+// ---------------------------------------------------------------------------
+//
+// base content provider 是 engine-owned、不安装、不可卸载；operator 能管理
+// 的只是"活动 base 内容版本"（包兼容闸 engineCompat.baseRange 的对照版本）。
+// 目标版本必须属于引擎可 serve 集合（默认 ENGINE_BASE_CONTENT_VERSIONS；
+// 测试可注入），未知/不可 serve/形态非法一律 fail-closed。
+
+/** 文档声明的活动 base 版本；无 base 段 = 引擎当前版本（默认兼容基线）。 */
+export function resolveEngineBaseActiveVersion(
+  document: RealmWorldTrustStoreDocumentInput,
+): string {
+  const parsed = validateRealmWorldTrustStoreDocument(document);
+  return parsed.base?.activeVersion ?? ENGINE_BASE_CONTENT_VERSION;
+}
+
+function requireBaseVersion(
+  version: string,
+  availableVersions: readonly string[],
+): string {
+  if (!parseRealmWorldVersion(version)) {
+    throw new RealmWorldTrustStoreError(
+      "BASE_VERSION_INVALID",
+      "base version must be strict semver",
+    );
+  }
+  if (!availableVersions.includes(version)) {
+    throw new RealmWorldTrustStoreError(
+      "BASE_VERSION_UNSUPPORTED",
+      "base version is not servable by this engine",
+    );
+  }
+  return version;
+}
+
+function commitBase(
+  document: RealmWorldTrustStoreDocumentV1,
+  base: RealmWorldTrustStoreBaseV1,
+): RealmWorldTrustStoreDocumentV1 {
+  return commitKeys(document.keys, base);
+}
+
+/**
+ * Pure mutation: 首次显式激活 base 版本（文档尚无 base 段）。已有 base 段
+ * 时必须用 switch/rollback——重复 activate 同版本按幂等 replay 返回原文档。
+ */
+export function activateRealmWorldTrustStoreBase(input: {
+  document: RealmWorldTrustStoreDocumentInput;
+  version: string;
+  availableVersions?: readonly string[];
+}): RealmWorldTrustStoreDocumentV1 {
+  const document = validateRealmWorldTrustStoreDocument(input.document);
+  const available = input.availableVersions ?? ENGINE_BASE_CONTENT_VERSIONS;
+  const version = requireBaseVersion(input.version, available);
+  if (document.base) {
+    if (document.base.activeVersion === version) return document;
+    throw new RealmWorldTrustStoreError(
+      "BASE_ALREADY_ACTIVE",
+      "base content is already active; use switch",
+    );
+  }
+  return commitBase(document, { activeVersion: version });
+}
+
+/**
+ * Pure mutation: 切换活动 base 版本。目标必须可 serve 且不同于当前；
+ * 同版本按幂等 replay 返回原文档；切换记录 previousVersion 作为回滚目标。
+ */
+export function switchRealmWorldTrustStoreBase(input: {
+  document: RealmWorldTrustStoreDocumentInput;
+  targetVersion: string;
+  availableVersions?: readonly string[];
+}): RealmWorldTrustStoreDocumentV1 {
+  const document = validateRealmWorldTrustStoreDocument(input.document);
+  if (!document.base) {
+    throw new RealmWorldTrustStoreError(
+      "BASE_NOT_ACTIVE",
+      "base content is not active; use activate",
+    );
+  }
+  const available = input.availableVersions ?? ENGINE_BASE_CONTENT_VERSIONS;
+  const target = requireBaseVersion(input.targetVersion, available);
+  if (document.base.activeVersion === target) return document;
+  return commitBase(document, {
+    activeVersion: target,
+    previousVersion: document.base.activeVersion,
+  });
+}
+
+/**
+ * Pure mutation: 回滚到最近一次 switch 前的活动 base 版本。无回滚目标或
+ * 目标已不可 serve 一律 fail-closed；回滚后清除 previousVersion。
+ */
+export function rollbackRealmWorldTrustStoreBase(input: {
+  document: RealmWorldTrustStoreDocumentInput;
+  availableVersions?: readonly string[];
+}): RealmWorldTrustStoreDocumentV1 {
+  const document = validateRealmWorldTrustStoreDocument(input.document);
+  if (!document.base) {
+    throw new RealmWorldTrustStoreError(
+      "BASE_NOT_ACTIVE",
+      "base content is not active; use activate",
+    );
+  }
+  const previous = document.base.previousVersion;
+  if (!previous) {
+    throw new RealmWorldTrustStoreError(
+      "BASE_ROLLBACK_UNAVAILABLE",
+      "no previous base version is recorded",
+    );
+  }
+  const available = input.availableVersions ?? ENGINE_BASE_CONTENT_VERSIONS;
+  requireBaseVersion(previous, available);
+  return commitBase(document, { activeVersion: previous });
 }

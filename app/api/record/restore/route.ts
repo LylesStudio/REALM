@@ -35,6 +35,7 @@ function repositoryStatus(code: RealmRuntimeSaveRepositoryError["code"]): number
   if (code === "RESTORE_ID_COLLISION" || code === "RESTORE_CONFLICT") return 409;
   if (code === "WORLD_ARCHIVED") return 409;
   if (code === "REALMWORLD_IDENTITY_MISMATCH") return 409;
+  if (code === "BASE_VERSION_INCOMPATIBLE") return 409;
   if (
     code === "REALMWORLD_VALIDATION_UNAVAILABLE"
     || code === "REALMWORLD_PACKAGE_MISSING"
@@ -53,6 +54,7 @@ function repositoryStatus(code: RealmRuntimeSaveRepositoryError["code"]): number
 export function createRealmRuntimeSaveWorldBindingValidator(environment: {
   installRoot: string;
   verifySignature: RealmWorldSignatureVerifier;
+  engineBaseVersion: string;
 }): RealmRuntimeSaveWorldBindingValidator {
   return async (binding) => {
     let mounted;
@@ -62,8 +64,18 @@ export function createRealmRuntimeSaveWorldBindingValidator(environment: {
         worldId: binding.worldId,
         worldVersion: binding.worldVersion,
         verifySignature: environment.verifySignature,
+        engineBaseVersion: environment.engineBaseVersion,
       });
     } catch (error) {
+      if (
+        error instanceof RealmWorldLoaderError
+        && error.code === "BASE_VERSION_INCOMPATIBLE"
+      ) {
+        throw new RealmRuntimeSaveRepositoryError(
+          "BASE_VERSION_INCOMPATIBLE",
+          "The bound RealmWorld package is not compatible with the active engine base version.",
+        );
+      }
       if (error instanceof RealmWorldLoaderError && error.code === "WORLD_NOT_INSTALLED") {
         throw new RealmRuntimeSaveRepositoryError(
           "REALMWORLD_PACKAGE_MISSING",
@@ -133,20 +145,23 @@ export async function POST(request: Request) {
   }
 
   // world-bound 存档：install/trust 配置缺失或无效同样 fail-closed（503），
-  // 绝不退化为未验签；base 存档不读取任何 RealmWorld 配置。
+  // 绝不退化为未验签；base 存档不读取任何 RealmWorld 配置——除非目标
+  // World 是 world-bound（升级路径，由 repository 决定何时调用 validator）。
   let validateWorldBinding: RealmRuntimeSaveWorldBindingValidator | undefined;
-  if (archive.manifest.mode === "world-bound") {
-    const verifier = await readRealmWorldVerifier();
-    if (!verifier) {
-      return errorResponse("REALMWORLD_VALIDATION_UNAVAILABLE", 503);
-    }
+  let validateUpgradeTarget: RealmRuntimeSaveWorldBindingValidator | undefined;
+  const verifier = await readRealmWorldVerifier();
+  if (archive.manifest.mode === "world-bound" && !verifier) {
+    return errorResponse("REALMWORLD_VALIDATION_UNAVAILABLE", 503);
+  }
+  if (verifier) {
     validateWorldBinding = createRealmRuntimeSaveWorldBindingValidator(verifier);
+    validateUpgradeTarget = validateWorldBinding;
   }
 
   try {
     const restorer = createPostgresRealmRuntimeSaveRestorer(
       getSharedRuntimePool(connectionString),
-      { validateWorldBinding },
+      { validateWorldBinding, validateUpgradeTarget },
     );
     const result = await restorer.restore({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,

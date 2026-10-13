@@ -4,6 +4,7 @@ import { getModelSettingsService } from "../modules/application/model-settings-s
 import {
   createRealmWorldSignatureVerifierFromTrustStoreFile,
   readRealmWorldTrustStoreFile,
+  resolveEngineBaseActiveVersion,
 } from "../modules/world-transfer/realmworld-trust-store.ts";
 
 /**
@@ -37,7 +38,10 @@ const installRoot = required("REALM_GOAL_WORKER_INSTALL_ROOT");
 const trustStorePath = required("REALM_REALMWORLD_TRUST_STORE");
 // Initial configuration validation stays fail-fast: an unreadable or invalid
 // trust store aborts worker startup instead of degrading verification.
-await readRealmWorldTrustStoreFile(trustStorePath);
+// The operator-active engine base version is captured at startup (restart to
+// pick up base activate/switch/rollback, like any deploy-time compat change).
+const trustDocument = await readRealmWorldTrustStoreFile(trustStorePath);
+const engineBaseVersion = resolveEngineBaseActiveVersion(trustDocument);
 const verifySignature = createRealmWorldSignatureVerifierFromTrustStoreFile({
   path: trustStorePath,
 });
@@ -55,6 +59,7 @@ const runtime = createGoalAssessmentWorkerRuntime({
   connectionString,
   installRoot,
   verifySignature,
+  engineBaseVersion,
   judge,
   workspaces: csv(process.env.REALM_GOAL_WORKER_WORKSPACES, "ws_demo"),
   leaseDurationMs: positiveInteger(process.env.REALM_GOAL_WORKER_LEASE_DURATION_MS, 30_000),

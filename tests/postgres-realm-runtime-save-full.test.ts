@@ -272,7 +272,7 @@ test(
     const skillAffordance = affordances.find((item) => item.id.startsWith("skill.keen_insight"))?.id;
     assert.ok(skillAffordance, "catalog should expose a keen_insight skill affordance");
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const skillTurn = await service.submitMessage({
       recordId: RECORD_SCOPE.recordId,
       content: "仔细观察周围环境。",

@@ -10,11 +10,14 @@
 import {
   createRealmWorldSignatureVerifierFromTrustStoreFile,
   readRealmWorldTrustStoreFile,
+  resolveEngineBaseActiveVersion,
 } from "../../../modules/world-transfer/realmworld-trust-store.ts";
 
 export async function readRealmWorldVerifier(): Promise<{
   installRoot: string;
   verifySignature: ReturnType<typeof createRealmWorldSignatureVerifierFromTrustStoreFile>;
+  /** operator 活动 base 内容版本（trust-store base 段；缺省引擎当前版本）。 */
+  engineBaseVersion: string;
 } | null> {
   const installRoot = process.env.REALM_REALMWORLD_INSTALL_ROOT
     ?? process.env.REALM_GOAL_WORKER_INSTALL_ROOT;
@@ -22,12 +25,13 @@ export async function readRealmWorldVerifier(): Promise<{
   if (!installRoot || !trustStorePath) return null;
   try {
     // 初始配置校验：trust store 不可读/无效 → null（fail-closed），绝不降级。
-    await readRealmWorldTrustStoreFile(trustStorePath);
+    const document = await readRealmWorldTrustStoreFile(trustStorePath);
     return {
       installRoot,
       verifySignature: createRealmWorldSignatureVerifierFromTrustStoreFile({
         path: trustStorePath,
       }),
+      engineBaseVersion: resolveEngineBaseActiveVersion(document),
     };
   } catch {
     return null;

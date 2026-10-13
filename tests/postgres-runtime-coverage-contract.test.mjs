@@ -30,6 +30,9 @@ const pgWiredTests = new Set(
 
 const explicitlyManualPgTests = new Set([
   "tests/postgres-article-qualification-benchmark.test.ts",
+  // 真实 provider opt-in 验收：自举独立 scratch 集群，仅在
+  // REALM_TEST_PROVIDER_API_KEY 存在时运行，不进默认 scratch 套件。
+  "tests/goal-semantic-judge-real-provider.test.ts",
 ]);
 
 const requiredScratchIntegrations = [

@@ -626,7 +626,7 @@ test("restricted/private schedule：不读 projection、不调 crystallizer、�
   const { service, track } = createFixture({ visibilityAssessor: assessor });
 
   // 真实确认流程：restricted 提案先要求玩家确认，确认后回合才提交。
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   let proposalId = "";
   await assert.rejects(
     service.submitMessage({

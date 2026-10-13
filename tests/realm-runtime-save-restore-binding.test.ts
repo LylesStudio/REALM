@@ -188,6 +188,83 @@ test("base 存档无 validator 也可进入 DB 阶段（绕过 RealmWorld 闸）
   assert.ok(touched() > 0, "base 存档不得要求 RealmWorld validator");
 });
 
+/**
+ * base→world-bound 升级路径（Slice 5）：目标 World 非 base 版本时，restore
+ * 必须先经 validateUpgradeTarget 证明目标精确 binding 已安装/可信/兼容
+ * 活动 base 版本；缺 seam 或验证失败一律 fail-closed，绝不静默升级。
+ */
+function fakeDatabaseWithWorldVersion(worldVersion: string): WorkspaceDatabase {
+  const client = {
+    query: async (sql: string) => {
+      if (
+        sql.startsWith("BEGIN")
+        || sql === "COMMIT"
+        || sql === "ROLLBACK"
+        || sql.includes("set_config")
+        || sql.includes("current_setting")
+      ) {
+        return { rows: [{ workspace_id: null }], rowCount: 0 };
+      }
+      if (sql.includes("FROM worlds")) {
+        return { rows: [{ world_version: worldVersion, status: "active" }], rowCount: 1 };
+      }
+      throw new Error("db-touched-sentinel");
+    },
+    release: () => {},
+  };
+  return {
+    connect: async () => client,
+    query: client.query,
+  } as unknown as WorkspaceDatabase;
+}
+
+test("base→world-bound 升级：缺 validateUpgradeTarget seam → REALMWORLD_VALIDATION_UNAVAILABLE", async () => {
+  const database = fakeDatabaseWithWorldVersion(WORLD_VERSION);
+  await assert.rejects(
+    () => createPostgresRealmRuntimeSaveRestorer(database).restore({
+      ...restoreInput(baseArchive()),
+      targetWorldId: WORLD_ID,
+    }),
+    (error: unknown) => error instanceof RealmRuntimeSaveRepositoryError
+      && error.code === "REALMWORLD_VALIDATION_UNAVAILABLE",
+  );
+});
+
+test("base→world-bound 升级：validator 收到精确目标 binding；其错误原样上抛", async () => {
+  const database = fakeDatabaseWithWorldVersion(WORLD_VERSION);
+  const seen: { worldId: string; worldVersion: string }[] = [];
+  await assert.rejects(
+    () => createPostgresRealmRuntimeSaveRestorer(database, {
+      validateUpgradeTarget: async (binding) => {
+        seen.push({ ...binding });
+        throw new RealmRuntimeSaveRepositoryError(
+          "BASE_VERSION_INCOMPATIBLE",
+          "The bound RealmWorld package is not compatible with the active engine base version.",
+        );
+      },
+    }).restore({ ...restoreInput(baseArchive()), targetWorldId: WORLD_ID }),
+    (error: unknown) => error instanceof RealmRuntimeSaveRepositoryError
+      && error.code === "BASE_VERSION_INCOMPATIBLE",
+  );
+  // 精确目标 binding = 目标 worldId + 目标 World 当前版本（绝非 base 哨兵）。
+  assert.deepEqual(seen, [{ worldId: WORLD_ID, worldVersion: WORLD_VERSION }]);
+});
+
+test("base→base 恢复绝不调用 validateUpgradeTarget", async () => {
+  const database = fakeDatabaseWithWorldVersion("0.0.0-local");
+  let calls = 0;
+  await assert.rejects(
+    () => createPostgresRealmRuntimeSaveRestorer(database, {
+      validateUpgradeTarget: async () => {
+        calls += 1;
+      },
+    }).restore({ ...restoreInput(baseArchive()), targetWorldId: "world-base" }),
+    // base 目标 → 跳过升级闸，进入后续 DB 阶段（sentinel）。
+    (error: unknown) => error instanceof Error && error.message === "db-touched-sentinel",
+  );
+  assert.equal(calls, 0);
+});
+
 async function installFixturePackage(input: {
   installRoot: string;
   worldId: string;
@@ -212,7 +289,7 @@ async function installFixturePackage(input: {
     formatVersion: REALMWORLD_FORMAT_VERSION,
     worldId: input.worldId,
     worldVersion: input.version,
-    engineCompat: { schemaLatest: "0057_realmworld_record_binding.sql", requiresMigrations: [] },
+    engineCompat: { schemaLatest: "0057_realmworld_record_binding.sql", requiresMigrations: [], baseRange: ">=1.0.0 <2.0.0" },
     contentHash: computeRealmWorldContentHash(files),
     signature: { algorithm: "ed25519", keyId: "pure-fixture-key", value: "placeholder" },
   };
@@ -254,6 +331,7 @@ test("validator 工厂：精确包通过；缺包/篡改/签名/identity 失败�
   const validator = createRealmRuntimeSaveWorldBindingValidator({
     installRoot,
     verifySignature: ({ manifest }) => manifest.signature.value === signature,
+    engineBaseVersion: "1.0.0",
   });
 
   // 精确 identity 的已安装可信包 → 通过。
@@ -305,6 +383,43 @@ test("validator 工厂：精确包通过；缺包/篡改/签名/identity 失败�
     (error: unknown) => error instanceof RealmRuntimeSaveRepositoryError
       && error.code === "REALMWORLD_IDENTITY_MISMATCH",
   );
+});
+
+test("validator 工厂：活动 base 版本不兼容 → BASE_VERSION_INCOMPATIBLE，不泄露路径/签名", async (t) => {
+  const dataHome = await mkdtemp(join(tmpdir(), "realm-pure-compat-"));
+  t.after(() => rm(dataHome, { recursive: true, force: true }));
+  const installRoot = join(dataHome, "installed");
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const { signature, sourceDir } = await installFixturePackage({
+    installRoot,
+    worldId: WORLD_ID,
+    version: WORLD_VERSION,
+    privateKey,
+  });
+  await rm(sourceDir, { recursive: true, force: true });
+  // 包声明 baseRange ">=1.0.0 <2.0.0"；活动 base 版本 2.0.0 → fail-closed。
+  const validator = createRealmRuntimeSaveWorldBindingValidator({
+    installRoot,
+    verifySignature: ({ manifest }) => manifest.signature.value === signature,
+    engineBaseVersion: "2.0.0",
+  });
+  await assert.rejects(
+    () => validator({ worldId: WORLD_ID, worldVersion: WORLD_VERSION }),
+    (error: unknown) => {
+      assert.ok(error instanceof RealmRuntimeSaveRepositoryError);
+      assert.equal(error.code, "BASE_VERSION_INCOMPATIBLE");
+      assert.ok(!error.message.includes(installRoot), "不得泄露 installRoot");
+      assert.ok(!error.message.includes("signature"), "不得泄露签名细节");
+      return true;
+    },
+  );
+  // 匹配的活动 base 版本 → 同一包恢复可用（rollback 恢复兼容基线语义）。
+  const compatible = createRealmRuntimeSaveWorldBindingValidator({
+    installRoot,
+    verifySignature: ({ manifest }) => manifest.signature.value === signature,
+    engineBaseVersion: "1.0.0",
+  });
+  await compatible({ worldId: WORLD_ID, worldVersion: WORLD_VERSION });
 });
 
 test("restore 路由：world-bound 缺 install/trust 配置 → 503 REALMWORLD_VALIDATION_UNAVAILABLE", async (t) => {

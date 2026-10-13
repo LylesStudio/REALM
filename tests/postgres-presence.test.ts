@@ -144,7 +144,7 @@ test(
     });
 
     // ---- 回合 1：未点名 → 弥洛自主在场一次 ----
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const committed = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "我沿着防波堤慢慢走。",
@@ -219,7 +219,7 @@ test(
     assert.ok(observationCount.rows[0].count >= 1);
 
     // ---- 回合 2：预算按回合重置，仍各至多 1 次 ----
-    const reloaded = await service.loadRecord();
+    const reloaded = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const second = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "我停下来听潮声。",

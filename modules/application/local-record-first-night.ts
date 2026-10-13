@@ -4,7 +4,10 @@
  * 依赖装配与调用接线：
  *   - 未装配 source → null；source.load 返回 null（旧世界无状态行）→ null；
  *   - ready/degraded 保留 hookContent；pending 保留 marker 内容并触发一次
- *     fire-and-forget 懒调度（不等待、不抛错、同一 load 调用只调度一次）；
+ *     fire-and-forget 懒调度（不等待、不抛错、同一 load 调用只调度一次）——
+ *     Slice 3 起 schedule 由装配侧入队 durable first-night job（active 去重、
+ *     terminal 重排），claimed job 执行 seal/ready 并幂等收束；coordinator
+ *     自身不感知队列实现；
  *   - openingSuggestions 逐项 trim 后过滤空字符串，顺序不变；
  *   - load 或 schedule 抛错均 fail-closed warn-only，不影响 envelope 主路径；
  *   - warn 只写静态文本，绝不携带原始错误、连接串、token 或 secret。
@@ -24,8 +27,9 @@ export interface FirstNightMarker {
 
 /**
  * 初夜 marker 窄数据源：load 返回 null 表示旧世界无状态行；schedule 为
- * fire-and-forget 懒重试调度（缺省不调度）。与 read-model/service 的
- * firstNight 依赖 shape 结构兼容（薄 compatibility adapter）。
+ * fire-and-forget 懒重试调度（缺省不调度；Slice 3 由 durable job 入队承载）。
+ * 与 read-model/service 的 firstNight 依赖 shape 结构兼容（薄 compatibility
+ * adapter）。
  */
 export interface FirstNightMarkerSource {
   load(recordId: string): Promise<FirstNightMarker | null>;

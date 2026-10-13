@@ -122,7 +122,7 @@ if (!adminConnectionString) {
 
 
   // ------------------------------------------------------------------
-  test("full migration chain via real runner: ledger checksums, idempotent replay, 72 tables", { timeout: 300_000 }, async (t) => {
+  test("full migration chain via real runner: ledger checksums, idempotent replay, 75 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -132,7 +132,9 @@ if (!adminConnectionString) {
     assert.match(first, /apply 0042_realm_transfer_and_import_jobs\.sql/);
     assert.match(first, /apply 0043_propagation_node_audience_archived_guard\.sql/);
     assert.match(first, /apply 0057_realmworld_record_binding\.sql/);
-    assert.match(first, /72 tables/);
+    assert.match(first, /apply 0058_durable_job_queue\.sql/);
+    assert.match(first, /apply 0059_world_commands\.sql/);
+    assert.match(first, /75 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(

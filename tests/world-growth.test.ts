@@ -597,7 +597,7 @@ const GROWTH_EXTRACTION: SceneExtraction = {
 
 test("a committed public turn grows world claims and profile notes without a scene correction", { timeout: 15_000 }, async () => {
   const fixture = createGrowthFixture({ extraction: GROWTH_EXTRACTION });
-  const initial = await fixture.service.loadRecord();
+  const initial = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await fixture.service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "塞娜说她认得灯塔上的刻痕。",
@@ -661,7 +661,7 @@ test("repeated scheduling is idempotent: no duplicate claims or notes", { timeou
   const fixture = createGrowthFixture({ extraction: GROWTH_EXTRACTION });
   for (const key of ["growth-repeat-1", "growth-repeat-2"]) {
     // 每回合重新取写令牌（single-writer CAS：上一回合提交后版本已推进）。
-    const envelope = await fixture.service.loadRecord();
+    const envelope = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const committed = await fixture.service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "塞娜又提起灯塔的刻痕。",
@@ -697,7 +697,7 @@ test("a restricted turn never produces public growth", { timeout: 15_000 }, asyn
       },
     },
   });
-  const initial = await fixture.service.loadRecord();
+  const initial = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   let proposalId = "";
   await assert.rejects(
     fixture.service.submitMessage({
@@ -739,7 +739,7 @@ test("growth failure only warns and never breaks the committed turn", { timeout:
     extraction: GROWTH_EXTRACTION,
     failKnowledge: true,
   });
-  const initial = await fixture.service.loadRecord();
+  const initial = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await fixture.service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "塞娜说她认得灯塔上的刻痕。",
@@ -750,7 +750,7 @@ test("growth failure only warns and never breaks the committed turn", { timeout:
   // 后台管线失败被吞掉（warn）：轮询确认 extraction 已运行后进程无未捕获异常。
   await eventually(() => fixture.extractInputs.length > 0);
   await new Promise((resolve) => setTimeout(resolve, 150));
-  const reloaded = await fixture.service.loadRecord();
+  const reloaded = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   assert.ok(reloaded.writeToken);
 });
 
@@ -763,7 +763,7 @@ test("unresolvable source event is fail-closed: zero growth writes, no tick=0 fa
       extraction: GROWTH_EXTRACTION,
       unknownSource: true,
     });
-    const initial = await fixture.service.loadRecord();
+    const initial = await fixture.service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const committed = await fixture.service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "塞娜说她认得灯塔上的刻痕。",

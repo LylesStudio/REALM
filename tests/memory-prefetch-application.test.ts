@@ -266,7 +266,7 @@ test("prefetch begins before orchestration and ends once per committed turn", as
     memoryPrefetch: spy,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "先不要拆信，检查信使离开的方向。",
@@ -322,7 +322,7 @@ test("prefetch session is cleaned up even when the turn fails", async () => {
     memoryPrefetch: spy,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await assert.rejects(
     service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
@@ -351,7 +351,7 @@ test("interjection turns begin and end their own prefetch sessions", async () =>
     interjectionPolicy,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "塞娜，你怎么看这封信？",

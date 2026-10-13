@@ -1,4 +1,5 @@
 import { normalizeWorldStyle, type WorldStyle } from "../style/world-style.ts";
+import type { WorldBinding } from "../world-transfer/realm-save.ts";
 
 /**
  * 启笔铸界 · client-safe 契约（Client/Server 边界修复）。
@@ -65,6 +66,23 @@ export interface WorldGenesisDraft {
 }
 
 export type WorldGenesisSource = "model" | "fallback";
+
+/**
+ * 草稿 → 内容绑定（内容解析层入口身份）：携带 RealmWorld 身份的草稿为
+ * world-bound（worldId + worldVersion 精确绑定），否则为 base。genesis
+ * 经 ContentResolver/WorldBinding 消费内容时以此为一级分发依据。
+ */
+export function genesisBindingFromDraft(
+  draft: Pick<WorldGenesisDraft, "worldIdentity">,
+): WorldBinding {
+  return draft.worldIdentity
+    ? {
+      kind: "world",
+      worldId: draft.worldIdentity.worldId,
+      worldVersion: draft.worldIdentity.worldVersion,
+    }
+    : { kind: "base" };
+}
 
 export const MAX_COMPANIONS = 2;
 

@@ -34,10 +34,14 @@ export interface PostgresRulePackScope {
   location?: string;
 }
 
-export function createPostgresRulePack(
+/**
+ * Slice 2.5：导出 provider 形态，供应用层与 ContentResolver 内容源组合
+ * （世界包定义 + DB 物化定义）。行为与 createPostgresRulePack 内部一致。
+ */
+export function createPostgresRuleDefinitionProvider(
   database: WorkspaceDatabase,
   scope: PostgresRulePackScope,
-): ActionRulePack {
+): RuleDefinitionProvider {
   if (!scope.workspaceId.trim() || !scope.worldId.trim()) {
     throw new Error("Rule Pack scope requires workspace and world identifiers.");
   }
@@ -191,5 +195,14 @@ export function createPostgresRulePack(
     },
   };
 
-  return createDataDrivenRulePack(provider);
+  return provider;
+}
+
+export function createPostgresRulePack(
+  database: WorkspaceDatabase,
+  scope: PostgresRulePackScope,
+): ActionRulePack {
+  return createDataDrivenRulePack(
+    createPostgresRuleDefinitionProvider(database, scope),
+  );
 }

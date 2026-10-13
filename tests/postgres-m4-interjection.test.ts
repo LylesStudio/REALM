@@ -109,7 +109,7 @@ test(
       }),
     });
 
-    const initial = await service.loadRecord();
+    const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     const committed = await service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
       content: "弥洛，你怎么看这段铭文？",

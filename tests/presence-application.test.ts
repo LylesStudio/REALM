@@ -285,7 +285,7 @@ test("T3 触发：未点名回合后，候选角色自主发声并携带 presenc
   const gate = createGateSpy();
   const { repository, service } = createFixture({ presenceAssessor: gate.assessor });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -334,7 +334,7 @@ test("T3 预算：连续多回合各至多 1 次在场发声（预算=1/回合�
     turnControl,
   });
 
-  const first = await service.loadRecord();
+  const first = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我沿着防波堤慢慢走。",
@@ -346,7 +346,7 @@ test("T3 预算：连续多回合各至多 1 次在场发声（预算=1/回合�
     (payload) => payload.presence !== undefined,
   );
 
-  const reloaded = await service.loadRecord();
+  const reloaded = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我停下来听潮声。",
@@ -376,7 +376,7 @@ test("T3 插话优先：点名回合走插话，不触发在场评估", async ()
   const gate = createGateSpy();
   const { repository, service } = createFixture({ presenceAssessor: gate.assessor });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "弥洛，你怎么看这段铭文？",
@@ -421,7 +421,7 @@ test("T3 分流：restricted 回合与 replay 均不触发在场", async () => {
     },
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   // 第一步：可见性门禁给出 restricted 提案，要求玩家确认（真实 UI 流程）。
   let proposalId = "";
   await assert.rejects(
@@ -458,7 +458,7 @@ test("T3 分流：restricted 回合与 replay 均不触发在场", async () => {
 
   // replay：public 回合首次提交触发一次在场；同 key 重放只回 duplicate，
   // 不重跑在场评估（门禁计数与在场事件数都不变）。
-  const reloaded = await service.loadRecord();
+  const reloaded = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const publicInput = {
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我望向海面。",
@@ -489,7 +489,7 @@ test("T3 fail-closed：门禁抛错不影响玩家回合，且无在场事件", 
   const gate = createGateSpy({ error: new Error("gate exploded") });
   const { repository, service } = createFixture({ presenceAssessor: gate.assessor });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -527,7 +527,7 @@ test("T3 fail-closed：在场回合生成失败不影响玩家回合", async () 
     presenceAssessor: gate.assessor,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",
@@ -679,7 +679,7 @@ test("T3 版本冲突重试：生成期间异步落库推进版本，在场重�
   repositoryRef = fixture.repository;
   const { repository, service } = fixture;
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我沿着防波堤慢慢走。",
@@ -748,7 +748,7 @@ test("T3 无素材确定性沉默：空旁白空回应不调用门禁", async ()
     presenceAssessor: gate.assessor,
   });
 
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我静静站着。",
@@ -768,7 +768,7 @@ test("T3 无素材确定性沉默：空旁白空回应不调用门禁", async ()
 
 test("T3 未装配门禁：在场整体禁用，既有行为零变化", async () => {
   const { repository, service } = createFixture();
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我环顾四周。",

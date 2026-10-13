@@ -60,6 +60,8 @@ const migrationPaths = [
   "../database/postgres/migrations/0054_world_version_identity.sql",
   "../database/postgres/migrations/0055_goal_runtime.sql",
   "../database/postgres/migrations/0057_realmworld_record_binding.sql",
+  "../database/postgres/migrations/0058_durable_job_queue.sql",
+  "../database/postgres/migrations/0059_world_commands.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
@@ -136,6 +138,9 @@ const scopedTables = [
   "realm_capability_keys",
   "realm_capability_nonces",
   "realmworld_version_switches",
+  "realm_durable_jobs",
+  "world_command_groups",
+  "world_command_records",
 ];
 
 function canonical(value) {
@@ -305,6 +310,9 @@ test("forced row-level security denies unscoped workspace access", () => {
       "realm_capability_keys",
       "realm_capability_nonces",
       "realmworld_version_switches",
+      "realm_durable_jobs",
+      "world_command_groups",
+      "world_command_records",
     ].includes(tableName)) {
       assert.match(
         canonicalSql,

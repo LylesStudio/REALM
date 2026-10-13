@@ -319,7 +319,7 @@ function createService(options: {
 test("envelope 四项读取在 scope 解析之后并发开始（barrier 证明）", async () => {
   const barrier = createBarrier(4);
   const { service } = createService({ barrier });
-  const envelope = await service.loadRecord();
+  const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
 
   // 四个读取点全部开始后才放行——串行实现会超时放行并使 releasedByAll=false。
   assert.equal(barrier.wasReleasedByAll(), true);
@@ -364,7 +364,7 @@ test("firstNight pending 仍触发一次懒调度（副作用保持）", async (
     selfPlaySession: null,
     scheduleSpy: (recordId) => scheduled.push(recordId),
   });
-  const envelope = await service.loadRecord();
+  const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   assert.deepEqual(scheduled, [LOCAL_RECORD_SCOPE.recordId]);
   assert.equal(envelope.firstNight?.state, "pending");
 });
@@ -378,7 +378,7 @@ test("firstNight/selfPlay 读取失败仍 warn→null，envelope 正常返回", 
       firstNightMarker: new Error("first night store down"),
       selfPlaySession: new Error("self play store down"),
     });
-    const envelope = await service.loadRecord();
+    const envelope = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
     assert.equal(envelope.firstNight, null);
     assert.equal(envelope.selfPlay, null);
     assert.equal(envelope.record.version, 3);
@@ -394,13 +394,13 @@ test("affordances 读取失败仍按原语义传播", async () => {
   const { service } = createService({
     affordanceResult: new Error("catalog down"),
   });
-  await assert.rejects(service.loadRecord(), /catalog down/);
+  await assert.rejects(service.loadRecord(LOCAL_RECORD_SCOPE.recordId), /catalog down/);
 });
 
 test("scope 解析失败仍先行 fail-closed（四项读取不启动）", async () => {
   const barrier = createBarrier(4);
   const { service } = createService({ barrier, scopeResult: null });
-  await assert.rejects(service.loadRecord(), (error: unknown) => {
+  await assert.rejects(service.loadRecord(LOCAL_RECORD_SCOPE.recordId), (error: unknown) => {
     assert.ok(error instanceof Error);
     assert.equal((error as { code?: string }).code, "NOT_FOUND");
     return true;

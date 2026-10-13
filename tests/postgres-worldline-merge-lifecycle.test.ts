@@ -71,6 +71,7 @@ const MIGRATIONS = [
   "0055_goal_runtime.sql",
   "0056_runtime_save_restore_grants.sql",
   "0057_realmworld_record_binding.sql",
+  "0058_durable_job_queue.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

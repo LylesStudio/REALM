@@ -111,6 +111,7 @@ export async function GET(
       worldId,
       worldVersion,
       verifySignature: verifier.verifySignature,
+      engineBaseVersion: verifier.engineBaseVersion,
     });
   } catch (error) {
     if (error instanceof RealmWorldLoaderError && error.code === "WORLD_NOT_INSTALLED") {

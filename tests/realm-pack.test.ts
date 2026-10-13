@@ -867,9 +867,9 @@ test("export-matrix fences: runtime table diff / text[] list / scope sets", asyn
   // 0042 已入库：5 个规划表成为实有表；0055 Goal runtime 三表与 0057
   // 版本切换审计表明确作为 excluded 行进入矩阵，planned 集合保持为空。
   const planned: string[] = [];
-  assert.equal(actual.size, 71, `实有表应为 71（67+0055 Goal runtime 三表+0057 realmworld_version_switches；Goal/切换审计在 dedicated 路由前保持 excluded），实际 ${actual.size}`);
+  assert.equal(actual.size, 74, `实有表应为 74（67+0055 Goal runtime 三表+0057 realmworld_version_switches+0058 realm_durable_jobs+0059 World Command 两表；Goal/切换审计/durable job/Command Group 台账在 dedicated 路由前保持 excluded），实际 ${actual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 71, `矩阵应为 71 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 74, `矩阵应为 74 行，实际 ${matrixTables.size}`);
   for (const table of [...actual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }

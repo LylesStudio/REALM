@@ -145,7 +145,7 @@ test("an expired affordance fails closed without consuming the write authorizati
     },
   };
   const { service } = createFixture(catalog);
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   assert.equal(initial.affordances[0]?.id, "asset.signal_lantern");
   await assert.rejects(
     service.submitMessage({
@@ -217,7 +217,7 @@ test("message route returns a safe stage diagnostic instead of collapsing every 
 
 test("the Application Service commits player and validated reply atomically and replays idempotently", async () => {
   const { repository, service } = createFixture();
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   assert.equal(initial.writeToken, "opaque-1");
   assert.equal(initial.record.version, 1);
   assert.deepEqual(initial.affordances.map((item) => item.kind), ["skill", "scene"]);
@@ -272,7 +272,7 @@ test("the Application Service commits player and validated reply atomically and 
 
 test("selected action affordances resolve as player-owned transactions and forged ids fail closed", async () => {
   const { repository, service } = createFixture();
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const selected = initial.affordances.find((item) => item.kind === "skill");
   assert.ok(selected);
   const committed = await service.submitMessage({
@@ -293,7 +293,7 @@ test("selected action affordances resolve as player-owned transactions and forge
   assert.equal(transactions[0]?.call.arguments.targetId, "letter_seal");
   assert.equal(transactions[1]?.actor.characterInstanceId, "char_inst_scout");
 
-  const current = await service.loadRecord();
+  const current = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await assert.rejects(
     service.submitMessage({
       recordId: LOCAL_RECORD_SCOPE.recordId,
@@ -311,8 +311,8 @@ test("selected action affordances resolve as player-owned transactions and forge
 
 test("write tokens bind a canonical snapshot without exposing or trusting a viewer version", async () => {
   const { service } = createFixture();
-  const first = await service.loadRecord();
-  const concurrent = await service.loadRecord();
+  const first = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  const concurrent = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "先检查四周。",
@@ -483,7 +483,7 @@ test("the formal mapper creates a restricted policy and hides non-audience obser
 
 test("the formal mapper does not invent a private observation for ordinary act", async () => {
   const { repository, service } = createFixture();
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "看看信使离开的方向。",

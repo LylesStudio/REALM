@@ -7,6 +7,7 @@ import {
   createInstalledRealmWorldInstantiationResolver,
   RealmWorldRuntimeContentError,
 } from "../../../../modules/world-transfer/realmworld-runtime-content.ts";
+import { RealmWorldLoaderError } from "../../../../modules/world-transfer/realmworld-loader.ts";
 import { readRealmWorldVerifier } from "../env.ts";
 import { getSharedRuntimePool } from "../../world-scope.ts";
 import {
@@ -108,6 +109,7 @@ export async function POST(request: Request): Promise<Response> {
       installRoot: verifier.installRoot,
       verifySignature: verifier.verifySignature,
       locale,
+      engineBaseVersion: verifier.engineBaseVersion,
     });
     const plan = await resolver({ kind: "world", worldId, worldVersion });
     if (!plan) {
@@ -131,6 +133,12 @@ export async function POST(request: Request): Promise<Response> {
       },
     );
   } catch (error) {
+    if (error instanceof RealmWorldLoaderError) {
+      if (error.code === "BASE_VERSION_INCOMPATIBLE") {
+        return errorResponse("BASE_VERSION_INCOMPATIBLE", "RealmWorld package is not compatible with the active engine base version.", 409);
+      }
+      return errorResponse("REALMWORLD_CONTENT_UNAVAILABLE", "RealmWorld content is unavailable.", 503);
+    }
     if (error instanceof RealmWorldRuntimeContentError) {
       if (error.code === "RUNTIME_IDENTITY_MISMATCH") {
         return errorResponse("REALMWORLD_IDENTITY_MISMATCH", "RealmWorld identity does not match the requested binding.", 409);

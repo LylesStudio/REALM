@@ -480,7 +480,7 @@ test("committed turn persists recipientId in the formal event payload", { timeou
       },
     }),
   });
-  const initial = await service.loadRecord();
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
   const committed = await service.submitMessage({
     recordId: LOCAL_RECORD_SCOPE.recordId,
     content: "我展开密函。",

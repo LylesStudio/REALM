@@ -354,13 +354,15 @@ export function createPostgresGoalAssessmentJobQueue(
           throw error;
         }
 
-        const instanceResult = await client.query<GoalInstanceRow>(
-          `SELECT id, record_id, state, revision, progress, outcome
-           FROM goal_instances
-           WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
-             AND record_id = $4 AND id = $5
+        // Slice 5 统一锁序：worldlines(FOR UPDATE) → record_heads(FOR
+        // UPDATE) → 领域聚合 goal_instances(FOR UPDATE)。与分支克隆路径
+        // （records→record_heads→goal_instances）由共享 records(FOR
+        // UPDATE) gate 串行化，无 AB-BA 窗口。
+        const worldlineResult = await client.query<WorldlineHeadRow>(
+          `SELECT head_tick, head_ordinal FROM worldlines
+           WHERE workspace_id = $1 AND world_id = $2 AND id = $3
            FOR UPDATE`,
-          [workspaceId, input.job.worldId, input.job.worldlineId, input.job.recordId, input.job.goalInstanceId],
+          [workspaceId, input.job.worldId, input.job.worldlineId],
         );
         const headResult = await client.query<HeadRow>(
           `SELECT record_version, next_record_ordinal
@@ -370,11 +372,13 @@ export function createPostgresGoalAssessmentJobQueue(
            FOR UPDATE`,
           [workspaceId, input.job.worldId, input.job.worldlineId, input.job.recordId],
         );
-        const worldlineResult = await client.query<WorldlineHeadRow>(
-          `SELECT head_tick, head_ordinal FROM worldlines
-           WHERE workspace_id = $1 AND world_id = $2 AND id = $3
+        const instanceResult = await client.query<GoalInstanceRow>(
+          `SELECT id, record_id, state, revision, progress, outcome
+           FROM goal_instances
+           WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+             AND record_id = $4 AND id = $5
            FOR UPDATE`,
-          [workspaceId, input.job.worldId, input.job.worldlineId],
+          [workspaceId, input.job.worldId, input.job.worldlineId, input.job.recordId, input.job.goalInstanceId],
         );
         if (instanceResult.rowCount !== 1 || headResult.rowCount !== 1 || worldlineResult.rowCount !== 1) {
           throw new GoalRuntimeRepositoryError(
@@ -690,8 +694,8 @@ async function updateJobState(
          lease_owner = NULL, lease_expires_at = NULL,
          completed_at = CASE WHEN $3 = 'completed' THEN $5::timestamptz ELSE NULL END,
          updated_at = $5::timestamptz,
-         last_error_code = $6, last_error_message = $6,
-         last_error_at = CASE WHEN $6 IS NULL THEN NULL ELSE $5::timestamptz END
+         last_error_code = $6::text, last_error_message = $6::text,
+         last_error_at = CASE WHEN $6::text IS NULL THEN NULL ELSE $5::timestamptz END
      WHERE workspace_id = $1 AND id = $2 AND state = 'running'
        AND attempt_count = $7 AND lease_owner = $8`,
     [job.workspaceId, job.jobId, state, retryAt, now, errorCode, job.attemptCount, job.leaseOwner],
