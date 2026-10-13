@@ -328,7 +328,10 @@
     } else if (phase.phase === "starting") {
       render("正在启动",
         STEP_LABELS[phase.step] || "正在启动…",
-        [], "", { spinner: true });
+        [
+          logsButton(),
+          button("停止", async () => { await invoke("service_stop"); }),
+        ], "", { spinner: true });
     } else if (phase.phase === "ready") {
       lastUrl = phase.url;
       render("服务已就绪",

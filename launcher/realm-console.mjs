@@ -458,6 +458,11 @@ async function main() {
 
   if (!args.noBrowser) openBrowserWindow(httpConsole.url);
 
+  // 浏览器控制台模式默认自动启动服务；Tauri 模式由 UI 触发，行为不变。
+  controller.start().catch((error) => {
+    console.error("service autostart failed:", error instanceof Error ? error.message : String(error));
+  });
+
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
