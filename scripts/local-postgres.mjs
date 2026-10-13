@@ -69,9 +69,10 @@ const dockerName = process.env.REALM_POSTGRES_DOCKER_NAME ?? "realm-postgres";
 const dockerVolume = process.env.REALM_POSTGRES_DOCKER_VOLUME ?? "realm-postgres-data";
 
 // macOS 从网络下载的 PostgreSQL 二进制可能被打上 com.apple.quarantine，首次执行会收到 SIGKILL。
-// 在调用任何本地 PG 工具前先剥掉隔离属性；失败不阻塞，以便用户自行走签名/授信流程。
+// 在调用任何本地 PG 工具前，先对安装根目录（bin 的父目录，包含 lib）剥掉隔离属性；
+// 失败不阻塞，以便用户自行走签名/授信流程。
 if (!dockerMode && process.platform === "darwin") {
-  spawnSync("xattr", ["-dr", "com.apple.quarantine", postgresRoot], { stdio: "ignore" });
+  spawnSync("xattr", ["-dr", "com.apple.quarantine", resolve(postgresRoot, "..")], { stdio: "ignore" });
 }
 
 function dockerRun(args, options = {}) {
