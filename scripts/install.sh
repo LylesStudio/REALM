@@ -2,8 +2,10 @@
 # REALM one-command installer (curl | bash entry point).
 #
 # Flow: detect Node 22.13+ (offer a no-sudo user-local install) → fetch the
-# REALM source (git clone, or tarball when git is absent) → npm ci → hand off
-# to scripts/setup-web.sh (toolchain → PostgreSQL → seed → start → browser).
+# REALM source (git clone, or tarball when git is absent) → npm ci →
+# install an embedded PostgreSQL bundle when requested → create a
+# user-discoverable launcher entry (macOS .command / Linux .desktop /
+# Windows Start Menu shortcut) → optionally start the local server.
 #
 # Conservative by design:
 # - nothing is installed without an explicit confirmation (or --yes);
@@ -35,23 +37,79 @@ REF="${REALM_INSTALL_REF:-main}"
 AUTO_YES=0
 EMBEDDED_PG=0
 PG_ARTIFACT="${REALM_PG_ARTIFACT:-}"
-args=()
-for arg in "$@"; do
-  [[ "$arg" == "--yes" ]] && AUTO_YES=1
-  args+=("$arg")
-done
-# extract installer-owned flags（同时从透传给 setup-web 的参数中剔除）
 next_is_pg=0
-SETUP_ARGS=()
-for arg in "${args[@]}"; do
+for arg in "$@"; do
   if [[ "$next_is_pg" == 1 ]]; then PG_ARTIFACT="$arg"; next_is_pg=0; continue; fi
+  [[ "$arg" == "--yes" ]] && AUTO_YES=1
   if [[ "$arg" == "--pg-artifact" ]]; then next_is_pg=1; continue; fi
-  if [[ "$arg" == "--embedded-pg" ]]; then EMBEDDED_PG=1; continue; fi
-  SETUP_ARGS+=("$arg")
+  [[ "$arg" == "--embedded-pg" ]] && EMBEDDED_PG=1
 done
 
 log() { printf '\033[1;36m[realm]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[realm] error:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 平台判断（用于生成启动入口）。
+realm_platform() {
+  case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
+    linux*) printf 'linux' ;;
+    darwin*) printf 'macos' ;;
+    msys*|cygwin*|mingw*) printf 'windows' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# 为用户生成一个可检索的 REALM 启动入口：
+# - macOS: ~/.realm/Launch REALM.command（双击在 Terminal 启动）
+# - Linux: ~/.realm/bin/realm-launch + ~/.local/share/applications/realm.desktop
+# 入口调用 launcher/realm-console.mjs，打开服务控制台（状态/启停/日志）。
+install_launcher_entry() {
+  local platform node_bin launch_dir app_dir entry_name
+  platform="$(realm_platform)"
+  node_bin="$(command -v node)"
+  launch_dir="$REALM_HOME"
+  app_dir="$APP_DIR"
+
+  if [[ "$platform" == "macos" ]]; then
+    entry_name="Launch REALM.command"
+    cat > "$launch_dir/$entry_name" <<EOF
+#!/bin/bash
+# REALM 服务控制台入口（由安装器生成）：打开浏览器控制台查看服务状态、
+# 启动/停止/重启、查看日志；关闭本 Terminal 窗口会同时停止本地服务。
+cd "$app_dir" || exit 1
+exec "$node_bin" launcher/realm-console.mjs "\$@"
+EOF
+    chmod +x "$launch_dir/$entry_name"
+    log "created launcher entry: $launch_dir/$entry_name"
+  elif [[ "$platform" == "linux" ]]; then
+    mkdir -p "$launch_dir/bin"
+    cat > "$launch_dir/bin/realm-launch" <<EOF
+#!/bin/bash
+# REALM 服务控制台入口（由安装器生成）：打开浏览器控制台查看服务状态、
+# 启动/停止/重启、查看日志；关闭本 Terminal 窗口会同时停止本地服务。
+cd "$app_dir" || exit 1
+exec "$node_bin" launcher/realm-console.mjs "\$@"
+EOF
+    chmod +x "$launch_dir/bin/realm-launch"
+
+    mkdir -p "$HOME/.local/share/applications"
+    cat > "$HOME/.local/share/applications/realm.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=REALM
+Comment=REALM service console (status, start/stop, logs)
+Exec=bash -c 'cd $(printf '%q' "$app_dir") && exec $(printf '%q' "$node_bin") launcher/realm-console.mjs'
+Terminal=true
+Icon=utilities-terminal
+Categories=Game;Utility;
+EOF
+    chmod +x "$HOME/.local/share/applications/realm.desktop"
+    log "created launcher entry: $launch_dir/bin/realm-launch"
+    log "created desktop entry: $HOME/.local/share/applications/realm.desktop"
+  else
+    log "launcher entry: this installer covers macOS and Linux; for Windows use scripts/install.ps1"
+  fi
+}
 
 # --- piped curl|bash: keep the script input on the pipe but read prompts from
 #     the controlling terminal when available. A global `exec 0</dev/tty` would
@@ -308,23 +366,42 @@ if [[ -n "$PG_ARTIFACT" ]]; then
   fi
 fi
 
-# --- 5. Hand off to the interactive web bootstrap -------------------------------
+# --- 5. Create a user-discoverable launcher entry -------------------------------
 if [[ "${REALM_INSTALL_SKIP_SETUP:-0}" == 1 ]]; then
-  log "REALM_INSTALL_SKIP_SETUP=1 → stopping before setup-web"
+  log "REALM_INSTALL_SKIP_SETUP=1 → stopping before launcher entry creation"
   exit 0
 fi
-# setup-web.sh 也使用 `read` 做交互式确认；curl|bash 场景下把子进程的 stdin
-# 接到 /dev/tty，而不是把安装脚本自己的 stdin 接走。
-if [[ "$AUTO_YES" == 1 ]]; then
-  if [[ ${#SETUP_ARGS[@]} -eq 0 ]]; then
-    exec bash "$APP_DIR/scripts/setup-web.sh"
-  else
-    exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}"
-  fi
-else
-  if [[ ${#SETUP_ARGS[@]} -eq 0 ]]; then
-    exec bash "$APP_DIR/scripts/setup-web.sh" < /dev/tty
-  else
-    exec bash "$APP_DIR/scripts/setup-web.sh" "${SETUP_ARGS[@]}" < /dev/tty
+
+install_launcher_entry
+
+platform="$(realm_platform)"
+case "$platform" in
+  macos)
+    launcher_path="$REALM_HOME/Launch REALM.command"
+    launcher_tip="双击 \"$launcher_path\" 即可启动 REALM。"
+    ;;
+  linux)
+    launcher_path="$REALM_HOME/bin/realm-launch"
+    launcher_tip="运行 \"$launcher_path\"，或在应用启动器搜索 REALM。"
+    ;;
+  *)
+    launcher_path=""
+    launcher_tip="本安装器未生成启动入口，请使用项目提供的桌面包或手动运行 launcher/realm-console.mjs。"
+    ;;
+esac
+
+log "安装完成。$launcher_tip"
+
+if [[ -n "$launcher_path" ]]; then
+  if [[ "$AUTO_YES" == 1 ]] || confirm "是否立即启动 REALM？"; then
+    log "starting REALM..."
+    if [[ "$platform" == "macos" ]]; then
+      # .command 在 Terminal.app 中运行；open 命令可在不阻塞当前 shell 的情况下启动。
+      open "$launcher_path"
+    else
+      exec "$launcher_path"
+    fi
   fi
 fi
+
+log "安装完成。$launcher_tip"

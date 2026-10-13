@@ -23,6 +23,7 @@ export const SETTINGS_MESSAGES: Record<string, BatchTable> = {
   "ui.settings.systemEyebrow": M("系统设置 / System settings", "System settings", "システム設定 / System settings"),
   "ui.settings.providerHeading": M("模型供应商", "Model providers", "モデルプロバイダー"),
   "ui.settings.backArrow": M("← 返回记录", "← Back to the record", "← 記録に戻る"),
+  "ui.settings.backToOnboarding": M("← 返回创建入口", "← Back to create world", "← 作成入口に戻る"),
   "ui.settings.toc": M("设置目录", "Settings contents", "設定目次"),
   "ui.settings.navModel": M("模型服务", "Model service", "モデルサービス"),
   "ui.settings.navMemory": M("记忆与召回", "Memory & recall", "記憶と想起"),

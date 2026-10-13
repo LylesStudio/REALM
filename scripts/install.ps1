@@ -284,10 +284,43 @@ if ($PgArtifact) {
   }
 }
 
-# --- 5. Hand off to the interactive web bootstrap --------------------------------
+# --- 5. Create a user-discoverable launcher entry --------------------------------
 if ($env:REALM_INSTALL_SKIP_SETUP -eq '1') {
-  Write-RealmLog 'REALM_INSTALL_SKIP_SETUP=1 -> stopping before setup-web'
+  Write-RealmLog 'REALM_INSTALL_SKIP_SETUP=1 -> stopping before launcher entry creation'
   exit 0
 }
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppDir 'scripts/setup-web.ps1') @($args)
-exit $LASTEXITCODE
+
+$nodeBin = (Get-Command node.exe).Source
+$batPath = Join-Path $RealmHome 'Launch REALM.bat'
+$batContent = @"
+@echo off
+REM REALM 服务控制台（由安装器生成）：打开浏览器控制台查看服务状态、
+REM 启动/停止/重启、查看日志。关闭本窗口会同时停止本地服务。
+cd /d "$($AppDir -replace '\\', '\\\\')"
+"$($nodeBin -replace '\\', '\\\\')" launcher\\realm-console.mjs
+"@
+Set-Content -Path $batPath -Value $batContent -Encoding UTF8
+Write-RealmLog "created launcher entry: $batPath"
+
+$startMenuDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+$shortcutPath = Join-Path $startMenuDir 'REALM.lnk'
+try {
+  $wsh = New-Object -ComObject WScript.Shell
+  $shortcut = $wsh.CreateShortcut($shortcutPath)
+  $shortcut.TargetPath = $batPath
+  $shortcut.WorkingDirectory = $AppDir
+  $shortcut.Description = 'REALM service console (status, start/stop, logs)'
+  $shortcut.Save()
+  Write-RealmLog "created Start Menu shortcut: $shortcutPath"
+} catch {
+  Write-RealmLog "could not create Start Menu shortcut: $_"
+}
+
+Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'
+
+if ($Yes -or (Confirm-Realm '是否立即启动 REALM？')) {
+  Write-RealmLog 'starting REALM...'
+  Start-Process -FilePath $batPath
+}
+
+Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'

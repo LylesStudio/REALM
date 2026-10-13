@@ -271,7 +271,7 @@ fn host_environment() -> Vec<(String, String)> {
         "REALM_POSTGRES_SOCKET_DIR",
         "REALM_POSTGRES_DB",
     ];
-    let mut environment = SAFE_KEYS
+    let environment = SAFE_KEYS
         .iter()
         .filter_map(|key| std::env::var(key).ok().map(|value| ((*key).into(), value)))
         .collect::<Vec<_>>();
@@ -604,6 +604,182 @@ fn open_in_browser(url: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// 服务日志（控制台「查看日志」；只读 launcher.log 尾部，逐行 redact，
+// 与 launcher/realm-console.mjs 的 redactLogLine 同规则）
+// ---------------------------------------------------------------------------
+
+const REDACTED: &str = "[REDACTED]";
+const SENSITIVE_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "access_key",
+    "access-key",
+    "private_key",
+    "private-key",
+];
+
+/// dataHome 解析（与 launcher resolveDataHome 同优先级：显式
+/// REALM_DATA_HOME > 平台默认）。
+fn console_data_home() -> PathBuf {
+    if let Ok(explicit) = std::env::var("REALM_DATA_HOME") {
+        if !explicit.trim().is_empty() {
+            return PathBuf::from(explicit.trim());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("REALM");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("REALM");
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(".local").join("share").join("REALM");
+        }
+    }
+    #[allow(unreachable_code)]
+    PathBuf::from(".")
+}
+
+/// scheme://user:pass@host → scheme://[REDACTED]@host。
+fn redact_url_userinfo(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(scheme_pos) = rest.find("://") {
+        let (head, tail) = rest.split_at(scheme_pos + 3);
+        out.push_str(head);
+        let authority_end = tail
+            .find(|ch: char| ch == '/' || ch.is_whitespace())
+            .unwrap_or(tail.len());
+        let authority = &tail[..authority_end];
+        if let Some(at) = authority.rfind('@') {
+            out.push_str(REDACTED);
+            out.push_str(&authority[at..]);
+        } else {
+            out.push_str(authority);
+        }
+        rest = &tail[authority_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 敏感键的 key=value / key: value 形态：值一律 [REDACTED]。
+fn redact_sensitive_pairs(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+        {
+            end += 1;
+        }
+        if end == start {
+            // 非 ASCII 键字符：按完整 char 前进，避免切坏 UTF-8 边界。
+            let ch = line[start..].chars().next().unwrap_or('�');
+            out.push(ch);
+            index = start + ch.len_utf8();
+            continue;
+        }
+        let word = &line[start..end];
+        let lower = word.to_ascii_lowercase();
+        let mut cursor = end;
+        while cursor < bytes.len() && bytes[cursor] == b' ' {
+            cursor += 1;
+        }
+        let is_pair = cursor < bytes.len() && (bytes[cursor] == b'=' || bytes[cursor] == b':');
+        if is_pair && SENSITIVE_KEYS.iter().any(|key| lower.starts_with(key)) {
+            out.push_str(word);
+            out.push_str(&line[end..=cursor]);
+            let mut value_end = cursor + 1;
+            while value_end < bytes.len() && bytes[value_end] == b' ' {
+                value_end += 1;
+            }
+            let quote = if value_end < bytes.len()
+                && (bytes[value_end] == b'"' || bytes[value_end] == b'\'')
+            {
+                let quote = bytes[value_end];
+                value_end += 1;
+                Some(quote)
+            } else {
+                None
+            };
+            while value_end < bytes.len() {
+                let byte = bytes[value_end];
+                match quote {
+                    Some(expected) if byte == expected => break,
+                    Some(_) => {}
+                    None if byte.is_ascii_whitespace()
+                        || byte == b';'
+                        || byte == b','
+                        || byte == b'"'
+                        || byte == b'\'' =>
+                    {
+                        break
+                    }
+                    None => {}
+                }
+                value_end += 1;
+            }
+            out.push_str(REDACTED);
+            if quote.is_some() && value_end < bytes.len() {
+                // 吞掉闭合引号，避免残留半个引号对。
+                value_end += 1;
+            }
+            index = value_end;
+        } else {
+            out.push_str(&line[start..end]);
+            index = end;
+        }
+    }
+    out
+}
+
+pub fn redact_log_line(line: &str) -> String {
+    redact_sensitive_pairs(&redact_url_userinfo(line))
+}
+
+fn read_log_tail(path: &Path, line_count: usize) -> Result<Vec<String>, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("could not read service log: {error}"))?;
+    let mut lines: Vec<&str> = contents.lines().collect();
+    let count = line_count.clamp(1, 2_000);
+    if lines.len() > count {
+        lines = lines.split_off(lines.len() - count);
+    }
+    Ok(lines.into_iter().map(redact_log_line).collect())
+}
+
+#[tauri::command]
+fn service_logs(lines: Option<u32>) -> Result<Vec<String>, String> {
+    let count = lines.unwrap_or(200) as usize;
+    read_log_tail(
+        &console_data_home().join("logs").join("launcher.log"),
+        count,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // 应用入口
 // ---------------------------------------------------------------------------
 
@@ -624,6 +800,7 @@ pub fn run() {
             validate_lan_bind,
             check_server,
             open_in_browser,
+            service_logs,
         ])
         .on_window_event(move |_window, event| {
             if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
@@ -806,6 +983,23 @@ mod tests {
             apply_frame(&stopping_phase, &stopped),
             Some(ServicePhase::Stopped)
         );
+    }
+
+    #[test]
+    fn log_redaction_hides_credentials_and_connection_strings() {
+        assert_eq!(
+            redact_log_line("conn postgresql://alice:hunter2@127.0.0.1:55432/realm_dev ok"),
+            "conn postgresql://[REDACTED]@127.0.0.1:55432/realm_dev ok",
+        );
+        let redacted =
+            redact_log_line("database_url=postgresql://u:p@h/db password=\"abc\" token: xyz");
+        assert!(!redacted.contains("hunter2"), "{redacted}");
+        assert!(!redacted.contains("u:p@"), "{redacted}");
+        assert!(!redacted.contains("\"abc\""), "{redacted}");
+        assert!(!redacted.contains("xyz"), "{redacted}");
+        assert!(redacted.contains(REDACTED), "{redacted}");
+        // 普通诊断行原样保留（redact 不得破坏常规日志可读性）。
+        assert_eq!(redact_log_line("step: ready url=http://127.0.0.1:9999/"), "step: ready url=http://127.0.0.1:9999/");
     }
 
     #[test]

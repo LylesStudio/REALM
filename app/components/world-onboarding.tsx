@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import Link from "next/link";
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 import type { LibraryRecord, LibrarySnapshot, LibraryWorld } from "./library-types";
 import { listPresetWorlds, type PresetWorld } from "../../modules/application/preset-worlds.ts";
+import {
+  MODEL_PROVIDER_CATALOG,
+  type ModelProviderId,
+  type PublicModelSettingsSnapshot,
+} from "../../modules/inference/types.ts";
 
 export interface WorldOnboardingProps {
   uiLanguage: UiLanguage;
@@ -33,6 +39,34 @@ function latestRecordOf(world: LibraryWorld): LibraryRecord | null {
   return pool[pool.length - 1] ?? null;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPublicProviderSettings(value: unknown): value is {
+  providerId: ModelProviderId;
+  apiKeyConfigured: boolean;
+  availableModels: readonly unknown[];
+} {
+  if (!isObject(value)) return false;
+  const providerId = value.providerId;
+  if (typeof providerId !== "string") return false;
+  if (!MODEL_PROVIDER_CATALOG.some((entry) => entry.id === providerId)) return false;
+  return typeof value.apiKeyConfigured === "boolean" && Array.isArray(value.availableModels);
+}
+
+function isSettingsSnapshot(value: unknown): value is { settings: PublicModelSettingsSnapshot } {
+  if (!isObject(value) || value.ok !== true) return false;
+  const settings = value.settings;
+  if (!isObject(settings)) return false;
+  if (settings.schemaVersion !== 2) return false;
+  const activeProviderId = settings.activeProviderId;
+  if (typeof activeProviderId !== "string") return false;
+  const providers = settings.providers;
+  if (!Array.isArray(providers) || providers.length === 0) return false;
+  return providers.every(isPublicProviderSettings);
+}
+
 /**
  * 批次 S：世界入口引导屏。
  * 账号没有「最近打开」记忆时的首页：主入口 AI 助手对话、次入口分步引导、
@@ -42,9 +76,52 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
   const { uiLanguage, library, onOpenChat, onOpenGuided, onOpenLobby, onOpenRecord, onCreatePreset } = props;
   const [busyPreset, setBusyPreset] = useState<string | null>(null);
   const [presetError, setPresetError] = useState(false);
+  const [aiStatus, setAiStatus] = useState<"checking" | "ready" | "needs-key" | "needs-model" | "error">("checking");
+  const [aiProviderName, setAiProviderName] = useState<string>("");
   const entries: WorldEntry[] = library.worlds
     .map((world) => ({ world, latestRecord: latestRecordOf(world) }))
     .filter((entry): entry is WorldEntry => entry.world.id.trim().length > 0);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch("/api/settings/model-provider", {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        const body: unknown = await response.json();
+        if (!active) return;
+        if (!response.ok || !isSettingsSnapshot(body)) {
+          setAiStatus("error");
+          return;
+        }
+        const activeProfile = body.settings.providers.find(
+          (profile) => profile.providerId === body.settings.activeProviderId,
+        );
+        if (!activeProfile) {
+          setAiStatus("error");
+          return;
+        }
+        const catalogEntry = MODEL_PROVIDER_CATALOG.find(
+          (entry) => entry.id === activeProfile.providerId,
+        );
+        setAiProviderName(catalogEntry?.name ?? activeProfile.providerId);
+        if (catalogEntry?.requiresApiKey && !activeProfile.apiKeyConfigured) {
+          setAiStatus("needs-key");
+          return;
+        }
+        if (activeProfile.availableModels.length === 0) {
+          setAiStatus("needs-model");
+          return;
+        }
+        setAiStatus("ready");
+      } catch {
+        if (active) setAiStatus("error");
+      }
+    })();
+    return () => { active = false; };
+  }, []);
 
   async function handlePreset(preset: PresetWorld) {
     if (busyPreset) return;
@@ -69,9 +146,29 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
       <p>{uiText("ui.onboarding.hint", uiLanguage)}</p>
 
       <div className="onboarding-entries">
+        {aiStatus !== "ready" && aiStatus !== "checking" ? (
+          <div className="onboarding-ai-notice" role="status">
+            <strong>{uiText("ui.onboarding.aiTitle", uiLanguage)}</strong>
+            <p>{uiText("ui.onboarding.aiBody", uiLanguage)}</p>
+            <Link
+              className="onboarding-entry-config"
+              data-creation-focus-return="create-chat"
+              href="/settings?return=/"
+            >
+              <span className="guided-entry-seal" aria-hidden="true">
+                配
+              </span>
+              <span className="guided-entry-copy">
+                <strong>{uiText("ui.onboarding.aiAction", uiLanguage)}</strong>
+                <small>{aiProviderName}</small>
+              </span>
+            </Link>
+          </div>
+        ) : null}
         <button
           className="guided-entry onboarding-entry is-primary"
           data-creation-focus-return="create-chat"
+          disabled={aiStatus !== "ready"}
           onClick={onOpenChat}
           type="button"
         >
@@ -80,7 +177,11 @@ export function WorldOnboarding(props: WorldOnboardingProps) {
           </span>
           <span className="guided-entry-copy">
             <strong>{uiText("ui.onboarding.chatEntry", uiLanguage)}</strong>
-            <small>{uiText("ui.onboarding.chatHint", uiLanguage)}</small>
+            <small>{aiStatus === "ready"
+              ? uiText("ui.onboarding.chatHint", uiLanguage)
+              : aiStatus === "checking"
+                ? uiText("ui.onboarding.aiReady", uiLanguage)
+                : uiText("ui.onboarding.aiTitle", uiLanguage)}</small>
           </span>
         </button>
         <button

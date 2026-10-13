@@ -57,6 +57,7 @@ test("tauri scaffold is a real Tauri 2 project with the registered commands", ()
     "validate_lan_bind",
     "check_server",
     "host_kind",
+    "service_logs",
   ]) {
     assert.ok(
       libRs.includes(`${command},`) || libRs.includes(`${command}\n`),

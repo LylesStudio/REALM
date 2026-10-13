@@ -35,12 +35,29 @@ test("install.sh follows detect → explain → confirm → install", () => {
   assert.match(installer, /read -r answer/);
 });
 
-test("install.sh ends at setup-web.sh, never skips the bootstrap", () => {
-  // --pg-artifact 被消费后，其余参数原样移交 setup-web.sh。
-  assert.match(installer, /exec bash "\$APP_DIR\/scripts\/setup-web\.sh" "\$\{SETUP_ARGS\[@\]\}"/);
+test("install.sh creates a user-discoverable launcher entry that opens the service console", () => {
+  // 安装完成后生成可检索启动入口，而不是占用当前 terminal 直接启动。
+  assert.match(installer, /install_launcher_entry/);
+  assert.match(installer, /Launch REALM\.command/);
+  assert.match(installer, /realm-launch/);
+  assert.match(installer, /realm\.desktop/);
+  // 入口指向跨平台服务控制台（状态/启停/日志），不再是裸 launcher。
+  assert.match(installer, /launcher\/realm-console\.mjs/);
+  assert.doesNotMatch(installer, /launcher\/realm-launcher\.mjs/);
+  // Windows 安装器同样 handing off 到控制台。
+  assert.match(windowsInstaller, /realm-console\.mjs/);
+  assert.doesNotMatch(windowsInstaller, /realm-launcher\.mjs/);
   // 冒烟开关仅用于自动化验收，不能成为默认路径。
   assert.match(installer, /REALM_INSTALL_SKIP_NPM/);
   assert.match(installer, /REALM_INSTALL_SKIP_SETUP/);
+});
+
+test("installer launcher entries stop the service when the console closes", () => {
+  // 关闭控制台窗口即停止本地服务是默认语义，入口注释必须向用户说明。
+  assert.match(installer, /关闭本 Terminal 窗口会同时停止本地服务/);
+  assert.match(windowsInstaller, /关闭本窗口会同时停止本地服务/);
+  // 入口权限安全：脚本 0755（chmod +x 生成的 wrapper）。
+  assert.match(installer, /chmod \+x "\$launch_dir/);
 });
 
 test("install.sh fetches source without git when possible", () => {

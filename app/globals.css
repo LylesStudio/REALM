@@ -3826,6 +3826,84 @@ button:disabled {
   font-size: 15px;
 }
 
+.onboarding-ai-notice {
+  background: var(--surface);
+  border: 1px solid var(--tint-rust-line);
+  margin: 7px 0;
+  padding: 14px;
+  width: 100%;
+}
+
+.onboarding-ai-notice strong {
+  color: var(--tint-rust-text);
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.onboarding-ai-notice p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+
+.onboarding-ai-notice .onboarding-entry {
+  margin: 0;
+}
+
+.onboarding-entry:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.onboarding-entry-config {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  box-shadow: 4px 4px 0 rgba(32, 35, 31, 0.14);
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  text-decoration: none;
+  width: 100%;
+}
+
+.onboarding-entry-config:hover {
+  border-color: var(--accent);
+}
+
+.onboarding-entry-config .guided-entry-seal {
+  align-items: center;
+  background: var(--chip);
+  border: 1px solid var(--ink);
+  display: flex;
+  flex-shrink: 0;
+  font-family: var(--font-serif);
+  font-size: 18px;
+  height: 40px;
+  justify-content: center;
+  width: 40px;
+}
+
+.onboarding-entry-config .guided-entry-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.onboarding-entry-config .guided-entry-copy strong {
+  font-size: 15px;
+}
+
+.onboarding-entry-config .guided-entry-copy small {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
 .onboarding-worlds {
   margin-top: 26px;
   width: min(480px, 92vw);

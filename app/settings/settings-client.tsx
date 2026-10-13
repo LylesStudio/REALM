@@ -71,6 +71,11 @@ export function ModelSettingsClient() {
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [returnUrl] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("return");
+  });
 
   useEffect(() => subscribeUiLanguage(() => setUiLanguage(readUiLanguage())), []);
 
@@ -349,7 +354,9 @@ export function ModelSettingsClient() {
         </div>
         <ThemeToggle uiLanguage={uiLanguage} className="settings-back" />
         <LanguageMenu uiLanguage={uiLanguage} className="settings-back" />
-        <Link className="settings-back" href="/">{uiText("ui.settings.backArrow", uiLanguage)}</Link>
+        <Link className="settings-back" href={returnUrl ?? "/"}>
+          {returnUrl ? uiText("ui.settings.backToOnboarding", uiLanguage) : uiText("ui.settings.backArrow", uiLanguage)}
+        </Link>
       </header>
 
       <main className="settings-layout">

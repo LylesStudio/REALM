@@ -398,6 +398,10 @@ const MESSAGES: Record<string, MessageTable> = {
   "ui.onboarding.lobbyEntry": M("进入游戏大厅", "Enter the lobby", "ロビーに入る"),
   "ui.onboarding.lobbyHint": M("查看并加入同一局域网主机上开放的房间。", "See and join open rooms on this LAN host.", "同じ LAN ホスト上の開放ルームを見て参加します。"),
   "ui.onboarding.open": M("进入", "Enter", "入る"),
+  "ui.onboarding.aiTitle": M("AI 服务未配置", "AI service not configured", "AI サービス未設定"),
+  "ui.onboarding.aiBody": M("要与 AI 助手对话创建世界，需要先配置模型供应商。你也可以先使用分步引导或预设世界。", "To chat with the AI assistant and create a world, configure a model provider first. You can also use the guided form or a preset world.", "AI アシスタントと話して世界を作るには、モデルプロバイダーを先に設定してください。段階ガイドやプリセット世界を先に使うこともできます。"),
+  "ui.onboarding.aiAction": M("配置 AI 服务", "Configure AI service", "AI サービスを設定"),
+  "ui.onboarding.aiReady": M("AI 助手已就绪", "AI assistant ready", "AI アシスタント準備完了"),
   // 批次 S：AI 助手对谈（LLM 引导创世）。
   "ui.genesisChat.title": M("AI 助手对话", "AI Assistant Chat", "AI アシスタント"),
   "ui.genesisChat.eyebrow": M("由 AI 助手陪同的创世", "Genesis, accompanied by the AI assistant", "AI アシスタントと創世"),

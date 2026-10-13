@@ -83,6 +83,18 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .hint { color: var(--ink-soft); font-size: 13px; }
+  #logs-panel pre {
+    background: var(--paper);
+    border: 1px solid var(--ink);
+    font-size: 12px;
+    margin: 12px 0 0;
+    max-height: 240px;
+    overflow: auto;
+    padding: 8px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .setting { color: var(--ink-soft); font-size: 13px; margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -100,6 +112,13 @@
       </label>
     </div>
     <div class="actions" id="actions"></div>
+    <div id="logs-panel" hidden>
+      <pre id="logs"></pre>
+      <div class="actions" id="logs-actions"></div>
+    </div>
+    <label class="setting" id="close-setting" hidden>
+      <input id="stop-on-close" type="checkbox" checked /> 关闭本页面或控制台窗口时停止 REALM 服务
+    </label>
     <div id="lan-config" hidden>
       <label>LAN 绑定地址（可选，具体 IPv4；0.0.0.0 需另填分享地址）
         <input id="lan-bind" type="text" inputmode="decimal" autocomplete="off"
@@ -127,7 +146,83 @@
   const footnote = document.getElementById("footnote");
   const STORAGE_KEY = "realm.serverUrl";
 
-  const invoke = (name, args) => tauri.core.invoke(name, args);
+  // ---- 传输层：Tauri 走 core.invoke；浏览器控制台模式走本机 console host ----
+  const isTauri = Boolean(tauri);
+  const httpCall = async (method, path, body) => {
+    const response = await fetch(path, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  };
+  // 控制台模式的 LAN 校验（与 launcher/advertised-origin 同规则：纯
+  // http(s) origin，无 userinfo/路径/query/fragment）。
+  const validateOriginJs = (input) => {
+    const trimmed = String(input ?? "").trim();
+    let parsed;
+    try { parsed = new URL(trimmed); } catch { throw new Error("invalid url"); }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("unsupported scheme");
+    }
+    if (!parsed.hostname) throw new Error("missing host");
+    if (parsed.username || parsed.password) {
+      throw new Error("credentials in url are not allowed");
+    }
+    if (parsed.search || parsed.hash || (parsed.pathname !== "/" && parsed.pathname !== "")) {
+      throw new Error("advertised origin must not contain a path");
+    }
+    return parsed.origin;
+  };
+  const validateLanBindJs = (input) => {
+    const bind = String(input ?? "").trim();
+    const octets = bind.split(".");
+    if (bind !== "0.0.0.0"
+        && (octets.length !== 4
+          || octets.some((octet) => !/^\d{1,3}$/.test(octet) || Number(octet) > 255))) {
+      throw new Error("LAN bind must be an explicit IPv4 address");
+    }
+    return bind;
+  };
+  const invoke = isTauri
+    ? (name, args) => tauri.core.invoke(name, args)
+    : async (name, args) => {
+        switch (name) {
+          case "host_kind": return "desktop";
+          case "service_state": return httpCall("GET", "/api/state");
+          case "service_start": return httpCall("POST", "/api/start", args ?? {});
+          case "service_stop": return httpCall("POST", "/api/stop");
+          case "service_restart": return httpCall("POST", "/api/restart");
+          case "open_in_browser":
+            return httpCall("POST", "/api/open-browser", { url: args?.url });
+          case "service_logs":
+            return httpCall("GET", `/api/logs?lines=${encodeURIComponent(args?.lines ?? 200)}`);
+          case "console_config": return httpCall("GET", "/api/config");
+          case "set_console_config": return httpCall("POST", "/api/config", args ?? {});
+          case "validate_advertised_origin": return validateOriginJs(args?.input);
+          case "validate_lan_bind": return validateLanBindJs(args?.input);
+          default: throw new Error(`unavailable in console mode: ${name}`);
+        }
+      };
+  // 状态推送：Tauri 走 service-state 事件；控制台模式 SSE + 轮询兜底。
+  const listenState = async (handler) => {
+    if (isTauri) {
+      await tauri.event.listen("service-state", (event) => handler(event.payload));
+      return;
+    }
+    handler(await invoke("service_state"));
+    setInterval(() => {
+      invoke("service_state").then(handler).catch(() => { /* 下次轮询 */ });
+    }, 1_000);
+    try {
+      const source = new EventSource("/api/events");
+      source.onmessage = (event) => {
+        try { handler(JSON.parse(event.data)); } catch { /* 忽略坏帧 */ }
+      };
+    } catch { /* EventSource 不可用时轮询兜底 */ }
+  };
   const button = (label, onClick, primary) => {
     const element = document.createElement("button");
     element.type = "button";
@@ -174,10 +269,60 @@
     ready: "服务已就绪",
   };
 
+  // ---- 控制台通用能力：重启/日志/关闭即停设置 ----
+  // 打开客户端（Tauri 本窗口加载；浏览器控制台模式开新标签页，避免把
+  // 控制台本身导航走）——各调用点按 isTauri 分支内联。
+  let lastKnownPhase = "idle";
+  async function restartService() {
+    await invoke("service_stop");
+    const deadline = Date.now() + 45_000;
+    for (;;) {
+      const phase = await invoke("service_state");
+      if (phase.phase === "stopped" || phase.phase === "idle" || phase.phase === "failed") break;
+      if (Date.now() > deadline) throw new Error("停止超时");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await startService();
+  }
+  const logsPanel = document.getElementById("logs-panel");
+  const logsBox = document.getElementById("logs");
+  const logsActions = document.getElementById("logs-actions");
+  let logsActionsReady = false;
+  async function refreshLogs() {
+    try {
+      const payload = await invoke("service_logs", { lines: 200 });
+      const lines = Array.isArray(payload.lines) ? payload.lines : [];
+      logsBox.textContent = lines.length > 0 ? lines.join("\n") : "（暂无日志）";
+    } catch (error) {
+      logsBox.textContent = `无法读取日志：${error}`;
+    }
+  }
+  function toggleLogs() {
+    logsPanel.hidden = !logsPanel.hidden;
+    if (!logsPanel.hidden) {
+      if (!logsActionsReady) {
+        logsActions.appendChild(button("刷新日志", () => void refreshLogs()));
+        logsActionsReady = true;
+      }
+      void refreshLogs();
+    }
+  }
+  const logsButton = () => button("查看日志", () => toggleLogs());
+  // 关闭控制台时的服务处置（仅控制台模式可配；Tauri 关窗恒停止，Rust 保证）。
+  const closeSetting = document.getElementById("close-setting");
+  const stopOnCloseInput = document.getElementById("stop-on-close");
+  window.addEventListener("beforeunload", (event) => {
+    if (!isTauri && stopOnCloseInput.checked && lastKnownPhase === "ready") {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
+
   let lastUrl = "";
 
   function renderPhase(phase) {
     if (!phase) return;
+    lastKnownPhase = phase.phase;
     if (phase.phase === "idle") {
       render("正在启动", "正在准备…", [], "", { spinner: true });
     } else if (phase.phase === "starting") {
@@ -188,14 +333,20 @@
       lastUrl = phase.url;
       render("服务已就绪",
         "REALM 本地服务正在运行。", [
-          button("打开客户端", () => { window.location.replace(phase.url); }, true),
+          button("打开客户端", () => {
+            if (isTauri) window.location.replace(phase.url);
+            else window.open(phase.url, "_blank", "noopener");
+          }, true),
           button("打开网页", async () => {
             showError("");
             try {
               await invoke("open_in_browser", { url: phase.url });
               render("网页已打开",
                 "已在系统浏览器打开。", [
-                  button("打开客户端", () => { window.location.replace(phase.url); }),
+                  button("打开客户端", () => {
+                    if (isTauri) window.location.replace(phase.url);
+                    else window.open(phase.url, "_blank", "noopener");
+                  }),
                   button("停止服务并退出", async () => { await invoke("service_stop"); }),
                 ], "关闭本窗口也会停止服务。");
             } catch (error) {
@@ -203,6 +354,11 @@
             }
           }),
           button("停止服务并退出", async () => { await invoke("service_stop"); }),
+          button("重启服务", async () => {
+            showError("");
+            try { await restartService(); } catch (error) { showError(String(error)); }
+          }),
+          logsButton(),
         ], "选择「打开客户端」在本窗口使用 REALM；选择「打开网页」用系统浏览器。", { small: phase.url });
       footnote.textContent = shareOriginNote(phase);
       actions.appendChild(button("LAN 分享设置", () => {
@@ -221,6 +377,7 @@
             showError("");
             try { await startService(); } catch (error) { showError(String(error)); }
           }, true),
+          logsButton(),
           button("退出", () => { window.close(); }),
         ]);
       showError(phase.message || "");
@@ -334,7 +491,19 @@
       showConfig();
       return;
     }
-    await tauri.event.listen("service-state", (event) => renderPhase(event.payload));
+    await listenState(renderPhase);
+    if (!isTauri) {
+      // 控制台模式：显示「关闭即停服务」设置（默认开），与 console host 配置同步。
+      closeSetting.hidden = false;
+      try {
+        const config = await invoke("console_config");
+        stopOnCloseInput.checked = config.stopOnClose !== false;
+      } catch { /* 读取失败时保持默认勾选 */ }
+      stopOnCloseInput.addEventListener("change", () => {
+        invoke("set_console_config", { stopOnClose: stopOnCloseInput.checked })
+          .catch(() => { /* 保持现状 */ });
+      });
+    }
     renderPhase(await invoke("service_state"));
     try {
       await startService();
