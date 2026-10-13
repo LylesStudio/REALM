@@ -62,6 +62,13 @@ function executableName(name) {
   return platform() === "win32" ? `${name}.exe` : name;
 }
 
+// macOS 从网络下载的二进制会被打上 com.apple.quarantine，直接执行会收到 SIGKILL。
+// 解压后立刻剥掉隔离属性；失败不阻塞，因为用户也可能自行签名/授信。
+function stripQuarantine(target) {
+  if (platform() !== "darwin") return;
+  spawnSync("xattr", ["-dr", "com.apple.quarantine", target], { stdio: "ignore" });
+}
+
 // 与 setup-web.mjs 同规则：Windows 上 .cmd/.bat shim 也算数。
 function resolveExecutablePath(binDir, name) {
   if (platform() !== "win32") {
@@ -119,6 +126,7 @@ function installFresh({ artifact, target }) {
     rmSync(target, { recursive: true, force: true });
     throw new Error("failed to extract artifact");
   }
+  stripQuarantine(target);
   try {
     return verifyBundle(join(target, "bin"));
   } catch (error) {

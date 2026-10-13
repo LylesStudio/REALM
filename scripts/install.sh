@@ -116,6 +116,10 @@ if [[ "$node_ok" != 1 ]]; then
     mkdir -p "$NODE_DIR"
     tar -xJf "$tmp_tarball" -C "$NODE_DIR" --strip-components=1
     rm -f "$tmp_tarball"
+    # macOS 从网络下载的 Node 二进制可能带 com.apple.quarantine，执行时被 SIGKILL。
+    if [[ "$node_platform" == "darwin" ]]; then
+      xattr -dr com.apple.quarantine "$NODE_DIR" 2>/dev/null || true
+    fi
     trap - EXIT
     log "Node $("$NODE_DIR/bin/node" --version) installed under $NODE_DIR"
   fi
