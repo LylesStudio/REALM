@@ -250,6 +250,7 @@ if ($PgArtifact) {
   # old build (e.g. 17.10 before the shim fix). pg_config --sharedir must exit 0
   # with non-empty output, otherwise treat as needing a reinstall (upgrade path).
   $pgHealthy = $false
+  $pgRequiredBinaries = @('postgres.exe', 'initdb.exe', 'pg_ctl.exe', 'psql.exe', 'pg_isready.exe', 'pg_config.cmd')
   if ($installedVersion) {
     $pgConfigBin = Join-Path $installedBin 'pg_config.cmd'
     if (Test-Path $pgConfigBin) {
@@ -260,7 +261,12 @@ if ($PgArtifact) {
         $pgHealthy = $false
       }
     }
+    foreach ($bin in $pgRequiredBinaries) {
+      if (-not (Test-Path (Join-Path $installedBin $bin))) { $pgHealthy = $false }
+    }
   }
+  $pgTargetDir = Join-Path (Join-Path $env:USERPROFILE '.local\realm-pgsql') $pgArtVersion
+  $pgTargetIncomplete = (-not $installedVersion) -and (Test-Path $pgTargetDir) -and ((Get-ChildItem $pgTargetDir -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)
   if ($installedVersion -and $pgHealthy -and $pgArtVersion -and $installedVersion -eq $pgArtVersion) {
     Write-RealmLog "embedded PostgreSQL $installedVersion already up to date; skipping"
   } else {
@@ -282,8 +288,8 @@ if ($PgArtifact) {
         if ($expected -ne $actual) { throw "artifact checksum mismatch (expected $expected, got $actual)" }
       }
     }
-    if ($installedVersion) {
-      Write-RealmLog "upgrading embedded PostgreSQL $installedVersion -> $pgArtVersion"
+    if ($installedVersion -or $pgTargetIncomplete) {
+      Write-RealmLog "upgrading embedded PostgreSQL $(if ($installedVersion) { $installedVersion } else { 'incomplete' }) -> $pgArtVersion"
       & node (Join-Path $AppDir 'scripts/embedded-pg.mjs') upgrade --artifact $pgTmp
       if ($LASTEXITCODE -ne 0) { throw 'embedded PostgreSQL upgrade failed (rolled back)' }
     } else {
