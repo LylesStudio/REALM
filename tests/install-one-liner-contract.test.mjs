@@ -67,7 +67,7 @@ test("installer launcher entries stop the service when the console closes", () =
   assert.match(installer, /macos-console-app\.mjs/);
   assert.match(installer, /REALM Console\.app/);
   assert.match(installer, /Spotlight-searchable/);
-  assert.match(installer, /open -a "REALM Console"/);
+  assert.match(installer, /open "\$HOME\/Applications\/REALM Console\.app"/);
   // 入口权限安全：脚本 0755（chmod +x 生成的 wrapper）。
   assert.match(installer, /chmod \+x "\$launch_dir/);
 });

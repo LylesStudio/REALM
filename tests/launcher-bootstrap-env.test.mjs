@@ -77,3 +77,24 @@ test("M7. launcher forwards REALM_OPERATOR_PRINCIPALS as non-sensitive config; s
   assert.ok(env.DATABASE_URL !== "postgres://sentinel-owner@127.0.0.1/x",
     "父进程 owner DATABASE_URL 不得原样透传");
 });
+
+test("M8. launcher defaults LC_ALL/LANG to C.UTF-8 when parent provides none", async () => {
+  const { buildChildEnv } = await import("../launcher/realm-launcher.mjs");
+  const env = buildChildEnv({
+    dataHome: "/tmp/sentinel-data-home",
+    appPort: 9999,
+    pgPort: 55499,
+    environment: { PATH: "/usr/bin" },
+  });
+  assert.equal(env.LC_ALL, "C.UTF-8");
+  assert.equal(env.LANG, "C.UTF-8");
+  // 父进程提供有效值时保持原值。
+  const env2 = buildChildEnv({
+    dataHome: "/tmp/sentinel-data-home",
+    appPort: 9999,
+    pgPort: 55499,
+    environment: { PATH: "/usr/bin", LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" },
+  });
+  assert.equal(env2.LC_ALL, "en_US.UTF-8");
+  assert.equal(env2.LANG, "en_US.UTF-8");
+});

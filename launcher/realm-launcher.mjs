@@ -297,9 +297,19 @@ const SAFE_PARENT_ENV_KEYS = new Set([
 ]);
 
 export function safeParentEnv(environment) {
-  return Object.fromEntries(
+  const filtered = Object.fromEntries(
     Object.entries(environment).filter(([name]) => SAFE_PARENT_ENV_KEYS.has(name)),
   );
+  // PostgreSQL 在 macOS 上对空/无效 LC_ALL 极度敏感，会报
+  // "postmaster became multithreaded during startup"。如果父进程没提供有效
+  // locale，回落到 C.UTF-8（bundled PG 可接受的最小 locale）。
+  if (!filtered.LC_ALL || String(filtered.LC_ALL).trim() === "") {
+    filtered.LC_ALL = "C.UTF-8";
+  }
+  if (!filtered.LANG || String(filtered.LANG).trim() === "") {
+    filtered.LANG = "C.UTF-8";
+  }
+  return filtered;
 }
 
 /** child env 中绝不出现的敏感形态（key/password/secret 值）。 */

@@ -417,7 +417,7 @@ if [[ -n "$launcher_path" ]]; then
   if [[ "$platform" == "macos" ]]; then
     # 优先打开 Spotlight 可搜索的 .app bundle；回退到 .command wrapper。
     if [[ -d "$HOME/Applications/REALM Console.app" ]]; then
-      open -a "REALM Console"
+      open "$HOME/Applications/REALM Console.app"
     else
       open "$launcher_path"
     fi

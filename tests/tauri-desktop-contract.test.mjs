@@ -171,7 +171,7 @@ test("child env stays loopback by default and never leaks secrets", () => {
     DB_PASSWORD: "contract",
     CUSTOM_SECRET: "contract",
   });
-  assert.deepEqual(Object.keys(parent).sort(), ["HOME", "PATH"]);
+  assert.deepEqual(Object.keys(parent).sort(), ["HOME", "LANG", "LC_ALL", "PATH"]);
   // 白名单自身不得包含敏感形态键（只检查引号内的条目，注释不算）。
   const whitelistMatch = launcherMjs.match(/SAFE_PARENT_ENV_KEYS = new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(whitelistMatch, "SAFE_PARENT_ENV_KEYS must exist");
