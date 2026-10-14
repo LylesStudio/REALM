@@ -273,6 +273,7 @@ async function ensureDatabase() {
 }
 
 function startServer() {
+  const win32NoWait = process.platform === "win32";
   try {
     run("pg_ctl", [
       "-D",
@@ -284,7 +285,7 @@ function startServer() {
       process.platform === "win32"
         ? `-h ${host} -p ${port}`
         : `-h ${host} -p ${port} -k ${shellQuote(socketDirectory)}`,
-      "-w",
+      ...(win32NoWait ? [] : ["-w"]),
       "start",
     ]);
   } catch (error) {
@@ -297,6 +298,21 @@ function startServer() {
     const detail = serverLog ? `\nPostgreSQL server log:\n${serverLog.slice(-4_000)}` : "";
     throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`);
   }
+  if (win32NoWait) {
+    // pg_ctl start on Windows returns immediately; poll readiness ourselves to
+    // keep the same synchronous contract as pg_ctl -w on POSIX.
+    return waitForReadiness(60_000);
+  }
+}
+
+async function waitForReadiness(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { ok } = await readiness();
+    if (ok) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+  throw new Error("Realm PostgreSQL started but did not become ready.");
 }
 
 switch (action) {
@@ -313,7 +329,7 @@ switch (action) {
           `${host}:${port} is already used by a PostgreSQL server outside this project cluster.`,
         );
       }
-      startServer();
+      await startServer();
     }
     await ensureDatabase();
     if (!(await readiness()).ok) {
