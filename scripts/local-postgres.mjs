@@ -259,7 +259,14 @@ async function ensureDatabase() {
     );
     if (rows.length > 0) return;
     const safeDatabase = /^[a-zA-Z0-9_]+$/.test(database) ? database : "realm_local";
-    await client.query(`CREATE DATABASE ${pg.escapeIdentifier(safeDatabase)}`);
+    try {
+      await client.query(`CREATE DATABASE ${pg.escapeIdentifier(safeDatabase)}`);
+    } catch (createError) {
+      // 42P04 = duplicate_database: another racer created it, or the SELECT
+      // above did not see it due to a stale snapshot. Either way it exists.
+      if (createError?.code === "42P04") return;
+      throw createError;
+    }
   } finally {
     await client.end().catch(() => {});
   }

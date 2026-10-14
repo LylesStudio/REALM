@@ -267,6 +267,11 @@ if ($PgArtifact) {
   }
   $pgTargetDir = Join-Path (Join-Path $env:USERPROFILE '.local\realm-pgsql') $pgArtVersion
   $pgTargetIncomplete = (-not $installedVersion) -and (Test-Path $pgTargetDir) -and ((Get-ChildItem $pgTargetDir -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)
+  if ($pgTargetIncomplete) {
+    $brokenDir = "$pgTargetDir.broken-$([Guid]::NewGuid().ToString('N'))"
+    Write-RealmLog "embedded PostgreSQL directory is incomplete; moving it to $brokenDir and reinstalling"
+    Move-Item -Path $pgTargetDir -Destination $brokenDir -Force
+  }
   if ($installedVersion -and $pgHealthy -and $pgArtVersion -and $installedVersion -eq $pgArtVersion) {
     Write-RealmLog "embedded PostgreSQL $installedVersion already up to date; skipping"
   } else {
