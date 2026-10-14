@@ -297,6 +297,8 @@ $batContent = @"
 @echo off
 REM REALM 服务控制台（由安装器生成）：打开浏览器控制台查看服务状态、
 REM 启动/停止/重启、查看日志。关闭本窗口会同时停止本地服务。
+REM 先清理可能残留的旧 REALM 服务进程，避免端口被占。
+powershell -WindowStyle Hidden -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'realm-console\.mjs|realm-service-host\.mjs|vinext start|next start' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 cd /d "$($AppDir -replace '\\', '\\\\')"
 "$($nodeBin -replace '\\', '\\\\')" launcher\\realm-console.mjs
 "@
