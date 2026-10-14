@@ -31,6 +31,12 @@ function Write-RealmLog([string]$Message) {
   Write-Host "[realm] $Message" -ForegroundColor Cyan
 }
 
+# Windows 普通玩家没有 Homebrew PostgreSQL，默认启用嵌入式 PG。
+if (-not $PgArtifact -and -not $EmbeddedPg) {
+  $EmbeddedPg = $true
+  Write-RealmLog 'Windows: defaulting to embedded PostgreSQL 17 + pgvector'
+}
+
 function Confirm-Realm([string]$Prompt) {
   if ($Yes) { Write-RealmLog "$Prompt (-Yes)"; return $true }
   $answer = Read-Host "$Prompt [y/N]"
@@ -299,6 +305,8 @@ REM REALM 服务控制台（由安装器生成）：打开浏览器控制台查�
 REM 启动/停止/重启、查看日志。关闭本窗口会同时停止本地服务。
 REM 先清理可能残留的旧 REALM 服务进程，避免端口被占。
 powershell -WindowStyle Hidden -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'realm-console\.mjs|realm-service-host\.mjs|vinext start|next start' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+REM 清理旧实例崩溃可能留下的锁文件。
+if exist "%LOCALAPPDATA%\REALM\realm.lock" del /f "%LOCALAPPDATA%\REALM\realm.lock"
 cd /d "$($AppDir -replace '\\', '\\\\')"
 "$($nodeBin -replace '\\', '\\\\')" launcher\\realm-console.mjs
 "@
