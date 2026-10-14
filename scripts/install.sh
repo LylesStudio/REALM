@@ -304,6 +304,11 @@ fi
 log "installing npm dependencies (ci); this may take a few minutes"
 npm --prefix "$APP_DIR" ci
 
+log "building production frontend; this may take a minute or two"
+cd "$APP_DIR"
+npm run build
+cd - > /dev/null
+
 # --- 4. Embedded PostgreSQL（--embedded-pg 自动解析 / --pg-artifact 显式指定） ---
 # 重跑同一条安装命令即完整升级：源码 fetch 更新（上文）+ 此处构件版本比较。
 PG_SHA_URL=""
