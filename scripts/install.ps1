@@ -1,4 +1,4 @@
-# REALM one-command installer for Windows (irm <raw-url> | iex entry point).
+﻿# REALM one-command installer for Windows (irm <raw-url> | iex entry point).
 #
 # Mirrors scripts/install.sh: detect Node 22.13+ (offer a consent-gated winget
 # install) -> fetch the REALM source (git clone, or codeload zip when git is
