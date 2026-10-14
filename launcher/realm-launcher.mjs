@@ -97,6 +97,16 @@ export async function pickPort(candidates) {
     if (free) return port;
     results.push({ port, error });
   }
+  // Windows 上某些端口会被系统/Hyper-V 加入 excluded port range，普通进程绑定报
+  // EACCES 而不是 EADDRINUSE。此时回落到高位随机端口，保证玩家能启动。
+  const allAccessDenied = results.every(({ error }) => error?.code === "EACCES" || error?.code === "EPERM");
+  if (allAccessDenied && process.platform === "win32") {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const fallback = 30_000 + Math.floor(Math.random() * 30_000);
+      const { free } = await portFree(fallback);
+      if (free) return fallback;
+    }
+  }
   const details = results
     .map(({ port, error }) => `${port}: ${error?.code ?? error?.message ?? "unknown"}`)
     .join("; ");
