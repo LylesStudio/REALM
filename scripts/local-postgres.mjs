@@ -286,22 +286,45 @@ async function ensureDatabase() {
   }
 }
 
-function startServer() {
-  // Windows pg_ctl is unreliable with -o port overrides and can hang. Spawn
-  // postgres.exe directly with the requested loopback port and poll readiness.
+async function startServer() {
+  // On Windows, pg_ctl -o can silently fall back to postmaster.opts, and
+  // pg_ctl -w sometimes hangs even though PostgreSQL itself is ready. We let
+  // pg_ctl start the server (it knows how to drop the admin token that
+  // postgres.exe refuses), then wait for readiness ourselves. The spawned
+  // pg_ctl process exits once it has confirmed the server is running; the
+  // postmaster remains in the background.
   if (process.platform === "win32") {
-    const child = spawn(executable("postgres"), [
+    console.log(`[local-postgres] pg_ctl start on ${host}:${port} (data: ${dataDirectory})`);
+    const child = spawn(executable("pg_ctl"), [
       "-D", dataDirectory,
-      "-h", host,
-      "-p", String(port),
+      "-l", logPath,
+      "-o", `-h ${host} -p ${port}`,
+      "start",
     ], {
       cwd: projectRoot,
       env: process.env,
-      stdio: "ignore",
-      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    let pgCtlOutput = "";
+    child.stdout?.on("data", (chunk) => { pgCtlOutput += chunk; });
+    child.stderr?.on("data", (chunk) => { pgCtlOutput += chunk; });
+    await new Promise((resolvePromise, rejectPromise) => {
+      child.on("error", (error) => rejectPromise(error));
+      child.on("exit", (code) => {
+        if (code !== 0 && code !== null) {
+          rejectPromise(new Error(`pg_ctl start failed: exit ${code}\n${pgCtlOutput}`));
+        } else {
+          resolvePromise();
+        }
+      });
+    });
+    console.log(`[local-postgres] pg_ctl exited, polling readiness...`);
+    await waitForReadiness(120_000);
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.removeAllListeners();
     child.unref();
-    return waitForReadiness(60_000);
+    return;
   }
   try {
     run("pg_ctl", [
@@ -326,11 +349,19 @@ function startServer() {
   }
 }
 
-async function waitForReadiness(timeoutMs = 60_000) {
+async function waitForReadiness(timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
+  let lastOk = false;
   while (Date.now() < deadline) {
     const { ok } = await readiness();
-    if (ok) return;
+    if (ok) {
+      console.log("[local-postgres] readiness OK");
+      return;
+    }
+    if (ok !== lastOk) {
+      console.log(`[local-postgres] readiness not OK, retrying until ${new Date(deadline).toISOString()}`);
+      lastOk = ok;
+    }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
   }
   throw new Error("Realm PostgreSQL started but did not become ready.");
