@@ -318,7 +318,15 @@ export async function createConsoleServer(options = {}) {
     port,
     host: bindHost,
     url: `http://${bindHost}:${port}/`,
-    close: () => new Promise((resolveClose) => server.close(() => resolveClose())),
+    close: () => new Promise((resolveClose) => {
+      // 先断开 SSE，避免 server.close() 因 keep-alive 连接无限等待。
+      for (const response of events) {
+        try { response.end(); } catch { /* ignore */ }
+      }
+      events.clear();
+      server.close(() => resolveClose());
+      setTimeout(() => resolveClose(), 5_000);
+    }),
   };
 }
 
@@ -467,9 +475,12 @@ async function main() {
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // 任何清理超过 10 秒都强制退出，避免关闭 .app 后 Dock 图标仍然挂着。
+    const forceExit = setTimeout(() => process.exit(2), 10_000);
+    if (typeof forceExit.unref === "function") forceExit.unref();
     void controller.close()
       .then(() => httpConsole.close())
-      .then(() => process.exit(0))
+      .then(() => { clearTimeout(forceExit); process.exit(0); })
       .catch(() => process.exit(1));
   };
   process.once("SIGINT", shutdown);
