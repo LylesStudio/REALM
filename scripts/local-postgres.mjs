@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -287,7 +287,22 @@ async function ensureDatabase() {
 }
 
 function startServer() {
-  const win32NoWait = process.platform === "win32";
+  // Windows pg_ctl is unreliable with -o port overrides and can hang. Spawn
+  // postgres.exe directly with the requested loopback port and poll readiness.
+  if (process.platform === "win32") {
+    const child = spawn(executable("postgres"), [
+      "-D", dataDirectory,
+      "-h", host,
+      "-p", String(port),
+    ], {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: "ignore",
+      detached: true,
+    });
+    child.unref();
+    return waitForReadiness(60_000);
+  }
   try {
     run("pg_ctl", [
       "-D",
@@ -295,11 +310,8 @@ function startServer() {
       "-l",
       logPath,
       "-o",
-      // unix socket 目录仅 POSIX；Windows 走纯 TCP loopback。
-      process.platform === "win32"
-        ? `-h ${host} -p ${port}`
-        : `-h ${host} -p ${port} -k ${shellQuote(socketDirectory)}`,
-      ...(win32NoWait ? [] : ["-w"]),
+      `-h ${host} -p ${port} -k ${shellQuote(socketDirectory)}`,
+      "-w",
       "start",
     ]);
   } catch (error) {
@@ -311,11 +323,6 @@ function startServer() {
     }
     const detail = serverLog ? `\nPostgreSQL server log:\n${serverLog.slice(-4_000)}` : "";
     throw new Error(`${error instanceof Error ? error.message : String(error)}${detail}`);
-  }
-  if (win32NoWait) {
-    // pg_ctl start on Windows returns immediately; poll readiness ourselves to
-    // keep the same synchronous contract as pg_ctl -w on POSIX.
-    return waitForReadiness(60_000);
   }
 }
 
