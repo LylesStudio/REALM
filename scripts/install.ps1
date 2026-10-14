@@ -199,6 +199,22 @@ try {
   Pop-Location
 }
 
+# --- 3b. Production build --------------------------------------------------------
+# The service console launches the production server (vinext start), which needs
+# a built dist/. Skip with REALM_INSTALL_SKIP_BUILD=1 for development workflows.
+if ($env:REALM_INSTALL_SKIP_BUILD -eq '1') {
+  Write-RealmLog 'REALM_INSTALL_SKIP_BUILD=1 -> skipping npm run build'
+} else {
+  Write-RealmLog 'building production app (npm run build); this may take a minute'
+  Push-Location $AppDir
+  try {
+    & $NpmCommand run build
+    if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+  } finally {
+    Pop-Location
+  }
+}
+
 # --- 4. Embedded PostgreSQL (-EmbeddedPg auto / -PgArtifact explicit) ------------
 # Re-running the same installer performs a full upgrade: source fetch (above) +
 # artifact version comparison below.
