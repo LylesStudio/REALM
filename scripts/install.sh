@@ -331,7 +331,8 @@ if [[ "$EMBEDDED_PG" == 1 && -z "$PG_ARTIFACT" ]]; then
     api_version="$(curl -fsSL --max-time 15 \
       "https://api.github.com/repos/Silver-Aurora/REALM/releases?per_page=30" 2>/dev/null \
       | grep -o '"tag_name": *"embedded-pg-[^"]*"' | head -n 1 \
-      | sed -E 's/.*"embedded-pg-([^"]+)".*/\1/')"
+      | sed -E 's/.*"embedded-pg-([^"]+)".*/\1/' \
+      || true)"
     PG_ART_VERSION="${api_version:-17.10}"
   fi
   PG_BASE="${REALM_PG_RELEASE_BASE:-https://github.com/Silver-Aurora/REALM/releases/download/embedded-pg-${PG_ART_VERSION}}"
