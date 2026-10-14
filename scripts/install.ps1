@@ -1,4 +1,4 @@
-﻿# REALM one-command installer for Windows (irm <raw-url> | iex entry point).
+# REALM one-command installer for Windows (irm <raw-url> | iex entry point).
 #
 # Mirrors scripts/install.sh: detect Node 22.13+ (offer a consent-gated winget
 # install) -> fetch the REALM source (git clone, or codeload zip when git is
@@ -31,7 +31,7 @@ function Write-RealmLog([string]$Message) {
   Write-Host "[realm] $Message" -ForegroundColor Cyan
 }
 
-# Windows 普通玩家没有 Homebrew PostgreSQL，默认启用嵌入式 PG。
+# Windows players rarely have a local PostgreSQL; default to embedded PG.
 if (-not $PgArtifact -and -not $EmbeddedPg) {
   $EmbeddedPg = $true
   Write-RealmLog 'Windows: defaulting to embedded PostgreSQL 17 + pgvector'
@@ -85,8 +85,8 @@ $NpmCommand = Resolve-NpmCommand
 
 # --- 2. Source ------------------------------------------------------------------
 if (-not $SourceUrl) {
-  # iex 执行时 $MyInvocation.MyCommand.Path 为 $null（脚本无文件路径），
-  # 只有从文件运行时才能从本地 git 上下文推断 origin。
+  # When invoked via iex, $MyInvocation.MyCommand.Path is $null (no file path).
+  # Only a file-based invocation can infer origin from local git context.
   $scriptPath = $MyInvocation.MyCommand.Path
   if ($scriptPath) {
     $gitRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
@@ -183,8 +183,8 @@ if ($env:REALM_INSTALL_SKIP_NPM -eq '1') {
   Write-RealmLog 'REALM_INSTALL_SKIP_NPM=1 -> stopping before npm ci'
   exit 0
 }
-# 旧安装器可能在 node_modules 里留下损坏的本地 npm；npm ci 自身运行时无法
-# 删除正在使用的自身目录，因此先显式清掉再安装。
+# Older installers may leave a corrupted local npm in node_modules. npm ci cannot
+# delete its own directory while running, so remove it explicitly first.
 $nodeModules = Join-Path $AppDir 'node_modules'
 if (Test-Path $nodeModules) {
   Write-RealmLog 'cleaning stale node_modules before npm ci'
@@ -199,17 +199,18 @@ try {
   Pop-Location
 }
 
-# --- 4. Embedded PostgreSQL（-EmbeddedPg 自动解析 / -PgArtifact 显式指定） ------
-# 重跑同一条安装命令即完整升级：源码 fetch 更新（上文）+ 此处构件版本比较。
+# --- 4. Embedded PostgreSQL (-EmbeddedPg auto / -PgArtifact explicit) ------------
+# Re-running the same installer performs a full upgrade: source fetch (above) +
+# artifact version comparison below.
 $pgShaUrl = $null
 $pgArtVersion = $env:REALM_PG_VERSION
 if ($EmbeddedPg -and -not $PgArtifact) {
   $arch = $env:PROCESSOR_ARCHITECTURE
   if ($arch -ne 'AMD64') {
-    throw "-EmbeddedPg: no prebuilt artifact for Windows/$arch (available: windows-x64; ARM64 请用本地 PostgreSQL 17 + pgvector 或 Docker)"
+    throw "-EmbeddedPg: no prebuilt artifact for Windows/$arch (available: windows-x64; use a local PostgreSQL 17 + pgvector or Docker on ARM64)"
   }
-  # 目标版本：显式 REALM_PG_VERSION > 从 releases 列表找最新的 embedded-pg-* tag
-  #（releases/latest 可能是代码 release vX.Y.Z，不能指望它含 pg- 前缀）。
+  # Target version: explicit REALM_PG_VERSION > latest embedded-pg-* tag from releases.
+  # releases/latest may be a code release vX.Y.Z, so do not rely on it for pg- prefixes.
   if (-not $pgArtVersion) {
     try {
       $releases = Invoke-RestMethod -TimeoutSec 15 -Uri 'https://api.github.com/repos/Silver-Aurora/REALM/releases?per_page=30' -Headers @{ 'User-Agent' = 'realm-installer' }
@@ -225,8 +226,9 @@ if ($EmbeddedPg -and -not $PgArtifact) {
 }
 
 if ($PgArtifact) {
-  # 先探测安装目录再调用 version：未安装时该命令会写 stderr，
-  # 而 $ErrorActionPreference='Stop' 会把原生命令的 stderr 提升为致命错误。
+  # Probe the install directory before invoking version: when not installed the
+  # command writes to stderr, and $ErrorActionPreference='Stop' would turn that
+  # into a terminating error.
   $pgRoot = Join-Path $env:USERPROFILE '.local\realm-pgsql'
   $installedBin = Get-ChildItem -Path $pgRoot -Directory -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.FullName 'bin' } |
@@ -234,8 +236,9 @@ if ($PgArtifact) {
     Select-Object -First 1
   $installedVersion = $null
   if ($installedBin) {
-    # Stop 语义会把原生命令的 stderr 提升为 NativeCommandError——探测必须可捕获，
-    # 任何失败一律视为「未安装/损坏」，交给下方安装路径处理。
+    # Stop semantics promote native stderr to NativeCommandError. Probing must be
+    # catchable; any failure is treated as "not installed / broken" and handled
+    # by the install path below.
     try {
       $versionOut = (& node (Join-Path $AppDir 'scripts/embedded-pg.mjs') version 2>$null)
       if ($LASTEXITCODE -eq 0 -and $versionOut -match '(\d+\.\d+)') { $installedVersion = $Matches[1] }
@@ -243,8 +246,9 @@ if ($PgArtifact) {
       $installedVersion = $null
     }
   }
-  # shim 健康检查：同版本构件可能来自旧构建（如 shim 修复前的 17.10）。
-  # pg_config --sharedir 必须非空输出且 exit 0，否则视为需重装（走 upgrade）。
+  # shim health check: an installed artifact of the same version may come from an
+  # old build (e.g. 17.10 before the shim fix). pg_config --sharedir must exit 0
+  # with non-empty output, otherwise treat as needing a reinstall (upgrade path).
   $pgHealthy = $false
   if ($installedVersion) {
     $pgConfigBin = Join-Path $installedBin 'pg_config.cmd'
@@ -301,11 +305,11 @@ $nodeBin = (Get-Command node.exe).Source
 $batPath = Join-Path $RealmHome 'Launch REALM.bat'
 $batContent = @"
 @echo off
-REM REALM 服务控制台（由安装器生成）：打开浏览器控制台查看服务状态、
-REM 启动/停止/重启、查看日志。关闭本窗口会同时停止本地服务。
-REM 先清理可能残留的旧 REALM 服务进程，避免端口被占。
+REM REALM service console (generated by installer): open the browser console to
+REM view status, start/stop/restart, and logs. Closing this window stops local services.
+REM Clean up leftover REALM service processes first to free ports.
 powershell -WindowStyle Hidden -Command "Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -match 'realm-console\.mjs|realm-service-host\.mjs|vinext start|next start' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }"
-REM 清理旧实例崩溃可能留下的锁文件。
+REM Clean up a stale lock file left by a crashed instance.
 if exist "%LOCALAPPDATA%\REALM\realm.lock" del /f "%LOCALAPPDATA%\REALM\realm.lock"
 cd /d "$($AppDir)"
 "$($nodeBin)" launcher\realm-console.mjs
@@ -327,14 +331,14 @@ try {
   Write-RealmLog "could not create Start Menu shortcut: $_"
 }
 
-Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'
+Write-RealmLog 'Install complete. Double-click "Launch REALM.bat" in the .realm folder or open REALM from the Start Menu.'
 
 if ($NoStart -or $env:REALM_INSTALL_SKIP_START -eq '1') {
-  Write-RealmLog 'REALM_INSTALL_SKIP_START=1 / -NoStart → not starting the service console'
+  Write-RealmLog 'REALM_INSTALL_SKIP_START=1 / -NoStart -> not starting the service console'
   exit 0
 }
 
 Write-RealmLog 'starting REALM service console...'
 Start-Process -FilePath $batPath
 
-Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'
+Write-RealmLog 'Install complete. Double-click "Launch REALM.bat" in the .realm folder or open REALM from the Start Menu.'
