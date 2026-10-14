@@ -31,6 +31,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -424,8 +425,26 @@ export function resolvePgBin(
     const flat = resolve(home, "pgsql", "bin");
     if (existsSync(flat)) return flat;
   }
-  // 开发/CI：沿用 local-postgres 的默认/REALM_POSTGRES_BIN。
-  return environment.REALM_POSTGRES_BIN ?? "";
+  // 显式环境变量优先于用户态嵌入式 PG 和开发默认。
+  if (environment.REALM_POSTGRES_BIN) return environment.REALM_POSTGRES_BIN;
+  // 用户态嵌入式 PG（embedded-pg.mjs 安装到 ~/.local/realm-pgsql/<version>/bin）。
+  const userPg = resolveUserPgBin(platform, environment);
+  if (userPg) return userPg;
+  // 开发/CI 默认（macOS Homebrew）。
+  return "/opt/homebrew/opt/postgresql@17/bin";
+}
+
+function resolveUserPgBin(platform, environment) {
+  const home = environment.USERPROFILE ?? environment.HOME ?? homedir();
+  const base = resolve(home, ".local", "realm-pgsql");
+  if (!existsSync(base)) return null;
+  const exe = platform === "win32" ? "postgres.exe" : "postgres";
+  const versions = readdirSync(base, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(resolve(base, entry.name, "bin", exe)))
+    .map((entry) => entry.name)
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  if (versions.length > 0) return resolve(base, versions[0], "bin");
+  return null;
 }
 
 /**

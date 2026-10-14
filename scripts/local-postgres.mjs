@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -12,7 +12,22 @@ const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 // 3. 默认 ~/.local/realm-pgsql/data——用户目录、与源码分离，删除 ~/.realm/app 不丢世界。
 // Windows：可执行名带 .exe；不使用 unix socket（-k 仅 POSIX）；路径不依赖 POSIX。
 const dataHome = process.env.REALM_DATA_HOME?.trim();
-const postgresRoot = process.env.REALM_POSTGRES_BIN ?? "/opt/homebrew/opt/postgresql@17/bin";
+function resolvePostgresRoot() {
+  if (process.env.REALM_POSTGRES_BIN) return process.env.REALM_POSTGRES_BIN;
+  // 优先找用户态嵌入式 PG（embedded-pg.mjs 安装到 ~/.local/realm-pgsql/<version>/bin）。
+  const userPgBase = resolve(homedir(), ".local", "realm-pgsql");
+  if (existsSync(userPgBase)) {
+    const exe = process.platform === "win32" ? "postgres.exe" : "postgres";
+    const versions = readdirSync(userPgBase, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(resolve(userPgBase, entry.name, "bin", exe)))
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    if (versions.length > 0) return resolve(userPgBase, versions[0], "bin");
+  }
+  // 开发/CI 默认（macOS Homebrew）。
+  return "/opt/homebrew/opt/postgresql@17/bin";
+}
+const postgresRoot = resolvePostgresRoot();
 const userDataDefault = resolve(homedir(), ".local", "realm-pgsql", "data");
 const legacyProjectData = resolve(projectRoot, ".local", "postgres", "data");
 const dataDirectory = process.env.REALM_POSTGRES_DATA_DIR
