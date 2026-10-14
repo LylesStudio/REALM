@@ -35,12 +35,14 @@ REALM_HOME="${REALM_HOME:-$HOME/.realm}"
 APP_DIR="$REALM_HOME/app"
 REF="${REALM_INSTALL_REF:-main}"
 AUTO_YES=0
+NO_START=0
 EMBEDDED_PG=0
 PG_ARTIFACT="${REALM_PG_ARTIFACT:-}"
 next_is_pg=0
 for arg in "$@"; do
   if [[ "$next_is_pg" == 1 ]]; then PG_ARTIFACT="$arg"; next_is_pg=0; continue; fi
   [[ "$arg" == "--yes" ]] && AUTO_YES=1
+  [[ "$arg" == "--no-start" ]] && NO_START=1
   if [[ "$arg" == "--pg-artifact" ]]; then next_is_pg=1; continue; fi
   [[ "$arg" == "--embedded-pg" ]] && EMBEDDED_PG=1
 done
@@ -392,15 +394,18 @@ esac
 
 log "安装完成。$launcher_tip"
 
+if [[ "$NO_START" == 1 || "${REALM_INSTALL_SKIP_START:-0}" == 1 ]]; then
+  log "REALM_INSTALL_SKIP_START=1 / --no-start → not starting the service console"
+  exit 0
+fi
+
 if [[ -n "$launcher_path" ]]; then
-  if [[ "$AUTO_YES" == 1 ]] || confirm "是否立即启动 REALM？"; then
-    log "starting REALM..."
-    if [[ "$platform" == "macos" ]]; then
-      # .command 在 Terminal.app 中运行；open 命令可在不阻塞当前 shell 的情况下启动。
-      open "$launcher_path"
-    else
-      exec "$launcher_path"
-    fi
+  log "starting REALM service console..."
+  if [[ "$platform" == "macos" ]]; then
+    # .command 在 Terminal.app 中运行；open 命令可在不阻塞当前 shell 的情况下启动。
+    open "$launcher_path"
+  else
+    exec "$launcher_path"
   fi
 fi
 

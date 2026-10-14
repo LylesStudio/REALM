@@ -15,6 +15,7 @@
 [CmdletBinding()]
 param(
   [switch]$Yes,
+  [switch]$NoStart,
   [switch]$EmbeddedPg,
   [string]$PgArtifact
 )
@@ -318,9 +319,12 @@ try {
 
 Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'
 
-if ($Yes -or (Confirm-Realm '是否立即启动 REALM？')) {
-  Write-RealmLog 'starting REALM...'
-  Start-Process -FilePath $batPath
+if ($NoStart -or $env:REALM_INSTALL_SKIP_START -eq '1') {
+  Write-RealmLog 'REALM_INSTALL_SKIP_START=1 / -NoStart → not starting the service console'
+  exit 0
 }
+
+Write-RealmLog 'starting REALM service console...'
+Start-Process -FilePath $batPath
 
 Write-RealmLog '安装完成。双击 .realm 目录下的 "Launch REALM.bat" 或从开始菜单打开 REALM 服务控制台。'

@@ -47,6 +47,13 @@ test("install.sh creates a user-discoverable launcher entry that opens the servi
   // Windows 安装器同样 handing off 到控制台。
   assert.match(windowsInstaller, /realm-console\.mjs/);
   assert.doesNotMatch(windowsInstaller, /realm-launcher\.mjs/);
+  // 安装完成后默认自动启动服务控制台；可通过 --no-start 或环境变量跳过。
+  assert.match(installer, /starting REALM service console/);
+  assert.match(installer, /--no-start/);
+  assert.match(installer, /REALM_INSTALL_SKIP_START/);
+  assert.match(windowsInstaller, /starting REALM service console/);
+  assert.match(windowsInstaller, /-NoStart/);
+  assert.match(windowsInstaller, /REALM_INSTALL_SKIP_START/);
   // 冒烟开关仅用于自动化验收，不能成为默认路径。
   assert.match(installer, /REALM_INSTALL_SKIP_NPM/);
   assert.match(installer, /REALM_INSTALL_SKIP_SETUP/);
