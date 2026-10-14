@@ -63,6 +63,11 @@ test("installer launcher entries stop the service when the console closes", () =
   // 关闭控制台窗口即停止本地服务是默认语义，入口注释必须向用户说明。
   assert.match(installer, /关闭本 Terminal 窗口会同时停止本地服务/);
   assert.match(windowsInstaller, /关闭本窗口会同时停止本地服务/);
+  // macOS 额外生成 Spotlight 可搜索的 .app bundle，普通玩家以后不必进终端。
+  assert.match(installer, /macos-console-app\.mjs/);
+  assert.match(installer, /REALM Console\.app/);
+  assert.match(installer, /Spotlight-searchable/);
+  assert.match(installer, /open -a "REALM Console"/);
   // 入口权限安全：脚本 0755（chmod +x 生成的 wrapper）。
   assert.match(installer, /chmod \+x "\$launch_dir/);
 });

@@ -82,6 +82,13 @@ exec "$node_bin" launcher/realm-console.mjs "\$@"
 EOF
     chmod +x "$launch_dir/$entry_name"
     log "created launcher entry: $launch_dir/$entry_name"
+    # 同时生成一个 Spotlight 可搜索的 .app bundle，普通玩家以后不必进终端。
+    mkdir -p "$app_dir/scripts/desktop"
+    "$node_bin" "$app_dir/scripts/desktop/macos-console-app.mjs" "$app_dir" "$node_bin" \
+      || log "warning: failed to create REALM Console.app"
+    if [[ -d "$HOME/Applications/REALM Console.app" ]]; then
+      log "created Spotlight-searchable app: $HOME/Applications/REALM Console.app"
+    fi
   elif [[ "$platform" == "linux" ]]; then
     mkdir -p "$launch_dir/bin"
     cat > "$launch_dir/bin/realm-launch" <<EOF
@@ -380,7 +387,7 @@ platform="$(realm_platform)"
 case "$platform" in
   macos)
     launcher_path="$REALM_HOME/Launch REALM.command"
-    launcher_tip="双击 \"$launcher_path\" 即可启动 REALM。"
+    launcher_tip="REALM 已安装到 \"$HOME/Applications/REALM Console.app\"，可按 Command+空格 搜索 REALM 启动；关闭该 app 会同时停止本地服务。"
     ;;
   linux)
     launcher_path="$REALM_HOME/bin/realm-launch"
@@ -402,8 +409,12 @@ fi
 if [[ -n "$launcher_path" ]]; then
   log "starting REALM service console..."
   if [[ "$platform" == "macos" ]]; then
-    # .command 在 Terminal.app 中运行；open 命令可在不阻塞当前 shell 的情况下启动。
-    open "$launcher_path"
+    # 优先打开 Spotlight 可搜索的 .app bundle；回退到 .command wrapper。
+    if [[ -d "$HOME/Applications/REALM Console.app" ]]; then
+      open -a "REALM Console"
+    else
+      open "$launcher_path"
+    fi
   else
     exec "$launcher_path"
   fi
