@@ -76,27 +76,32 @@ async function portFree(port) {
   return new Promise((resolvePromise) => {
     const server = createServer();
     let resolved = false;
-    const cleanup = (value) => {
+    const cleanup = (value, error = null) => {
       if (resolved) return;
       resolved = true;
       try {
-        server.close(() => resolvePromise(value));
+        server.close(() => resolvePromise({ free: value, error }));
       } catch {
-        resolvePromise(value);
+        resolvePromise({ free: value, error });
       }
     };
-    server.once("error", () => cleanup(false));
+    server.once("error", (error) => cleanup(false, error));
     server.listen(port, "127.0.0.1", () => cleanup(true));
   });
 }
 
 export async function pickPort(candidates) {
+  const results = [];
   for (const port of candidates) {
-    if (await portFree(port)) return port;
+    const { free, error } = await portFree(port);
+    if (free) return port;
+    results.push({ port, error });
   }
+  const details = results
+    .map(({ port, error }) => `${port}: ${error?.code ?? error?.message ?? "unknown"}`)
+    .join("; ");
   throw new LauncherError(
-    `no free loopback port among: ${candidates.join(", ")}. `
-    + "These ports are held by another program or an old REALM process. "
+    `no free loopback port among: ${candidates.join(", ")}. Details: ${details}. `
     + "Close any existing REALM console window and try again, or restart your computer.",
   );
 }
