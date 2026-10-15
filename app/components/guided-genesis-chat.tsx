@@ -1,19 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { GenesisDraftFields } from "./genesis-draft-fields";
 import {
+  applyGenesisFieldEdits,
+  diffEditedGenesisFields,
   mergeDraftPatch,
   type GenesisChatPhase,
   type GenesisChatTurn,
 } from "../../modules/application/genesis-chat-contract.ts";
 import {
-  GENESIS_LIMITS,
   type WorldGenesisDraft,
 } from "../../modules/application/world-genesis-contract.ts";
-import {
-  WORLD_STYLE_KEYS,
-  worldStyleText,
-  type WorldStyle,
-} from "../../modules/style/world-style.ts";
-import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { normalizeUiLanguage, uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 
 export interface GuidedGenesisChatProps {
   uiLanguage: UiLanguage;
@@ -38,8 +35,6 @@ export interface GenesisChatFallback {
   draft: WorldGenesisDraft | null;
 }
 
-const EMPTY_COMPANION = { name: "", role: "", summary: "" };
-
 /**
  * 批次 S · AI 助手对话：LLM 引导创世。
  * 自由对话 → 世界提案卡（可就地编辑）→ 创建世界。
@@ -63,21 +58,45 @@ export function GuidedGenesisChat({
   const [, setPhase] = useState<GenesisChatPhase>("exploring");
   const [confirming, setConfirming] = useState(false);
   const opened = useRef(false);
+  const busyRef = useRef(false);
+  const confirmingRef = useRef(false);
+  const generationRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
   const pendingMessage = useRef("");
   const threadRef = useRef<HTMLDivElement | null>(null);
   const draftRef = useRef<WorldGenesisDraft | null>(null);
+  // 批次 B7：组件卸载（含切 fallback）后忽略迟到的响应，绝不污染新界面。
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      generationRef.current += 1;
+      controllerRef.current?.abort();
+      busyRef.current = false;
+      opened.current = false;
+    };
+  }, []);
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
 
   async function send(message: string) {
-    if (busy || confirming) return;
+    if (busyRef.current || confirmingRef.current) return;
+    busyRef.current = true;
+    const generation = ++generationRef.current;
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setBusy(true);
     setSilent(false);
     pendingMessage.current = message;
+    // 批次 B7：记录请求发出时的草稿快照——响应回来时，用户在在途期间
+    // 手改过的字段以用户值为准，模型 patch 只落在未冲突字段上。
+    const sentDraft = draftRef.current;
     try {
       const response = await fetch("/api/world/genesis-chat", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -98,6 +117,7 @@ export function GuidedGenesisChat({
             opening?: unknown;
           }
         | null;
+      if (!aliveRef.current || generation !== generationRef.current) return;
       if (!response.ok || !payload || payload.ok !== true || typeof payload.reply !== "string") {
         throw new Error("scribe silent");
       }
@@ -115,22 +135,30 @@ export function GuidedGenesisChat({
           : "exploring";
       setPhase(nextPhase);
 
+      // 批次 A1：opening 的 canonical 位置是 draftPatch.opening；顶层
+      // opening 仅是兼容回显（服务端已并入 patch），这里按 patch 合并，
+      // 不再用 truthy 顶层值覆盖草稿。
+      const currentDraft = draftRef.current;
       if (payload.draftPatch !== null && payload.draftPatch !== undefined) {
-        const merged = mergeDraftPatch(draftRef.current, payload.draftPatch);
-        if (merged) {
-          const opening = typeof payload.opening === "string"
-            ? payload.opening.trim().slice(0, 300)
-            : "";
-          setDraft(opening ? { ...merged, opening } : merged);
+        const merged = mergeDraftPatch(currentDraft, payload.draftPatch);
+        if (merged && aliveRef.current) {
+          const edited = diffEditedGenesisFields(sentDraft, currentDraft);
+          const preserved = applyGenesisFieldEdits(merged, currentDraft, edited);
+          // 批次 B12：界面语言稳定进入 canonical draft（模型未显式给时补）。
+          const nextDraft = preserved.language
+            ? preserved
+            : { ...preserved, language: normalizeUiLanguage(uiLanguage) };
+          draftRef.current = nextDraft;
+          setDraft(nextDraft);
         }
-      } else if (typeof payload.opening === "string" && payload.opening.trim()) {
-        const opening = payload.opening.trim().slice(0, 300);
-        setDraft((current) => (current ? { ...current, opening } : current));
       }
     } catch {
-      setSilent(true);
+      if (aliveRef.current && generation === generationRef.current && !controller.signal.aborted) setSilent(true);
     } finally {
-      setBusy(false);
+      if (aliveRef.current && generation === generationRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -148,19 +176,29 @@ export function GuidedGenesisChat({
   }, [turns, busy, silent]);
 
   function patchDraft(updater: (current: WorldGenesisDraft) => WorldGenesisDraft) {
-    setDraft((current) => (current ? updater(current) : current));
+    const current = draftRef.current;
+    if (current && !confirmingRef.current) {
+      const next = updater(current);
+      draftRef.current = next;
+      setDraft(next);
+    }
   }
 
   async function confirm() {
-    if (!draft || confirming) return;
+    // 批次 B8：对话在途（busy）/提交在途（confirming）都不得创建——
+    // 避免迟到响应覆盖刚提交的草稿快照。可创建规则与后端一致：草稿有效
+    // （世界名非空）即可，proposing/ready 均可创建（phase 不是门控依据）。
+    if (!draft || confirmingRef.current || busyRef.current) return;
     if (!draft.world.name.trim()) return;
+    confirmingRef.current = true;
     setConfirming(true);
-    const recordId = await onConfirm(draft);
-    if (recordId) {
-      onOpenRecord(recordId);
-      return;
+    try {
+      const recordId = await onConfirm(draft);
+      if (recordId && aliveRef.current) onOpenRecord(recordId);
+    } finally {
+      confirmingRef.current = false;
+      if (aliveRef.current) setConfirming(false);
     }
-    setConfirming(false);
   }
 
   const scribeName = uiText("ui.genesisChat.scribe", uiLanguage);
@@ -237,271 +275,7 @@ export function GuidedGenesisChat({
         {draft ? (
           <section className="genesis-proposal-card" aria-label={uiText("ui.genesisChat.proposalEyebrow", uiLanguage)}>
             <p className="eyebrow">{uiText("ui.genesisChat.proposalEyebrow", uiLanguage)}</p>
-            <div className="genesis-proposal-fields">
-              <label>
-                <span>{uiText("ui.genesisChat.field.worldName", uiLanguage)}</span>
-                <input
-                  maxLength={40}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      world: { ...current.world, name: event.target.value },
-                    }))}
-                  value={draft.world.name}
-                />
-              </label>
-              <label>
-                <span>{uiText("ui.genesisChat.field.era", uiLanguage)}</span>
-                <input
-                  maxLength={40}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      world: { ...current.world, era: event.target.value },
-                    }))}
-                  value={draft.world.era}
-                />
-              </label>
-              <label className="is-wide">
-                <span>{uiText("ui.genesisChat.field.summary", uiLanguage)}</span>
-                <textarea
-                  maxLength={300}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      world: { ...current.world, summary: event.target.value },
-                    }))}
-                  rows={2}
-                  value={draft.world.summary}
-                />
-              </label>
-              <div className="is-wide">
-                <span>{uiText("ui.genesisChat.field.style", uiLanguage)}</span>
-                <div className="guided-style-options" role="group">
-                  {WORLD_STYLE_KEYS.map((key) => (
-                    <button
-                      className={draft.style === key ? "guided-style-option is-active" : "guided-style-option"}
-                      key={key}
-                      onClick={() =>
-                        patchDraft((current) => ({ ...current, style: key as WorldStyle }))}
-                      type="button"
-                    >
-                      {worldStyleText(`guided.style.${key}`, key as WorldStyle, undefined, uiLanguage)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <label>
-                <span>{uiText("ui.genesisChat.field.storyTitle", uiLanguage)}</span>
-                <input
-                  maxLength={60}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      story: { ...current.story, title: event.target.value },
-                    }))}
-                  value={draft.story.title}
-                />
-              </label>
-              <label>
-                <span>{uiText("ui.genesisChat.field.recordTitle", uiLanguage)}</span>
-                <input
-                  maxLength={60}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      record: { title: event.target.value },
-                    }))}
-                  value={draft.record.title}
-                />
-              </label>
-              <label className="is-wide">
-                <span>{uiText("ui.genesisChat.field.storyPremise", uiLanguage)}</span>
-                <textarea
-                  maxLength={300}
-                  onChange={(event) =>
-                    patchDraft((current) => ({
-                      ...current,
-                      story: { ...current.story, premise: event.target.value },
-                    }))}
-                  rows={2}
-                  value={draft.story.premise}
-                />
-              </label>
-              <label className="is-wide">
-                <span>{uiText("ui.genesisChat.field.playerRole", uiLanguage)}</span>
-                <input
-                  maxLength={60}
-                  onChange={(event) =>
-                    patchDraft((current) => ({ ...current, playerRole: event.target.value }))}
-                  value={draft.playerRole}
-                />
-              </label>
-
-              <div className="is-wide" role="group" aria-label={uiText("ui.stance.label", uiLanguage)}>
-                <span>{uiText("ui.stance.label", uiLanguage)}</span>
-                <div className="stance-options">
-                  <button
-                    className={draft.playerStance !== "observer" ? "stance-option is-active" : "stance-option"}
-                    onClick={() => patchDraft((current) => ({ ...current, playerStance: "player" }))}
-                    type="button"
-                  >
-                    <strong>{uiText("ui.stance.player", uiLanguage)}</strong>
-                    <small>{uiText("ui.stance.playerHint", uiLanguage)}</small>
-                  </button>
-                  <button
-                    className={draft.playerStance === "observer" ? "stance-option is-active" : "stance-option"}
-                    onClick={() => patchDraft((current) => ({ ...current, playerStance: "observer" }))}
-                    type="button"
-                  >
-                    <strong>{uiText("ui.stance.observer", uiLanguage)}</strong>
-                    <small>{uiText("ui.stance.observerHint", uiLanguage)}</small>
-                  </button>
-                </div>
-              </div>
-
-              <div className="is-wide">
-                <span>{uiText("ui.genesisChat.field.companions", uiLanguage)}</span>
-                {draft.companions.map((companion, index) => (
-                  <div className="companion-row" key={`companion-${index}`}>
-                    <input
-                      maxLength={24}
-                      onChange={(event) =>
-                        patchDraft((current) => ({
-                          ...current,
-                          companions: current.companions.map((item, i) =>
-                            i === index ? { ...item, name: event.target.value } : item),
-                        }))}
-                      placeholder={uiText("ui.genesisChat.ph.name", uiLanguage)}
-                      value={companion.name}
-                    />
-                    <input
-                      maxLength={40}
-                      onChange={(event) =>
-                        patchDraft((current) => ({
-                          ...current,
-                          companions: current.companions.map((item, i) =>
-                            i === index ? { ...item, role: event.target.value } : item),
-                        }))}
-                      placeholder={uiText("ui.genesisChat.ph.role", uiLanguage)}
-                      value={companion.role}
-                    />
-                    <input
-                      maxLength={120}
-                      onChange={(event) =>
-                        patchDraft((current) => ({
-                          ...current,
-                          companions: current.companions.map((item, i) =>
-                            i === index ? { ...item, summary: event.target.value } : item),
-                        }))}
-                      placeholder={uiText("ui.genesisChat.ph.sketch", uiLanguage)}
-                      value={companion.summary}
-                    />
-                    <button
-                      aria-label={uiText("ui.genesisChat.removeCompanion", uiLanguage)}
-                      onClick={() =>
-                        patchDraft((current) => ({
-                          ...current,
-                          companions: current.companions.filter((_, i) => i !== index),
-                        }))}
-                      type="button"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-                {draft.companions.length < 2 ? (
-                  <button
-                    className="companion-add"
-                    onClick={() =>
-                      patchDraft((current) => ({
-                        ...current,
-                        companions: [...current.companions, { ...EMPTY_COMPANION }],
-                      }))}
-                    type="button"
-                  >
-                    ＋ {uiText("ui.genesisChat.addCompanion", uiLanguage)}
-                  </button>
-                ) : null}
-              </div>
-
-              <div className="is-wide">
-                <span>{uiText("ui.genesisChat.field.scene", uiLanguage)}</span>
-                <div className="scene-grid">
-                  <input
-                    maxLength={GENESIS_LIMITS.sceneTitle}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, title: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.sceneTitle", uiLanguage)}
-                    value={draft.scene.title ?? ""}
-                  />
-                  <input
-                    maxLength={60}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, location: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.location", uiLanguage)}
-                    value={draft.scene.location}
-                  />
-                  <input
-                    maxLength={60}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, weather: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.weather", uiLanguage)}
-                    value={draft.scene.weather}
-                  />
-                  <input
-                    maxLength={60}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, tension: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.tension", uiLanguage)}
-                    value={draft.scene.tension}
-                  />
-                  <input
-                    maxLength={GENESIS_LIMITS.displayTime}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, displayTime: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.displayTime", uiLanguage)}
-                    value={draft.scene.displayTime ?? ""}
-                  />
-                  <input
-                    maxLength={120}
-                    onChange={(event) =>
-                      patchDraft((current) => ({
-                        ...current,
-                        scene: { ...current.scene, objective: event.target.value },
-                      }))}
-                    placeholder={uiText("ui.genesisChat.ph.objective", uiLanguage)}
-                    value={draft.scene.objective}
-                  />
-                </div>
-              </div>
-
-              <label className="is-wide">
-                <span>{uiText("ui.genesisChat.openingEyebrow", uiLanguage)}</span>
-                <textarea
-                  maxLength={300}
-                  onChange={(event) =>
-                    patchDraft((current) => ({ ...current, opening: event.target.value }))}
-                  rows={3}
-                  value={draft.opening}
-                />
-              </label>
-            </div>
+            <GenesisDraftFields draft={draft} patchDraft={patchDraft} uiLanguage={uiLanguage} disabled={confirming} />
 
             <p className="genesis-proposal-hint">{uiText("ui.genesisChat.editHint", uiLanguage)}</p>
             {creationError ? (
@@ -511,7 +285,7 @@ export function GuidedGenesisChat({
             ) : null}
             <button
               className="genesis-proposal-confirm"
-              disabled={confirming || !draft.world.name.trim()}
+              disabled={confirming || busy || !draft.world.name.trim()}
               onClick={() => void confirm()}
               type="button"
             >

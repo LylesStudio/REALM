@@ -43,7 +43,7 @@ export function SceneInspector({
     { term: uiText("ui.inspector.weather", uiLanguage), value: scene.weather },
     { term: uiText("ui.inspector.tension", uiLanguage), value: scene.tension },
   ].filter((fact) => fact.value.trim().length > 0);
-  const sceneTitle = scene.location || demoStoryText(projection.story, uiLanguage).title || "——";
+  const sceneTitle = scene.title || scene.location || demoStoryText(projection.story, uiLanguage).title || "——";
   // 批次 S：CAST_SQL 不过滤 is_active（席位永不删除），展示层只列在席成员；
   // 观察者切换后本人角色席位以 isActive=false 退出阵容显示。
   const visibleCast = projection.cast.filter((member) => member.isActive);

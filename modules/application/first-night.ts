@@ -1,4 +1,5 @@
 import {
+  GENESIS_LIMITS,
   normalizeGenesisLanguage,
   type GenesisLanguage,
 } from "./world-genesis-contract.ts";
@@ -44,8 +45,9 @@ export interface FirstNightContext {
   playerRole: string;
   /** 人类玩家名字（账号 displayName 解析结果，可能为空）。 */
   playerName: string;
+  playerPrincipalId?: string;
   playerStance: "player" | "observer";
-  companions: { name: string; role: string; summary: string }[];
+  companions: { definitionId?: string; name: string; role: string; summary: string }[];
   scene: {
     title?: string;
     location: string;
@@ -67,6 +69,7 @@ export interface FirstNightScene {
 
 /** 初夜同行者发声：名字必须与提案同行者精确匹配。 */
 export interface FirstNightCharacter {
+  companionId?: string;
   name: string;
   /** 第一句台词（dialogue 段，speechMode speaker）。 */
   utterance: string;
@@ -120,6 +123,7 @@ export function normalizeFirstNightContext(value: unknown): FirstNightContext | 
   const companions = (Array.isArray(value.companions) ? value.companions : [])
     .filter(isObject)
     .map((item) => ({
+      ...(typeof item.definitionId === "string" ? { definitionId: clampText(item.definitionId, 120) } : {}),
       name: clampText(item.name, 24),
       role: clampText(item.role, 40),
       summary: clampText(item.summary, 120),
@@ -132,16 +136,17 @@ export function normalizeFirstNightContext(value: unknown): FirstNightContext | 
     world: {
       name,
       era: clampText(world.era, 40),
-      summary: clampText(world.summary, 160),
+      summary: clampText(world.summary, GENESIS_LIMITS.summary),
     },
     style: normalizeWorldStyle(value.style),
     language: normalizeGenesisLanguage(value.language) ?? "zh-CN",
     story: {
-      title: clampText(story.title, 40),
-      premise: clampText(story.premise, 200),
+      title: clampText(story.title, GENESIS_LIMITS.storyTitle),
+      premise: clampText(story.premise, GENESIS_LIMITS.premise),
     },
     playerRole: clampText(value.playerRole, 60),
     playerName: clampText(value.playerName, 24),
+    ...(typeof value.playerPrincipalId === "string" ? { playerPrincipalId: clampText(value.playerPrincipalId, 120) } : {}),
     playerStance: value.playerStance === "observer" ? "observer" : "player",
     companions,
     scene: {
@@ -165,9 +170,9 @@ export function composeDeterministicOpening(context: FirstNightContext): string 
   if (opening) return opening;
   const location = context.scene.location.trim();
   if (location) {
-    return worldStyleText("first-night.opening.located", context.style, { location });
+    return worldStyleText("first-night.opening.located", context.style, { location }, context.language);
   }
-  return worldStyleText("first-night.opening.blank", context.style);
+  return worldStyleText("first-night.opening.blank", context.style, undefined, context.language);
 }
 
 /**
@@ -175,34 +180,34 @@ export function composeDeterministicOpening(context: FirstNightContext): string 
  * 场景三段由草稿字段经风格模板合成；environment 永远非空，保证旁白可进场。
  */
 export function fallbackFirstNightPack(context: FirstNightContext): FirstNightPack {
-  const { style } = context;
+  const { style, language } = context;
   const location = context.scene.location.trim();
   const weather = context.scene.weather.trim();
   const tension = context.scene.tension.trim();
   const objective = context.scene.objective.trim();
   const environment = location
-    ? worldStyleText("first-night.part.location", style, { location })
-    : worldStyleText("first-night.part.blank", style);
+    ? worldStyleText("first-night.part.location", style, { location }, language)
+    : worldStyleText("first-night.part.blank", style, undefined, language);
   const story = objective
-    ? worldStyleText("first-night.part.objective", style, { objective })
+    ? worldStyleText("first-night.part.objective", style, { objective }, language)
     : "";
   const fact = [
-    weather ? worldStyleText("first-night.part.weather", style, { weather }) : "",
-    tension ? worldStyleText("first-night.part.tension", style, { tension }) : "",
+    weather ? worldStyleText("first-night.part.weather", style, { weather }, language) : "",
+    tension ? worldStyleText("first-night.part.tension", style, { tension }, language) : "",
   ]
     .filter((part) => part.length > 0)
     .join("");
   const hookContent = objective
-    ? worldStyleText("first-night.hook.objective", style, { objective })
+    ? worldStyleText("first-night.hook.objective", style, { objective }, language)
     : tension
-      ? worldStyleText("first-night.hook.tension", style, { tension })
+      ? worldStyleText("first-night.hook.tension", style, { tension }, language)
       : "";
   const suggestions = [
     objective
-      ? worldStyleText("first-night.suggestion.objective", style, { objective })
+      ? worldStyleText("first-night.suggestion.objective", style, { objective }, language)
       : "",
     location
-      ? worldStyleText("first-night.suggestion.location", style, { location })
+      ? worldStyleText("first-night.suggestion.location", style, { location }, language)
       : "",
   ].filter((item) => item.length > 0);
   return {
@@ -228,17 +233,20 @@ export function normalizeFirstNightPack(
   const fact = clampText(scene.fact, SCENE_FIELD_LIMIT);
   if (!environment && !story && !fact) return null;
   const rawCharacters = Array.isArray(value.characters) ? value.characters : [];
-  const seen = new Set<string>();
+  const candidates = rawCharacters.filter(isObject);
+  const used = new Set<number>();
   const characters: FirstNightCharacter[] = [];
   for (const companion of context.companions) {
-    const match = rawCharacters
-      .filter(isObject)
-      .find((item) => clampText(item.name, 24) === companion.name);
-    if (!match) continue;
+    const index = candidates.findIndex((item, index) => !used.has(index)
+      && clampText(item.name, 24) === companion.name
+      && (item.companionId == null || item.companionId === companion.definitionId));
+    if (index < 0) continue;
+    const match = candidates[index]!;
     const utterance = clampText(match.utterance, CHARACTER_FIELD_LIMIT);
-    if (!utterance || seen.has(companion.name)) continue;
-    seen.add(companion.name);
+    if (!utterance) continue;
+    used.add(index);
     characters.push({
+      ...(companion.definitionId ? { companionId: companion.definitionId } : {}),
       name: companion.name,
       utterance,
       action: clampText(match.action, CHARACTER_FIELD_LIMIT),
@@ -283,7 +291,7 @@ function describeScene(context: FirstNightContext): string {
 /** 初夜输出契约（Prompt System v2 同源：system prompt 与 repair 共用）。 */
 const FIRST_NIGHT_SCHEMA = jsonOutputInstruction([
   { name: "scene", kind: "object", note: `{"environment": one-sentence environment image, "story": one thing happening right now, "fact": one concrete world fact} — each <= ${SCENE_FIELD_LIMIT} chars` },
-  { name: "characters", kind: "object[]", note: `array of {"name","utterance","action"}, each text <= ${CHARACTER_FIELD_LIMIT} chars` },
+  { name: "characters", kind: "object[]", note: `array of {"companionId","name","utterance","action"}; copy companionId from the companion definitionId when present, each text <= ${CHARACTER_FIELD_LIMIT} chars` },
   { name: "hook", kind: "object", note: `{"content": <= ${HOOK_CONTENT_LIMIT} chars, "suggestions": string[] each <= ${SUGGESTION_LIMIT} chars}` },
 ]);
 
@@ -294,7 +302,7 @@ export function buildFirstNightMessages(
     "You are REALM's first-night writer. A world has just been written into being; write the first frozen frame of its opening scene.",
     "Continue naturally from the existing opening narration without repeating its wording or contradicting the proposal; where the scene is left blank, fill in concrete details (sounds, light, smells, movement) at a small scale.",
     context.companions.length > 0
-      ? "characters may only include the companions listed in the context: name must match a companion's name exactly, at most one entry per companion; utterance is that person's first spoken line (true to their identity and profile); action is a one-sentence gesture or expression as they speak."
+      ? "characters may only include the companions listed in the context: companionId must copy its definitionId when present; name must match that companion exactly, at most one entry per companion (distinct IDs may share names); utterance is that person's first spoken line (true to their identity and profile); action is a one-sentence gesture or expression as they speak."
       : "characters must be an empty array — there are no companions; never invent characters.",
     "Never introduce characters beyond the listed companions.",
     "hook.content is a one-sentence opening hook — a concrete situation that makes the player want to act immediately, directly tied to the scene, never generic.",
@@ -321,6 +329,7 @@ export function buildFirstNightMessages(
     describeScene(context),
     context.companions.length > 0
       ? contextBlock("Companions", context.companions.map((companion) => ({
+        ...(companion.definitionId ? { definitionId: companion.definitionId } : {}),
         name: companion.name,
         role: companion.role,
         summary: companion.summary,

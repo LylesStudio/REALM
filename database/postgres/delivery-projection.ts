@@ -96,6 +96,7 @@ interface MetaRow extends QueryResultRow {
   id: string;
   record_title: string;
   record_status: string;
+  scene_title: string;
   location: string;
   objective: string;
   world_tick: string | number;
@@ -489,6 +490,7 @@ function toDeliveryProjection(
       worldTime: panelDisplayTime,
     },
     scene: {
+      title: meta.scene_title ?? "",
       location: meta.location,
       worldTime: panelDisplayTime,
       weather: meta.weather,
@@ -760,6 +762,7 @@ const META_SQL = `
     record.worldline_id,
     CASE WHEN membership.can_view_dynamic_knowledge THEN record.status ELSE '' END
       AS record_status,
+    CASE WHEN membership.can_view_dynamic_knowledge THEN scene.title ELSE '' END AS scene_title,
     CASE WHEN membership.can_view_dynamic_knowledge THEN scene.location ELSE '' END
       AS location,
     CASE

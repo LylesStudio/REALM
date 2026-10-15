@@ -94,7 +94,8 @@ test("sanitizeDraftPatch keeps only known fields and clamps limits", () => {
   assert.ok(patch);
   assert.equal(patch.world?.name.length, 40);
   assert.equal(patch.world?.era, "新纪元");
-  assert.equal(patch.world?.summary, undefined);
+  // 批次 A3：可选文本的显式空串 = 清除（保留在 patch 中），不再静默丢弃。
+  assert.equal(patch.world?.summary, "");
   assert.equal(patch.style, "classical");
   assert.equal(patch.playerRole, "巡游者");
   assert.equal(patch.playerStance, "observer");
@@ -177,9 +178,19 @@ test("mergeDraftPatch keeps scene title and display time across field merges", (
   assert.equal(patched?.scene.location, "主灯塔");
 });
 
-test("mergeDraftPatch is fail-closed on illegal merged structure", () => {
-  // 无 base、patch 也不含世界名 → 规整后整体非法。
-  assert.equal(mergeDraftPatch(null, { scene: { location: "某地" } }), null);
+test("mergeDraftPatch keeps partial drafts across turns before a world name settles", () => {
+  // 批次 A2：无 base、patch 不含世界名 → 保留 partial（世界名空串），
+  // 跨轮累积；完整性（非空世界名）由创建入口校验，不在这里制造伪名字。
+  const partial = mergeDraftPatch(null, { scene: { location: "某地" } });
+  assert.ok(partial);
+  assert.equal(partial.world.name, "");
+  assert.equal(partial.scene.location, "某地");
+  const accumulated = mergeDraftPatch(partial, { world: { era: "灯盏纪元" } });
+  assert.equal(accumulated?.world.name, "");
+  assert.equal(accumulated?.world.era, "灯盏纪元");
+  assert.equal(accumulated?.scene.location, "某地");
+  const named = mergeDraftPatch(accumulated, { world: { name: "雾都" } });
+  assert.equal(named?.world.name, "雾都");
   // patch 类型非法时仅按 base 规整。
   const kept = mergeDraftPatch(BASE_DRAFT, "not-an-object");
   assert.equal(kept?.world.name, "雾都");
@@ -205,9 +216,9 @@ test("normalizeGenesisChatResponse enforces phase enum and reply presence", () =
   assert.equal(ok.opening, "");
 });
 
-test("normalizeGenesisChatResponse keeps exploratory dialogue but never pretends a missing proposal succeeded", () => {
-  // 探索阶段允许尚无世界名；不能把这种状态伪装成 proposing / ready。
-  const dropped = normalizeGenesisChatResponse(
+test("normalizeGenesisChatResponse keeps exploratory partial patches and never pretends a missing proposal succeeded", () => {
+  // 批次 A2：探索阶段的合法 partial patch 保留（世界名未定也可累积）。
+  const kept = normalizeGenesisChatResponse(
     {
       reply: "先从港口聊起。",
       phase: "exploring",
@@ -215,21 +226,20 @@ test("normalizeGenesisChatResponse keeps exploratory dialogue but never pretends
     },
     null,
   );
-  assert.ok(dropped);
-  assert.equal(dropped.reply, "先从港口聊起。");
-  assert.equal(dropped.phase, "exploring");
-  assert.equal(dropped.draftPatch, null);
+  assert.ok(kept);
+  assert.equal(kept.reply, "先从港口聊起。");
+  assert.equal(kept.phase, "exploring");
+  assert.equal(kept.draftPatch?.scene?.location, "港口");
 
-  // 消毒后无任何可识别字段 → 同样按「本轮不定稿」处理，不失败。
+  // 携带无法识别的 patch 必须 repair；exploring 也不能静默丢弃字段。
   const garbage = normalizeGenesisChatResponse(
     { reply: "再聊聊。", phase: "exploring", draftPatch: { foo: 1 } },
     null,
   );
-  assert.ok(garbage);
-  assert.equal(garbage.draftPatch, null);
+  assert.equal(garbage, null);
 
   // base 已有世界名时，仅改场景的 patch 合法 → 采纳。
-  const kept = normalizeGenesisChatResponse(
+  const amended = normalizeGenesisChatResponse(
     {
       reply: "场景已改。",
       phase: "proposing",
@@ -237,8 +247,8 @@ test("normalizeGenesisChatResponse keeps exploratory dialogue but never pretends
     },
     BASE_DRAFT,
   );
-  assert.ok(kept);
-  assert.equal(kept.draftPatch?.scene?.location, "港口");
+  assert.ok(amended);
+  assert.equal(amended.draftPatch?.scene?.location, "港口");
 
   const ok = normalizeGenesisChatResponse(
     {
@@ -312,6 +322,65 @@ test("proposal updates cannot silently discard unrecognized fields against an ex
   ]) {
     assert.equal(normalizeGenesisChatResponse({ reply: "提案已更新。", phase: "proposing", draftPatch }, BASE_DRAFT), null);
   }
+});
+
+test("illegal enum values and empty required names are rejected, never defaulted over the draft", () => {
+  // 批次 A3：非法 style/language/stance 不收键 → proposing/ready 走 repair（null），
+  // 绝不静默归一为 modern/player 覆盖既有草稿。
+  for (const draftPatch of [
+    { style: "cyberpunk" },
+    { language: "fr" },
+    { playerStance: "spectator" },
+    { world: { name: "" } },
+    { playerRole: 42 },
+  ]) {
+    assert.equal(
+      normalizeGenesisChatResponse({ reply: "非法值。", phase: "proposing", draftPatch }, BASE_DRAFT),
+      null,
+    );
+  }
+  // exploring 阶段同字段不收键但不炸毁整轮（partial 语义）。
+  const exploring = normalizeGenesisChatResponse(
+    { reply: "继续聊。", phase: "exploring", draftPatch: { style: "cyberpunk", world: { era: "新纪元" } } },
+    BASE_DRAFT,
+  );
+  assert.equal(exploring, null, "invalid enums trigger repair in exploring too");
+  // 显式 null = 不改（不计入丢弃，不触发 repair）。
+  const nullNoop = normalizeGenesisChatResponse(
+    { reply: "空操作。", phase: "proposing", draftPatch: { style: null, world: { era: "灯盏纪元" } } },
+    BASE_DRAFT,
+  );
+  assert.ok(nullNoop);
+  assert.equal(nullNoop.draftPatch?.world?.era, "灯盏纪元");
+});
+
+test("explicit empty strings clear optional text fields through the merge", () => {
+  // 批次 A3：era/summary/premise/playerRole/opening/scene 字段可显式清空。
+  const cleared = mergeDraftPatch(BASE_DRAFT, {
+    world: { era: "", summary: "" },
+    story: { premise: "" },
+    playerRole: "",
+    opening: "",
+    scene: { location: "", title: "", displayTime: "" },
+  });
+  assert.ok(cleared);
+  assert.equal(cleared.world.era, "");
+  assert.equal(cleared.world.summary, "");
+  assert.equal(cleared.story.premise, "");
+  assert.equal(cleared.playerRole, "");
+  assert.equal(cleared.opening, "");
+  assert.equal(cleared.scene.location, "");
+  assert.equal(cleared.scene.title, undefined);
+  assert.equal(cleared.scene.displayTime, undefined);
+  // 未出现在 patch 中的字段保持原值。
+  assert.equal(cleared.story.title, "熄灯之夜");
+  assert.equal(cleared.world.name, "雾都");
+  // story.title / record.title / world.name 显式空串非法（不收键）。
+  const rejected = normalizeGenesisChatResponse(
+    { reply: "标题不能为空。", phase: "proposing", draftPatch: { story: { title: "" } } },
+    BASE_DRAFT,
+  );
+  assert.equal(rejected, null);
 });
 
 test("proposing and ready require a usable draft rather than a bare success sentence", () => {
@@ -502,7 +571,9 @@ test("generateGenesisChatReply gives up silently after all attempts degenerate",
   assert.ok(!repairMessage.includes("still-not-json"));
 });
 
-test("normalizeGenesisChatResponse keeps opening only at ready phase", () => {
+test("normalizeGenesisChatResponse folds top-level opening into the canonical draftPatch at any phase", () => {
+  // 批次 A1：opening 的 canonical 位置是 draftPatch.opening；顶层 opening
+  // 是兼容输入（patch 缺席时并入），任何阶段的合法正文都不被悄悄清除。
   const ready = normalizeGenesisChatResponse(
     {
       reply: "谈妥了。",
@@ -514,18 +585,44 @@ test("normalizeGenesisChatResponse keeps opening only at ready phase", () => {
   );
   assert.ok(ready);
   assert.equal(ready.opening.length, 300);
+  assert.equal(ready.draftPatch?.opening?.length, 300);
 
   const proposing = normalizeGenesisChatResponse(
     {
       reply: "先看看提案。",
       phase: "proposing",
       draftPatch: { world: { name: "港城" } },
-      opening: "不该出现的开场白",
+      opening: "提前写下的开场白",
     },
     BASE_DRAFT,
   );
   assert.ok(proposing);
-  assert.equal(proposing.opening, "");
+  // 非 ready 不再清空：开场正文随 draftPatch 保留。
+  assert.equal(proposing.draftPatch?.opening, "提前写下的开场白");
+  assert.equal(proposing.opening, "提前写下的开场白");
+
+  // 两处冲突：draftPatch.opening 为准；顶层省略/空串 = 不改（不清空）。
+  const conflict = normalizeGenesisChatResponse(
+    {
+      reply: "以 patch 为准。",
+      phase: "ready",
+      draftPatch: { opening: "canonical 版" },
+      opening: "顶层旧版",
+    },
+    BASE_DRAFT,
+  );
+  assert.equal(conflict?.draftPatch?.opening, "canonical 版");
+
+  const untouched = normalizeGenesisChatResponse(
+    { reply: "没动开场。", phase: "ready", draftPatch: null },
+    BASE_DRAFT,
+  );
+  assert.equal(untouched?.opening, "");
+  assert.equal(untouched?.draftPatch, null);
+
+  // 显式空串经 draftPatch.opening 清除既有开场。
+  const cleared = mergeDraftPatch({ ...BASE_DRAFT, opening: "旧开场" }, { opening: "" });
+  assert.equal(cleared?.opening, "");
 });
 
 test("genesis chat route rejects an oversized draft before the model", async () => {

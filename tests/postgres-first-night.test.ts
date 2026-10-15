@@ -507,3 +507,69 @@ function quoteIdentifier(value: string): string {
   }
   return `"${value}"`;
 }
+
+
+test("genesis full-field roundtrip, same-key replay, observer role restore and duplicate-name AI binding", { skip: !adminConnectionString || !runtimeConnectionString }, async (t) => {
+  const { ownerPool, runtimePool } = await createMigratedDatabase(t);
+  const library = createPostgresLibraryService(runtimePool);
+  const projection = createPostgresDeliveryProjectionRepository(runtimePool);
+  const scope = { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId: LOCAL_RECORD_SCOPE.principalId, sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId) };
+  const draft = {
+    ...GENESIS_DRAFT, language: "en" as const, style: "anime" as const,
+    world: { name: "Roundtrip Harbor", era: "Era Seven", summary: "s".repeat(299) + "Z" },
+    story: { title: "t".repeat(59) + "Z", premise: "p".repeat(299) + "Z" },
+    record: { title: "Confirmed record" }, playerRole: "Confirmed harbor accountant",
+    companions: [
+      { name: "测试旅人", role: "Sailor", summary: "First companion" },
+      { name: "测试旅人", role: "Guide", summary: "Second companion" },
+    ],
+    scene: { title: "Confirmed scene title", location: "Distinct pier location", weather: "Rain", tension: "Quiet", displayTime: "Dawn 07:03", objective: "Find the boat" },
+    opening: "The dockworker drops the receipt.", playerStance: "observer" as const,
+  };
+  const creationRequestId = `genesis_${randomUUID()}`;
+  const created = await library.createGenesis(scope, draft, { creationRequestId });
+  assert.deepEqual(await library.createGenesis(scope, draft, { creationRequestId }), created);
+  let view = (await projection.loadForPlayer({ ...scope, recordId: created.recordId }))!;
+  assert.equal(view.world.name, draft.world.name);
+  assert.equal(view.world.summary, draft.world.summary);
+  assert.equal(view.story.title, draft.story.title);
+  assert.equal(view.story.premise, draft.story.premise);
+  assert.equal(view.record.title, draft.record.title);
+  assert.equal(view.scene.title, draft.scene.title);
+  assert.equal(view.scene.location, draft.scene.location);
+  assert.equal(view.scene.weather, draft.scene.weather);
+  assert.equal(view.scene.tension, draft.scene.tension);
+  assert.equal(view.scene.worldTime, draft.scene.displayTime);
+  assert.equal(view.scene.objective, draft.scene.objective);
+  assert.equal(view.events[0]?.content, draft.opening);
+  const firstEvent = await withWorkspaceTransaction(ownerPool, scope.workspaceId, (client) => client.query(
+    `SELECT display_time FROM events WHERE workspace_id=$1 AND record_id=$2 ORDER BY record_ordinal`, [scope.workspaceId, created.recordId]), { readOnly: true });
+  assert.equal(firstEvent.rows[0].display_time, draft.scene.displayTime);
+  const store = createPostgresFirstNightStore(runtimePool, scope.workspaceId);
+  const marker = (await store.find(created.recordId))!;
+  assert.equal(marker.context!.world.summary, draft.world.summary);
+  assert.equal(marker.context!.story.premise, draft.story.premise);
+  assert.equal(marker.context!.story.title, draft.story.title);
+  assert.equal(marker.context!.language, draft.language);
+  assert.equal(marker.context!.style, draft.style);
+  await library.create(scope, { kind: "player-stance", worldId: created.worldId, stance: "player" });
+  view = (await projection.loadForPlayer({ ...scope, recordId: created.recordId }))!;
+  assert.equal(view.cast.find((member) => member.controlledBy === "human")?.role, draft.playerRole);
+  const pack = normalizeFirstNightPack({ scene: { environment: "The boat arrives." }, characters: marker.context!.companions.map((c, i) => ({ companionId: c.definitionId, name: c.name, utterance: `Companion ${i}` })), hook: { content: "A rope breaks.", suggestions: ["Catch the rope", "Board the boat"] } }, marker.context!)!;
+  await store.claimAttempt(created.recordId);
+  assert.equal(await store.commitPack(created.recordId, pack, "ready"), true);
+  const speakers = await withWorkspaceTransaction(ownerPool, scope.workspaceId, (client) => client.query(
+    `SELECT event.actor_participant_id, participant.controller_mode FROM events AS event JOIN participants AS participant ON participant.workspace_id=event.workspace_id AND participant.id=event.actor_participant_id WHERE event.workspace_id=$1 AND event.record_id=$2 AND event.event_kind='utterance.committed'`, [scope.workspaceId, created.recordId]), { readOnly: true });
+  assert.equal(speakers.rows.length, 2);
+  assert.equal(new Set(speakers.rows.map((row) => row.actor_participant_id)).size, 2);
+  assert.ok(speakers.rows.every((row) => row.controller_mode === "ai"));
+  const after = (await projection.loadForPlayer({ ...scope, recordId: created.recordId }))!;
+  assert.equal(after.events[0]?.content, draft.opening);
+  assert.equal(after.scene.title, draft.scene.title);
+  // A snapshot belonging to another principal cannot supply this player's role.
+  const foreign = await library.createGenesis(scope, { ...draft, world: { ...draft.world, name: "Foreign role boundary" } });
+  await ownerPool.query(`UPDATE record_first_nights SET context = jsonb_set(context, '{playerPrincipalId}', to_jsonb('another_principal'::text)) WHERE workspace_id=$1 AND record_id=$2`, [scope.workspaceId, foreign.recordId]);
+  await library.create(scope, { kind: "player-stance", worldId: foreign.worldId, stance: "player" });
+  const foreignView = (await projection.loadForPlayer({ ...scope, recordId: foreign.recordId }))!;
+  assert.equal(foreignView.cast.find((member) => member.controlledBy === "human")?.role, "");
+});

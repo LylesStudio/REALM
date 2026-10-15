@@ -7,6 +7,7 @@ import {
   outputLanguageRule,
   requestStructuredObject,
 } from "../inference/public.ts";
+import { WORLD_STYLE_KEYS } from "../style/world-style.ts";
 import {
   GENESIS_LIMITS,
   GENESIS_LANGUAGES,
@@ -26,6 +27,7 @@ import {
 // Client/Server 边界修复：契约从 client-safe 模块 re-export，保持既有
 // server API 与测试 import 路径兼容，不复制两份 normalizer 逻辑。
 export {
+  GENESIS_CREATION_REQUEST_ID,
   fallbackGenesisDraft,
   genesisBindingFromDraft,
   genesisPromptInputWithinBudget,
@@ -54,9 +56,12 @@ const GENESIS_SCHEMA = jsonOutputInstruction([
   { name: "world", kind: "object", note: `{"name": <= ${GENESIS_LIMITS.worldName} chars, "era", "summary": <= ${GENESIS_LIMITS.summary} chars}` },
   { name: "story", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.storyTitle} chars, "premise": <= ${GENESIS_LIMITS.premise} chars}` },
   { name: "record", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.recordTitle} chars}` },
+  { name: "style", kind: "enum", values: WORLD_STYLE_KEYS, note: "world register; omit to keep the modern default" },
   { name: "playerRole", kind: "string", maxLength: GENESIS_LIMITS.playerRole, note: "the human player's position in this world (the player plays themself; do not name them)" },
+  { name: "playerStance", kind: "enum", values: ["player", "observer"], note: "observer = the player holds the pen without playing a character" },
   { name: "companions", kind: "object[]", note: `1–${MAX_COMPANIONS} original characters fitting the world, each {"name": <= ${GENESIS_LIMITS.companionName} chars, "role": <= ${GENESIS_LIMITS.companionRole} chars, "summary": one line <= ${GENESIS_LIMITS.companionSummary} chars}` },
-  { name: "scene", kind: "object", note: `{"location","weather","tension" each <= ${GENESIS_LIMITS.sceneField} chars, "objective": <= ${GENESIS_LIMITS.objective} chars}` },
+  { name: "scene", kind: "object", note: `{"title"?: <= ${GENESIS_LIMITS.sceneTitle} chars, "location","weather","tension" each <= ${GENESIS_LIMITS.sceneField} chars, "displayTime"?: <= ${GENESIS_LIMITS.displayTime} chars, "objective": <= ${GENESIS_LIMITS.objective} chars}` },
+  { name: "opening", kind: "string", required: false, maxLength: GENESIS_LIMITS.opening, note: "opening narration shown when the record begins; omit when unsure" },
 ]);
 
 const SYSTEM_PROMPT = [
@@ -97,8 +102,16 @@ export async function generateGenesisDraft(
     },
     messages,
     // normalizeGenesisDraft 对任意 object 都有宽容补缺；只有非 object
-    // （tolerant parser 已拦截）或世界名无法解析才算失败。
+    // （tolerant parser 已拦截）或世界名无法解析才算失败。批次 A6：模型
+    // 必须真实贡献世界名——`{}` 之类空结果被 prompt 补成的草稿不得标
+    // source=model，按失败走 repair/降级并如实标注。
     normalize: (body) => {
+      if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+      const contributed = (body as { world?: unknown }).world;
+      const contributedName = contributed && typeof contributed === "object"
+        ? (contributed as { name?: unknown }).name
+        : undefined;
+      if (typeof contributedName !== "string" || !contributedName.trim()) return null;
       const draft = normalizeGenesisDraft(body, prompt);
       return draft ? { draft } : null;
     },
@@ -144,5 +157,3 @@ export function genesisDraftFingerprint(draft: WorldGenesisDraft): string {
   });
   return createHash("sha256").update(canonical).digest("hex");
 }
-
-export const GENESIS_CREATION_REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;

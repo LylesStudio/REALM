@@ -36,6 +36,7 @@ import type {
 import { GuidedGenesis } from "./components/guided-genesis";
 import { GuidedGenesisChat } from "./components/guided-genesis-chat";
 import type { GenesisChatFallback } from "./components/guided-genesis-chat";
+import { readPendingGenesisRequest, savePendingGenesisRequest, clearPendingGenesisRequest } from "./pending-genesis-request.ts";
 import { WorldOnboarding } from "./components/world-onboarding";
 import { normalizeWorldStyle } from "../modules/style/world-style.ts";
 import {
@@ -603,7 +604,7 @@ export function RealmClient() {
 
   function ensureCreationRequestId(): string {
     if (!creationRequestIdRef.current) {
-      creationRequestIdRef.current = `genesis_${crypto.randomUUID()}`;
+      creationRequestIdRef.current = readPendingGenesisRequest() ?? `genesis_${crypto.randomUUID()}`;
     }
     return creationRequestIdRef.current;
   }
@@ -635,6 +636,7 @@ export function RealmClient() {
     const status = await readCreationStatus(requestId);
     await loadLibrary();
     if (status.kind === "committed") {
+      clearPendingGenesisRequest(requestId);
       creationCheckStatusFirstRef.current = false;
       setCreationFailure("idle");
       return status.recordId;
@@ -656,6 +658,7 @@ export function RealmClient() {
     if (creationCheckStatusFirstRef.current) {
       const status = await readCreationStatus(requestId);
       if (status.kind === "committed") {
+        clearPendingGenesisRequest(requestId);
         creationCheckStatusFirstRef.current = false;
         setCreationFailure("idle");
         await loadLibrary();
@@ -669,6 +672,7 @@ export function RealmClient() {
     }
     setCreationFailure("idle");
     try {
+      savePendingGenesisRequest(requestId);
       const response = await fetch("/api/world/generate", {
         method: "POST",
         headers: {
@@ -689,6 +693,7 @@ export function RealmClient() {
       if (typeof recordId !== "string" || !recordId) {
         return await settleUncertainCreation(requestId);
       }
+      clearPendingGenesisRequest(requestId);
       creationCheckStatusFirstRef.current = false;
       await loadLibrary();
       return recordId;
@@ -703,9 +708,10 @@ export function RealmClient() {
     creationReturnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
     creationReturnFocusKeyRef.current = creationReturnFocusRef.current?.dataset.creationFocusReturn ?? null;
     creationRestoreFocusPending.current = false;
-    creationRequestIdRef.current = `genesis_${crypto.randomUUID()}`;
-    creationCheckStatusFirstRef.current = false;
-    setCreationFailure("idle");
+    const pendingRequest = readPendingGenesisRequest();
+    creationRequestIdRef.current = pendingRequest ?? `genesis_${crypto.randomUUID()}`;
+    creationCheckStatusFirstRef.current = pendingRequest !== null;
+    setCreationFailure(pendingRequest ? "unknown" : "idle");
     if (source === "library") setLibraryOpen(false);
     setCreationOverlay({ kind, source });
   }

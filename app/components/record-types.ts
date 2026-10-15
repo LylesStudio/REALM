@@ -155,6 +155,7 @@ export interface RecordProjection {
   events: TimelineEvent[];
   cast: CastMember[];
   scene: {
+    title?: string;
     location: string;
     worldTime: string;
     weather: string;
@@ -680,6 +681,7 @@ export function normalizeRecordProjection(
     events,
     cast,
     scene: {
+      title: pickString(sceneObject, ["title"], inherited?.scene.title ?? ""),
       location,
       worldTime,
       weather: pickString(sceneObject, ["weather"], inherited?.scene.weather ?? ""),
@@ -715,6 +717,7 @@ export function normalizeRecordEnvelope(
       },
       cast: [],
       scene: {
+        title: "",
         location: "",
         worldTime: "",
         weather: "",

@@ -374,6 +374,7 @@ const MESSAGES: Record<string, MessageTable> = {
   "ui.library.chooseFile": M("选择卡面或世界书文件", "Choose a card or world book file", "カードか世界書を選択"),
   "ui.settings.title": M("模型设置", "Model settings", "モデル設定"),
   "ui.settings.back": M("返回记录", "Back to the record", "記録に戻る"),
+  "ui.genesisChat.field.language": M("内容语言", "Content language", "コンテンツ言語"),
   "ui.settings.language": M("界面语言", "Interface language", "表示言語"),
   "ui.settings.languageHint": M("切换后界面与世界内系统文本随之改变，世界文风保持不变。", "Switching changes interface and in-world system text; world style is kept.", "切替で界面と世界内のシステム文が変わります。世界の文風は変わりません。"),
   "ui.settings.languageSaved": M("界面语言已保存。", "Language saved.", "表示言語を保存しました。"),

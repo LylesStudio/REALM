@@ -70,7 +70,7 @@ const SCRIBE_SCHEMA = [jsonOutputInstruction([
   { name: "reply", kind: "string", maxLength: MAX_REPLY_CHARS, note: "what you say to the player (a follow-up question, a comment, an explanation)" },
   { name: "phase", kind: "enum", values: GENESIS_CHAT_PHASES, note: "exploring = still learning intent; proposing = giving or updating the proposal this turn; ready = proposal settled and ready to commit" },
   { name: "draftPatch", kind: "object", nullable: true, note: "only fields added or changed this turn, using the nested shape below; null when nothing settles. Once world is given it must include name; until a name is settled, omit world entirely" },
-  { name: "opening", kind: "string", required: false, maxLength: MAX_OPENING_CHARS, note: "the opening narration shown when the record begins; only when phase is ready" },
+  { name: "opening", kind: "string", required: false, maxLength: MAX_OPENING_CHARS, note: "DEPRECATED compat alias for draftPatch.opening; prefer putting opening inside draftPatch. Ignored when draftPatch.opening is present" },
 ]),
   "Nested draftPatch shape (? marks optional keys; all text values are strings, not prose outside the JSON):",
   "{",
@@ -82,10 +82,12 @@ const SCRIBE_SCHEMA = [jsonOutputInstruction([
   `  "playerRole"?: string (<= ${GENESIS_LIMITS.playerRole} chars),`,
   '  "playerStance"?: "player" | "observer",',
   `  "companions"?: array (0-${MAX_COMPANIONS}) of {"name": string (<= ${GENESIS_LIMITS.companionName} chars), "role": string (<= ${GENESIS_LIMITS.companionRole} chars), "summary": string (<= ${GENESIS_LIMITS.companionSummary} chars)},`,
-  `  "scene"?: {"title"?: string (<= ${GENESIS_LIMITS.sceneTitle} chars), "location"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "weather"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "tension"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "displayTime"?: string (<= ${GENESIS_LIMITS.displayTime} chars), "objective"?: string (<= ${GENESIS_LIMITS.objective} chars)}`,
+  `  "scene"?: {"title"?: string (<= ${GENESIS_LIMITS.sceneTitle} chars), "location"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "weather"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "tension"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "displayTime"?: string (<= ${GENESIS_LIMITS.displayTime} chars), "objective"?: string (<= ${GENESIS_LIMITS.objective} chars)},`,
+  `  "opening"?: string (<= ${GENESIS_LIMITS.opening} chars) — the opening narration; settles whenever it is written (typically by ready phase)`,
   "}",
   "Do not flatten world or story fields into draftPatch. Use world.name / world.era / world.summary, story.title / story.premise, record.title, and playerRole exactly; do not invent name, essence, opening_story, or player_role aliases at the draftPatch root.",
-  "When phase is proposing or ready, supply a usable draftPatch (including world.name for the first proposal), or rely on an already settled draft. Put the actual world and story content in draftPatch; reply is only the short conversational introduction, not a substitute for the proposal. opening is a top-level narration string, only at ready.",
+  "Field semantics: omit a field (or set it to null) to leave it unchanged. An explicit empty string clears an optional text field (era, summary, premise, playerRole, opening, scene fields); world.name, story.title and record.title must never be empty strings. Unknown style/language/playerStance values are rejected, not defaulted.",
+  "When phase is proposing or ready, supply a usable draftPatch (including world.name for the first proposal), or rely on an already settled draft. Put the actual world and story content in draftPatch; reply is only the short conversational introduction, not a substitute for the proposal.",
 ].join("\n");
 
 const buildScribeSystemPrompt = (language: string, hasPlayerInput: boolean): string => [

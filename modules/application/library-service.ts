@@ -1357,8 +1357,10 @@ export function createPostgresLibraryService(
             story: { title: draft.story.title, premise: draft.story.premise },
             playerRole: draft.playerRole,
             playerName: (await resolvePlayerPersona(client, scope, worldId)).name,
+            playerPrincipalId: scope.principalId,
             playerStance: draft.playerStance,
-            companions: draft.companions.map((companion) => ({
+            companions: draft.companions.map((companion, index) => ({
+              definitionId: companions[index]!.id,
               name: companion.name,
               role: companion.role,
               summary: companion.summary,
@@ -1380,6 +1382,7 @@ export function createPostgresLibraryService(
             recordId,
             assembled,
             composeDeterministicOpening(firstNightContext),
+            draft.scene.displayTime ?? "",
           );
           // Goal runtime materialization：声明式 Goal 在创建 Record 的同
           // 一 workspace 事务内物化为 goal_instances（仅 Record-scoped
@@ -2692,6 +2695,7 @@ async function insertOpeningEvent(
   recordId: string,
   assembled: { sceneId: string; policyId: string },
   opening: string,
+  displayTime: string,
 ): Promise<string> {
   const eventId = `event_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
   await client.query(
@@ -2703,7 +2707,7 @@ async function insertOpeningEvent(
        display_time, recorded_at
      ) VALUES (
        $1, $2, $3, $4, $5, $6, 1, 1, 0, 'narration.committed',
-       NULL, '旁白', $7, $8::jsonb, $9, 0, 1, 'native_calendar', '',
+       NULL, '旁白', $7, $8::jsonb, $9, 0, 1, 'native_calendar', $10,
        CURRENT_TIMESTAMP
      )`,
     [
@@ -2728,6 +2732,7 @@ async function insertOpeningEvent(
         },
       }),
       assembled.policyId,
+      displayTime,
     ],
   );
   await client.query(
@@ -3340,6 +3345,17 @@ async function createPlayerSeat(
   recordId: string,
 ): Promise<void> {
   const persona = await resolvePlayerPersona(client, scope, worldId);
+  // Recover only this principal's original proposal; names are not identities.
+  const snapshot = await client.query<{ role: string }>(
+    `SELECT first_night.context->>'playerRole' AS role
+     FROM record_first_nights AS first_night
+     JOIN records AS record ON record.workspace_id = first_night.workspace_id AND record.id = first_night.record_id
+     WHERE first_night.workspace_id = $1 AND record.world_id = $2
+       AND first_night.context->>'playerPrincipalId' = $3
+     ORDER BY first_night.created_at ASC LIMIT 1`,
+    [scope.workspaceId, worldId, scope.principalId],
+  );
+  if (typeof snapshot.rows[0]?.role === "string") persona.role = snapshot.rows[0].role.slice(0, 60);
   const definitionId = `char_def_player_${worldId.slice(-24)}`;
   await client.query(
     `INSERT INTO character_definitions (

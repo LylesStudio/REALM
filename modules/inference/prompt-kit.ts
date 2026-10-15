@@ -28,6 +28,10 @@ export const NATURAL_VOICE_RULES = [
   "- No assistant mannerisms: no \"Certainly\", no \"As requested\", no \"As an ...\", no \"It is worth noting\", no hollow encouragement, no empty summaries, no tutorial tone, no meta-explanations.",
   "- Do not echo the player's wording back; do not fill fields with stock phrases or formulaic patterns.",
   "- Ground every sentence in concrete details from the supplied world and scene; vary sentence structure; keep each field doing its own job — short and vivid.",
+  "- Prefer concrete people, actions, objects, and causal consequences to abstract mood words. Do not substitute references to fate, truth, echoes, or hidden meaning for what is actually happening; use such ideas when they have a specific role in this story, not as interchangeable atmosphere.",
+  "- Avoid unearned profundity, stacked metaphors, grand symbolic conclusions, and repetitive slogan-like contrasts or three-part crescendos. A metaphor should sharpen a particular perception rather than conceal a missing fact.",
+  "- In an opening or story proposal, establish an observable situation and immediate stakes: who is present, what is happening, and what can be acted on. Do not replace the scene with a vague promise of an epic journey or an invitation to begin one; do not choose the player's response for them.",
+  "- Preserve the selected genre register and individual character voices, including humor, restraint, lyricism, and deliberate mystery. These are clarity rules, not a phrase blacklist or a requirement to write sterile reports; do not copy the wording of these instructions into the story.",
   "- When evidence is missing, omit the field or use the neutral form the contract allows; never fill gaps with pretty filler.",
   "- Characters speak as people with an identity; the Narrator writes only authorized public environment and story beats.",
 ].join("\n");

@@ -6,7 +6,7 @@ import {
   MAX_COMPANIONS,
   type WorldGenesisDraft,
 } from "../../modules/application/world-genesis-contract.ts";
-import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { uiText, normalizeUiLanguage, type UiLanguage } from "../../modules/i18n/public.ts";
 import {
   WORLD_STYLE_KEYS,
   worldStyleText,
@@ -28,6 +28,7 @@ import {
   addCompanionRow,
   applyStepConfirm,
   inviteCompanionRow,
+  isSuggestionsForStep,
   namedCompanionCount,
   patchCompanionField,
   patchSceneField,
@@ -38,6 +39,7 @@ import {
   type ScenePatchField,
 } from "./guided-genesis-steps.ts";
 import type { GenesisChatFallback } from "./guided-genesis-chat.tsx";
+import { GenesisDraftFields } from "./genesis-draft-fields";
 
 interface GuidedGenesisProps {
   playerName: string;
@@ -239,7 +241,8 @@ export function GuidedGenesis({
 }: GuidedGenesisProps) {
   // 对谈 fallback：草案与首步字段都从移交的 draft 初始化（可改、可继续）；
   // 无 fallback 时维持 EMPTY_DRAFT 的既有「重开从头」语义。
-  const initialDraft = fallback?.draft ?? EMPTY_DRAFT;
+  const seedDraft = fallback?.draft ?? EMPTY_DRAFT;
+  const initialDraft = { ...seedDraft, language: seedDraft.language ?? normalizeUiLanguage(uiLanguage) };
   const initialStepValues = stepSavedValue(STEPS[0]!.id, initialDraft);
   const [stepIndex, setStepIndex] = useState(0);
   const [draft, setDraft] = useState<WorldGenesisDraft>(initialDraft);
@@ -254,6 +257,16 @@ export function GuidedGenesis({
   const [suggestError, setSuggestError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const suggestionGeneration = useRef(0);
+  const suggestionBusy = useRef(false);
+  const confirmingRef = useRef(false);
+  useEffect(() => () => { suggestionGeneration.current += 1; }, []);
+
+  function invalidateSuggestions() {
+    suggestionGeneration.current += 1;
+    suggestionBusy.current = false;
+    setBusy(false);
+  }
 
   const step = STEPS[stepIndex]!;
   const stepTitle = uiText(STEP_TITLE_KEYS[step.id], uiLanguage);
@@ -269,6 +282,8 @@ export function GuidedGenesis({
   }
 
   function advance(nextDraft: WorldGenesisDraft) {
+    invalidateSuggestions();
+    draftRef.current = nextDraft;
     const nextIndex = Math.min(stepIndex + 1, STEPS.length - 1);
     setDraft(nextDraft);
     resetStepState(STEPS[nextIndex]!.id, nextDraft);
@@ -277,9 +292,13 @@ export function GuidedGenesis({
 
   /** 回退：把上一步已保存的值重新填回输入控件，不丢任何后续内容。 */
   function goBack() {
-    if (stepIndex === 0 || busy || confirming) return;
+    if (stepIndex === 0 || confirmingRef.current) return;
+    invalidateSuggestions();
+    const saved = applyStepConfirm(step.id, draftRef.current, { text, storyTitle, storyPremise });
+    draftRef.current = saved;
+    setDraft(saved);
     const previousIndex = stepIndex - 1;
-    resetStepState(STEPS[previousIndex]!.id, draft);
+    resetStepState(STEPS[previousIndex]!.id, saved);
     setStepIndex(previousIndex);
   }
 
@@ -310,7 +329,9 @@ export function GuidedGenesis({
   }
 
   async function requestSuggestions() {
-    if (!step.suggestStep || busy) return;
+    if (!step.suggestStep || suggestionBusy.current || confirmingRef.current) return;
+    suggestionBusy.current = true;
+    const generation = ++suggestionGeneration.current;
     setBusy(true);
     setSuggestError(null);
     setSuggestions(null);
@@ -321,7 +342,8 @@ export function GuidedGenesis({
         context: draftRef.current,
       });
       // AI 失败给出可见安全提示（可重试）；手动填写随时可继续。
-      if (result.suggestions) {
+      if (generation !== suggestionGeneration.current) return;
+      if (isSuggestionsForStep(step.id, result.suggestions)) {
         setSuggestions(result.suggestions);
       } else {
         setSuggestError(
@@ -330,9 +352,12 @@ export function GuidedGenesis({
         );
       }
     } catch {
-      setSuggestError(uiText("ui.guided.suggestFailed", uiLanguage));
+      if (generation === suggestionGeneration.current) setSuggestError(uiText("ui.guided.suggestFailed", uiLanguage));
     } finally {
-      setBusy(false);
+      if (generation === suggestionGeneration.current) {
+        suggestionBusy.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -368,12 +393,14 @@ export function GuidedGenesis({
   }
 
   async function sealWorld() {
-    if (confirming) return;
+    if (confirmingRef.current || suggestionBusy.current || !draft.world.name.trim()) return;
+    confirmingRef.current = true;
     setConfirming(true);
     try {
       const recordId = await onConfirm(draft);
       if (recordId) onOpenRecord(recordId);
     } finally {
+      confirmingRef.current = false;
       setConfirming(false);
     }
   }
@@ -390,7 +417,7 @@ export function GuidedGenesis({
             <button
               aria-label={uiText("ui.guided.back", uiLanguage)}
               className="guided-back"
-              disabled={busy || confirming}
+              disabled={confirming}
               onClick={goBack}
               type="button"
             >
@@ -502,6 +529,7 @@ export function GuidedGenesis({
               <textarea
                 aria-label={`${stepTitle}${uiText("ui.guided.inputSuffix", uiLanguage)}`}
                 className="guided-input"
+                maxLength={step.id === "world-name" ? GENESIS_LIMITS.worldName : step.id === "era" ? GENESIS_LIMITS.era : step.id === "summary" ? GENESIS_LIMITS.summary : step.id === "story" ? GENESIS_LIMITS.storyTitle : GENESIS_LIMITS.playerRole}
                 onChange={(event) => {
                   if (step.id === "story") setStoryTitle(event.target.value);
                   else setText(event.target.value);
@@ -518,6 +546,7 @@ export function GuidedGenesis({
                 <textarea
                   aria-label={uiText("ui.guided.storyPremiseLabel", uiLanguage)}
                   className="guided-input"
+                  maxLength={GENESIS_LIMITS.premise}
                   onChange={(event) => setStoryPremise(event.target.value)}
                   placeholder={uiText("ui.guided.storyPremisePlaceholder", uiLanguage)}
                   rows={2}
@@ -637,7 +666,7 @@ export function GuidedGenesis({
             </div>
           ) : null}
 
-          {suggestions && step.id !== "companions" && step.id !== "scene" ? (
+          {suggestions && isSuggestionsForStep(step.id, suggestions) && step.id !== "companions" && step.id !== "scene" ? (
             <ul className="guided-suggestions" aria-label={uiText("ui.guided.textSuggestionsLabel", uiLanguage)}>
               {(suggestions as string[]).map((item) => (
                 <li key={item}>
@@ -692,6 +721,12 @@ export function GuidedGenesis({
 
           {step.id === "review" ? (
             <div className="guided-review">
+              <GenesisDraftFields draft={draft} uiLanguage={uiLanguage} disabled={confirming}
+                patchDraft={(update) => {
+                  const next = update(draftRef.current);
+                  draftRef.current = next;
+                  setDraft(next);
+                }} />
               <div className="guided-review-scroll">
                 {entries.map((entry) => (
                   <div className="guided-review-row" key={entry.key}>
@@ -702,7 +737,7 @@ export function GuidedGenesis({
               </div>
               <button
                 className="guided-seal-button"
-                disabled={confirming}
+                disabled={confirming || busy || !draft.world.name.trim()}
                 onClick={() => void sealWorld()}
                 type="button"
               >

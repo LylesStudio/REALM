@@ -1,6 +1,8 @@
 import {
   GENESIS_LIMITS,
   MAX_COMPANIONS,
+  defaultGenesisRecordTitle,
+  defaultGenesisStoryTitle,
   type WorldGenesisDraft,
 } from "../../modules/application/world-genesis-contract.ts";
 
@@ -235,8 +237,10 @@ export function patchSceneField(
 }
 
 /**
- * 提交当前步骤：只更新当前字段，绝不用空输入覆盖已保存内容
- * （留空表示保留旧值；再次前进只影响当前字段）。
+ * 提交当前步骤：只更新当前字段。
+ * 批次 B11：时代/简介/前提/玩家角色等可选文本的显式清空生效（确认空串
+ * 即清除）；world-name 是必填，空串确认被按钮层拦截，这里兜底保持旧值。
+ * 故事/记录标题清空回落到按草稿语言的默认标题（不写死中文）。
  * 同伴与场景例外：编辑器里的当前行就是要保存的完整快照。
  */
 export function applyStepConfirm(
@@ -244,34 +248,33 @@ export function applyStepConfirm(
   draft: WorldGenesisDraft,
   values: StepConfirmInput,
 ): WorldGenesisDraft {
-  const text = values.text.trim();
+  const text = values.text.trim().slice(0, stepId === "world-name" ? GENESIS_LIMITS.worldName : stepId === "era" ? GENESIS_LIMITS.era : stepId === "summary" ? GENESIS_LIMITS.summary : GENESIS_LIMITS.playerRole);
   switch (stepId) {
     case "world-name":
       return text
         ? { ...draft, world: { ...draft.world, name: text } }
         : draft;
     case "era":
-      return text
-        ? { ...draft, world: { ...draft.world, era: text } }
-        : draft;
+      // 显式清空生效：不再用 `text || old` 吞掉用户的清除。
+      return { ...draft, world: { ...draft.world, era: text } };
     case "summary":
-      return text
-        ? { ...draft, world: { ...draft.world, summary: text } }
-        : draft;
+      return { ...draft, world: { ...draft.world, summary: text } };
     case "story": {
-      const title = values.storyTitle.trim();
-      const premise = values.storyPremise.trim();
+      const title = values.storyTitle.trim().slice(0, GENESIS_LIMITS.storyTitle);
+      const premise = values.storyPremise.trim().slice(0, GENESIS_LIMITS.premise);
       return {
         ...draft,
         story: {
-          title: title || draft.story.title || "序章",
-          premise: premise || draft.story.premise,
+          title: title || draft.story.title || defaultGenesisStoryTitle(draft.language),
+          premise,
         },
-        record: draft.record.title ? draft.record : { title: "第一章" },
+        record: draft.record.title
+          ? draft.record
+          : { title: defaultGenesisRecordTitle(draft.language) },
       };
     }
     case "player-role":
-      return text ? { ...draft, playerRole: text } : draft;
+      return { ...draft, playerRole: text };
     case "companions":
       return commitCompanionRows(draft, values.companions ?? draft.companions);
     case "scene":
@@ -279,4 +282,39 @@ export function applyStepConfirm(
     default:
       return draft;
   }
+}
+
+/**
+ * 批次 B9：校验建议响应的数据形状与发出请求的步骤一致——
+ * 迟到/串步响应不得贴到别的步骤上（review 步渲染对象会崩）。
+ * 文本步（world-name/era/summary/player-role）与 story 步 = string[]；
+ * companions = 带 name 的对象数组；scene = 分字段字符串列表对象。
+ */
+export function isSuggestionsForStep(
+  step: GuidedStepId,
+  suggestions: unknown,
+): boolean {
+  if (suggestions === null || suggestions === undefined) return false;
+  if (step === "companions") {
+    return Array.isArray(suggestions)
+      && suggestions.every((item) =>
+        typeof item === "object" && item !== null && !Array.isArray(item)
+        && typeof (item as { name?: unknown }).name === "string");
+  }
+  if (step === "scene") {
+    if (typeof suggestions !== "object" || Array.isArray(suggestions)) return false;
+    const value = suggestions as Record<string, unknown>;
+    return ["location", "weather", "tension", "objective"].every(
+      (field) => field in value
+        && Array.isArray(value[field])
+        && (value[field] as unknown[]).every((item) => typeof item === "string"),
+    );
+  }
+  if (step === "story" || step === "world-name" || step === "era"
+    || step === "summary" || step === "player-role") {
+    return Array.isArray(suggestions)
+      && suggestions.every((item) => typeof item === "string");
+  }
+  // review/style/stance 等步骤不支持代笔：任何建议都算错位。
+  return false;
 }

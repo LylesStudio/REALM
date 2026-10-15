@@ -75,6 +75,7 @@ export type RecordProjection = {
     worldTime: string;
   };
   scene: {
+    title?: string;
     location: string;
     worldTime: string;
     weather: string;

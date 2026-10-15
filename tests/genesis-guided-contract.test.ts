@@ -98,7 +98,7 @@ test("A: 填写 A→前进→填写 B→回退→A 值还在→修改 A→前进
   );
 });
 
-test("A: 空输入提交不清空已保存内容；回退后的再次前进只更新当前字段", () => {
+test("A: 必需名称空输入保留；可选文本显式空输入清除", () => {
   let draft = applyStepConfirm("world-name", emptyDraft(), {
     text: "雾港",
     storyTitle: "",
@@ -111,7 +111,7 @@ test("A: 空输入提交不清空已保存内容；回退后的再次前进只�
     storyPremise: "",
   });
   assert.equal(draft.world.name, "雾港", "空输入不得覆盖已保存内容");
-  // story 步骤：标题留空保留旧标题/默认，简介留空保留旧简介。
+  // story 步骤：标题留空保留旧标题/默认，简介显式留空清除旧简介。
   draft = applyStepConfirm("story", draft, {
     text: "",
     storyTitle: "无声钟",
@@ -123,11 +123,11 @@ test("A: 空输入提交不清空已保存内容；回退后的再次前进只�
     storyPremise: "",
   });
   assert.equal(draft.story.title, "无声钟");
-  assert.equal(draft.story.premise, "密函上岸。");
+  assert.equal(draft.story.premise, "");
   // story 回退恢复两个输入框。
   const restored = stepSavedValue("story", draft);
   assert.equal(restored.storyTitle, "无声钟");
-  assert.equal(restored.storyPremise, "密函上岸。");
+  assert.equal(restored.storyPremise, "");
 });
 
 test("A: scene 点选只更新对应字段（状态机契约：不触发 advance 语义）", () => {

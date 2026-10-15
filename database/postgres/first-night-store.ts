@@ -246,14 +246,14 @@ export function createPostgresFirstNightStore(
           actorParticipantId: null,
           segments: sceneSegments(pack.scene),
         },
-        ...pack.characters
-          .filter((character) => participantByName.has(character.name))
-          .map((character): FirstNightEventDraft => ({
-            eventKind: "utterance.committed",
-            speakerName: character.name,
-            actorParticipantId: participantByName.get(character.name)!,
-            segments: characterSegments(character),
-          })),
+        ...pack.characters.flatMap((character): FirstNightEventDraft[] => {
+          const candidates = participantByName.get(character.companionId ? `id:${character.companionId}` : `name:${character.name}`);
+          const actorParticipantId = candidates?.shift();
+          return actorParticipantId ? [{
+            eventKind: "utterance.committed", speakerName: character.name,
+            actorParticipantId, segments: characterSegments(character),
+          }] : [];
+        }),
       ];
       // 能力点三：钩子事件——旁白形态追加，payload.metadata.hook=true。
       if (pack.hook.content.trim()) {
@@ -378,9 +378,9 @@ async function resolveCharacterParticipants(
   client: PoolClient,
   workspaceId: string,
   recordId: string,
-): Promise<Map<string, string>> {
-  const result = await client.query<{ participant_id: string; display_name: string }>(
-    `SELECT participant.id AS participant_id, definition.display_name
+): Promise<Map<string, string[]>> {
+  const result = await client.query<{ participant_id: string; display_name: string; definition_id: string }>(
+    `SELECT participant.id AS participant_id, definition.display_name, definition.id AS definition_id
      FROM participants AS participant
      JOIN character_instances AS instance
        ON instance.workspace_id = participant.workspace_id
@@ -399,12 +399,15 @@ async function resolveCharacterParticipants(
      WHERE participant.workspace_id = $1
        AND participant.record_id = $2
        AND participant.participant_kind = 'character'
+       AND participant.controller_mode = 'ai' AND participant.is_active
      ORDER BY participant.speaking_order ASC`,
     [workspaceId, recordId],
   );
-  const byName = new Map<string, string>();
+  const byName = new Map<string, string[]>();
   for (const row of result.rows) {
-    if (!byName.has(row.display_name)) byName.set(row.display_name, row.participant_id);
+    byName.set(`id:${row.definition_id}`, [row.participant_id]);
+    const key = `name:${row.display_name}`;
+    byName.set(key, [...(byName.get(key) ?? []), row.participant_id]);
   }
   return byName;
 }

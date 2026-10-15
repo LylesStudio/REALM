@@ -15,6 +15,8 @@ import type { WorldBinding } from "../world-transfer/realm-save.ts";
  * tests/frontend-record-contract.test.ts 的 client 依赖图围栏保证此边界。
  */
 
+export const GENESIS_CREATION_REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;
+
 export const GENESIS_LANGUAGES = ["zh-CN", "en", "ja"] as const;
 export type GenesisLanguage = (typeof GENESIS_LANGUAGES)[number];
 
@@ -90,6 +92,30 @@ export function genesisBindingFromDraft(
 
 export const MAX_COMPANIONS = 2;
 
+/**
+ * 默认故事/记录标题（批次 B12）：跟随草稿内容语言，不写死中文。
+ * 与 i18n `ui.guided.defaultStoryTitle/defaultRecordTitle` 同值；
+ * 分步 skip 路径与本 normalizer 共用本表，保证三语一致。
+ */
+const DEFAULT_STORY_TITLES: Record<GenesisLanguage, string> = {
+  "zh-CN": "序章",
+  en: "Prologue",
+  ja: "プロローグ",
+};
+const DEFAULT_RECORD_TITLES: Record<GenesisLanguage, string> = {
+  "zh-CN": "第一章",
+  en: "Chapter One",
+  ja: "第一章",
+};
+
+export function defaultGenesisStoryTitle(language: GenesisLanguage | undefined): string {
+  return DEFAULT_STORY_TITLES[language ?? "zh-CN"];
+}
+
+export function defaultGenesisRecordTitle(language: GenesisLanguage | undefined): string {
+  return DEFAULT_RECORD_TITLES[language ?? "zh-CN"];
+}
+
 /** 创世手稿字段上限：prompt 说明与规整同源（Prompt System v2）。 */
 export const GENESIS_LIMITS = {
   worldName: 40,
@@ -140,11 +166,15 @@ function deriveSummary(prompt: string): string {
 
 /**
  * 宽容规整草稿：字段缺失时留空或由灵感原文提炼；同伴过滤无名条目并
- * 截断到两名。世界名无法解析（草稿与灵感都为空）时返回 null。
+ * 截断到两名。世界名无法解析（草稿与灵感都为空）时返回 null——除非
+ * `allowUnnamed`（对谈 partial draft 累积）：此时保留全部已定字段、
+ * 世界名留空串，绝不制造伪名字；创建入口仍要求非空世界名。
+ * 默认故事/记录标题跟随草稿语言（不写死中文）。
  */
 export function normalizeGenesisDraft(
   value: unknown,
   prompt = "",
+  options: { allowUnnamed?: boolean } = {},
 ): WorldGenesisDraft | null {
   const source = isObject(value) ? value : {};
   const world = isObject(source.world) ? source.world : {};
@@ -152,17 +182,16 @@ export function normalizeGenesisDraft(
   const record = isObject(source.record) ? source.record : {};
   const scene = isObject(source.scene) ? source.scene : {};
 
+  const language = normalizeGenesisLanguage(source.language);
   const name = clamp(world.name, GENESIS_LIMITS.worldName) || deriveWorldName(prompt);
-  if (!name) return null;
+  if (!name && !options.allowUnnamed) return null;
 
   const companions = clampCompanions(source.companions);
   const sceneTitle = clamp(scene.title, GENESIS_LIMITS.sceneTitle);
   const sceneDisplayTime = clamp(scene.displayTime, GENESIS_LIMITS.displayTime);
 
   return {
-    ...(normalizeGenesisLanguage(source.language)
-      ? { language: normalizeGenesisLanguage(source.language) }
-      : {}),
+    ...(language ? { language } : {}),
     world: {
       name,
       era: clamp(world.era, GENESIS_LIMITS.era),
@@ -172,11 +201,11 @@ export function normalizeGenesisDraft(
     playerStance: source.playerStance === "observer" ? "observer" : "player",
     opening: clamp(source.opening, GENESIS_LIMITS.opening),
     story: {
-      title: clamp(story.title, GENESIS_LIMITS.storyTitle) || "序章",
+      title: clamp(story.title, GENESIS_LIMITS.storyTitle) || defaultGenesisStoryTitle(language),
       premise: clamp(story.premise, GENESIS_LIMITS.premise) || deriveSummary(prompt),
     },
     record: {
-      title: clamp(record.title, GENESIS_LIMITS.recordTitle) || "第一笔",
+      title: clamp(record.title, GENESIS_LIMITS.recordTitle) || defaultGenesisRecordTitle(language),
     },
     playerRole: clamp(source.playerRole, GENESIS_LIMITS.playerRole),
     companions,
@@ -281,26 +310,41 @@ export function sanitizeUntrustedGenesisDraft(value: unknown): Partial<WorldGene
   return result;
 }
 
-/** 模型可见的已定稿视图。只含规整后的字段，供 describeDraft / describeContext 共用。 */
+/**
+ * 模型可见的已定稿视图（批次 A5）：嵌套形状与 draftPatch 输出 schema
+ * 同构——world/story/record/scene 保持各自字段身份，不再用扁平别名
+ * （world=名字串、openingStory 等），避免模型把别名抄回 draftPatch。
+ * 保留显式空值和合法枚举；不会把用户清除的字段伪装成尚未填写。
+ */
 export function settledGenesisView(value: unknown): Record<string, unknown> | null {
   const draft = sanitizeUntrustedGenesisDraft(value);
+  // Empty editable values are settled values too, not invitations to refill them.
+  if (isObject(value)) {
+    if (typeof value.opening === "string") draft.opening = clamp(value.opening, GENESIS_LIMITS.opening);
+    if (typeof value.playerRole === "string") draft.playerRole = clamp(value.playerRole, GENESIS_LIMITS.playerRole);
+    if (Array.isArray(value.companions)) draft.companions = clampCompanions(value.companions);
+  }
   const view: Record<string, unknown> = {};
   if (draft.language) view.language = draft.language;
-  if (draft.world?.name) view.world = draft.world.name;
-  if (draft.world?.era) view.era = draft.world.era;
-  if (draft.world?.summary) view.summary = draft.world.summary;
-  if (draft.style && draft.style !== "modern") view.style = draft.style;
-  if (draft.story?.title) {
-    view.openingStory = draft.story.title;
-    if (draft.story.premise) view.premise = draft.story.premise;
+  if (draft.world) {
+    const world: Record<string, string> = {};
+    if (typeof draft.world.name === "string") world.name = draft.world.name;
+    if (typeof draft.world.era === "string") world.era = draft.world.era;
+    if (typeof draft.world.summary === "string") world.summary = draft.world.summary;
+    if (Object.keys(world).length > 0) view.world = world;
   }
-  if (draft.record?.title) view.recordTitle = draft.record.title;
-  if (draft.playerRole) view.playerRole = draft.playerRole;
-  if (draft.playerStance === "observer") {
-    view.playerStance = "observer (the player does not play a character)";
+  if (draft.style) view.style = draft.style;
+  if (draft.story) {
+    const story: Record<string, string> = {};
+    if (typeof draft.story.title === "string") story.title = draft.story.title;
+    if (typeof draft.story.premise === "string") story.premise = draft.story.premise;
+    if (Object.keys(story).length > 0) view.story = story;
   }
-  if (draft.opening) view.opening = draft.opening;
-  if (draft.companions?.length) {
+  if (typeof draft.record?.title === "string") view.record = { title: draft.record.title };
+  if (typeof draft.playerRole === "string") view.playerRole = draft.playerRole;
+  if (draft.playerStance) view.playerStance = draft.playerStance;
+  if (typeof draft.opening === "string") view.opening = draft.opening;
+  if (Array.isArray(draft.companions)) {
     view.companions = draft.companions.map((item) => ({
       name: item.name,
       ...(item.role ? { role: item.role } : {}),
@@ -308,12 +352,12 @@ export function settledGenesisView(value: unknown): Record<string, unknown> | nu
     }));
   }
   const scene: Record<string, string> = {};
-  if (draft.scene?.title) scene.title = draft.scene.title;
-  if (draft.scene?.location) scene.location = draft.scene.location;
-  if (draft.scene?.weather) scene.weather = draft.scene.weather;
-  if (draft.scene?.tension) scene.tension = draft.scene.tension;
-  if (draft.scene?.displayTime) scene.displayTime = draft.scene.displayTime;
-  if (draft.scene?.objective) scene.objective = draft.scene.objective;
+  if (typeof draft.scene?.title === "string") scene.title = draft.scene.title;
+  if (typeof draft.scene?.location === "string") scene.location = draft.scene.location;
+  if (typeof draft.scene?.weather === "string") scene.weather = draft.scene.weather;
+  if (typeof draft.scene?.tension === "string") scene.tension = draft.scene.tension;
+  if (typeof draft.scene?.displayTime === "string") scene.displayTime = draft.scene.displayTime;
+  if (typeof draft.scene?.objective === "string") scene.objective = draft.scene.objective;
   if (Object.keys(scene).length > 0) view.scene = scene;
   return Object.keys(view).length > 0 ? view : null;
 }

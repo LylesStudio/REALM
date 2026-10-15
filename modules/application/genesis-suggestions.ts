@@ -54,11 +54,12 @@ export interface SceneSuggestions {
 
 export type GenesisSuggestions = string[] | CompanionSuggestion[] | SceneSuggestions;
 
+// 与 GENESIS_LIMITS 同源（批次 A4：不得另写一套字面量漂移）。
 const TEXT_FIELD_LIMITS: Record<string, number> = {
-  "world-name": 40,
-  era: 40,
-  summary: 300,
-  "player-role": 60,
+  "world-name": GENESIS_LIMITS.worldName,
+  era: GENESIS_LIMITS.era,
+  summary: GENESIS_LIMITS.summary,
+  "player-role": GENESIS_LIMITS.playerRole,
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -197,6 +198,9 @@ export async function generateGenesisSuggestions(
   if (!genesisPromptInputWithinBudget(input.context)) return null;
   const context = sanitizeUntrustedGenesisDraft(input.context);
   const intent = typeof input.intent === "string" ? input.intent.trim().slice(0, 200) : "";
+  // 批次 B12：建议的语言信号取草稿内 canonical language（前端初始化/透传
+  // 保证其存在），空意图时模型仍拿到具体语言而不是泛指。
+  const language = context.language;
   try {
     const result = await requestStructuredObject({
       call: async (messages) => {
@@ -219,7 +223,7 @@ export async function generateGenesisSuggestions(
             suggestionSystemPrompt(input.step),
             stylePromptBlock(normalizeWorldStyle(context.style)),
             NATURAL_VOICE_RULES,
-            outputLanguageRule(),
+            outputLanguageRule(language),
           ].join("\n"),
         },
         {

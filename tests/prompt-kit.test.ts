@@ -30,6 +30,15 @@ test("natural voice rules carry the anti-AI constraints", () => {
   assert.match(NATURAL_VOICE_RULES, /omit the field/i);
 });
 
+test("natural voice rejects vague gravitas without erasing genre or character voice", () => {
+  assert.match(NATURAL_VOICE_RULES, /concrete people, actions, objects/);
+  assert.match(NATURAL_VOICE_RULES, /unearned profundity/);
+  assert.match(NATURAL_VOICE_RULES, /stacked metaphors/);
+  assert.match(NATURAL_VOICE_RULES, /observable situation.*immediate stakes/);
+  assert.match(NATURAL_VOICE_RULES, /Preserve the selected genre register and individual character voices/);
+  assert.match(NATURAL_VOICE_RULES, /not a phrase blacklist/);
+});
+
 test("output language rule never enumerates fixed languages", () => {
   const rule = outputLanguageRule();
   assert.match(rule, /latest player input/i);
