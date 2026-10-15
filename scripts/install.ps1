@@ -100,7 +100,14 @@ if (-not $SourceUrl) { $SourceUrl = 'https://github.com/Silver-Aurora/REALM.git'
 if (Test-Path (Join-Path $AppDir '.git')) {
   Write-RealmLog "updating existing clone at $AppDir ($Ref)"
   & git -C $AppDir fetch --depth 1 origin $Ref | Out-Host
-  & git -C $AppDir checkout -q FETCH_HEAD | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw 'git fetch failed; application source was not updated. Installation stopped before dependencies or build.' }
+  $fetchedCommit = (& git -C $AppDir rev-parse --verify FETCH_HEAD | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $fetchedCommit) { throw 'Could not resolve the fetched application revision.' }
+  & git -C $AppDir checkout -q $fetchedCommit | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw 'git checkout failed, possibly because of local source changes. Preserve those changes and retry; installation stopped before dependencies or build.' }
+  $installedCommit = (& git -C $AppDir rev-parse --verify HEAD | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or $installedCommit -ne $fetchedCommit) { throw 'Application revision verification failed; refusing to build stale source.' }
+  Write-RealmLog "application source revision: $installedCommit"
 } elseif ((Test-Path $AppDir) -and (Test-Path (Join-Path $AppDir 'package.json'))) {
   # codeload fallback installs have no .git. Refresh them instead of freezing
   # forever at the first downloaded version. Local config/data is preserved.
