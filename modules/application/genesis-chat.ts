@@ -10,6 +10,9 @@ import {
 import { WORLD_STYLE_KEYS } from "../style/world-style.ts";
 import { normalizeUiLanguage } from "../i18n/public.ts";
 import {
+  GENESIS_LANGUAGES,
+  GENESIS_LIMITS,
+  MAX_COMPANIONS,
   genesisPromptInputWithinBudget,
   sanitizeUntrustedGenesisDraft,
   settledGenesisView,
@@ -63,12 +66,27 @@ function describeDraft(draft: unknown): string {
  * 枚举值来自同源常量；旧版写死的排除名字（塞娜/弥洛/洛川）无数据依据，
  * 已移除；已定之卷与玩家输入在 user 侧 context block。
  */
-const SCRIBE_SCHEMA = jsonOutputInstruction([
+const SCRIBE_SCHEMA = [jsonOutputInstruction([
   { name: "reply", kind: "string", maxLength: MAX_REPLY_CHARS, note: "what you say to the player (a follow-up question, a comment, an explanation)" },
   { name: "phase", kind: "enum", values: GENESIS_CHAT_PHASES, note: "exploring = still learning intent; proposing = giving or updating the proposal this turn; ready = proposal settled and ready to commit" },
-  { name: "draftPatch", kind: "object", note: "only fields added or changed this turn; may include language (zh-CN, en, or ja) when the player's language is established; null when nothing settles. Once world is given it must include name (the world's name is the first stroke); until a name is settled, omit world entirely. companions, when present, is the full 0-2 list to keep (name, role, summary), not a delta; an empty array clears them. scene may include title, location, weather, tension, displayTime, and objective" },
+  { name: "draftPatch", kind: "object", nullable: true, note: "only fields added or changed this turn, using the nested shape below; null when nothing settles. Once world is given it must include name; until a name is settled, omit world entirely" },
   { name: "opening", kind: "string", required: false, maxLength: MAX_OPENING_CHARS, note: "the opening narration shown when the record begins; only when phase is ready" },
-]);
+]),
+  "Nested draftPatch shape (? marks optional keys; all text values are strings, not prose outside the JSON):",
+  "{",
+  `  "language"?: ${GENESIS_LANGUAGES.map((value) => JSON.stringify(value)).join(" | ")},`,
+  `  "world"?: {"name": string (<= ${GENESIS_LIMITS.worldName} chars), "era"?: string (<= ${GENESIS_LIMITS.era} chars), "summary"?: string (<= ${GENESIS_LIMITS.summary} chars)},`,
+  `  "story"?: {"title"?: string (<= ${GENESIS_LIMITS.storyTitle} chars), "premise"?: string (<= ${GENESIS_LIMITS.premise} chars)},`,
+  `  "record"?: {"title"?: string (<= ${GENESIS_LIMITS.recordTitle} chars)},`,
+  `  "style"?: ${WORLD_STYLE_KEYS.map((value) => JSON.stringify(value)).join(" | ")},`,
+  `  "playerRole"?: string (<= ${GENESIS_LIMITS.playerRole} chars),`,
+  '  "playerStance"?: "player" | "observer",',
+  `  "companions"?: array (0-${MAX_COMPANIONS}) of {"name": string (<= ${GENESIS_LIMITS.companionName} chars), "role": string (<= ${GENESIS_LIMITS.companionRole} chars), "summary": string (<= ${GENESIS_LIMITS.companionSummary} chars)},`,
+  `  "scene"?: {"title"?: string (<= ${GENESIS_LIMITS.sceneTitle} chars), "location"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "weather"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "tension"?: string (<= ${GENESIS_LIMITS.sceneField} chars), "displayTime"?: string (<= ${GENESIS_LIMITS.displayTime} chars), "objective"?: string (<= ${GENESIS_LIMITS.objective} chars)}`,
+  "}",
+  "Do not flatten world or story fields into draftPatch. Use world.name / world.era / world.summary, story.title / story.premise, record.title, and playerRole exactly; do not invent name, essence, opening_story, or player_role aliases at the draftPatch root.",
+  "When phase is proposing or ready, supply a usable draftPatch (including world.name for the first proposal), or rely on an already settled draft. Put the actual world and story content in draftPatch; reply is only the short conversational introduction, not a substitute for the proposal. opening is a top-level narration string, only at ready.",
+].join("\n");
 
 const buildScribeSystemPrompt = (language: string, hasPlayerInput: boolean): string => [
   "You are REALM's Scribe, guiding a player through free-form conversation to write a new world into being.",

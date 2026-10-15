@@ -190,11 +190,24 @@ export function mergeDraftPatch(
   return normalizeGenesisDraft(source, "");
 }
 
+/** 正式提案不能借已有草稿通过校验，同时悄悄丢掉错名字段或同伴。 */
+function hasDiscardedProposalFields(raw: unknown, sanitized: unknown): boolean {
+  if (Array.isArray(raw)) {
+    return !Array.isArray(sanitized)
+      || raw.length !== sanitized.length
+      || raw.some((item, index) => hasDiscardedProposalFields(item, sanitized[index]));
+  }
+  if (!isObject(raw)) return false;
+  if (!isObject(sanitized)) return true;
+  return Object.keys(raw).some((key) =>
+    !Object.hasOwn(sanitized, key) || hasDiscardedProposalFields(raw[key], sanitized[key]));
+}
+
 /**
  * 模型响应规整：phase 枚举非法 / reply 为空 → null（fail-closed）。
- * draftPatch 消毒后无可识别字段、或与 base 合并后整体非法（如探索期
- * 尚未谈出世界名）→ 只丢弃本轮 patch（按 null 处理），对谈照常继续——
- * 无效增量绝不进草稿，但司卷的回应仍然成立。opening 仅在 phase=ready 保留。
+ * exploring 阶段尚未谈出世界名时可丢弃不完整 patch，保留问答。
+ * proposing / ready 必须有可用提案；无效增量返回 null 触发有界 schema
+ * repair，不能悄悄丢掉提案却把一句“已成型”当成功。opening 仅 ready 保留。
  */
 export function normalizeGenesisChatResponse(
   raw: unknown,
@@ -206,12 +219,21 @@ export function normalizeGenesisChatResponse(
   if (!isGenesisChatPhase(raw.phase)) return null;
 
   let draftPatch: Partial<WorldGenesisDraft> | null = null;
+  let mergedDraft = mergeDraftPatch(baseDraft, null);
   if (raw.draftPatch !== null && raw.draftPatch !== undefined) {
     const sanitized = sanitizeDraftPatch(raw.draftPatch);
-    if (sanitized && mergeDraftPatch(baseDraft, sanitized)) {
+    if (raw.phase !== "exploring" && hasDiscardedProposalFields(raw.draftPatch, sanitized)) {
+      return null;
+    }
+    const merged = sanitized ? mergeDraftPatch(baseDraft, sanitized) : null;
+    if (sanitized && merged) {
       draftPatch = sanitized;
+      mergedDraft = merged;
+    } else if (raw.phase !== "exploring") {
+      return null;
     }
   }
+  if (raw.phase !== "exploring" && !mergedDraft) return null;
 
   const opening = raw.phase === "ready"
     ? clampText(raw.opening, MAX_OPENING_CHARS)

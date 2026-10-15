@@ -205,19 +205,19 @@ test("normalizeGenesisChatResponse enforces phase enum and reply presence", () =
   assert.equal(ok.opening, "");
 });
 
-test("normalizeGenesisChatResponse drops an illegal patch but keeps the reply", () => {
-  // patch 无法与 base 合成合法草稿（缺世界名）→ 丢弃 patch，对谈继续。
+test("normalizeGenesisChatResponse keeps exploratory dialogue but never pretends a missing proposal succeeded", () => {
+  // 探索阶段允许尚无世界名；不能把这种状态伪装成 proposing / ready。
   const dropped = normalizeGenesisChatResponse(
     {
-      reply: "提案来了。",
-      phase: "proposing",
+      reply: "先从港口聊起。",
+      phase: "exploring",
       draftPatch: { scene: { location: "港口" } },
     },
     null,
   );
   assert.ok(dropped);
-  assert.equal(dropped.reply, "提案来了。");
-  assert.equal(dropped.phase, "proposing");
+  assert.equal(dropped.reply, "先从港口聊起。");
+  assert.equal(dropped.phase, "exploring");
   assert.equal(dropped.draftPatch, null);
 
   // 消毒后无任何可识别字段 → 同样按「本轮不定稿」处理，不失败。
@@ -251,6 +251,76 @@ test("normalizeGenesisChatResponse drops an illegal patch but keeps the reply", 
   assert.ok(ok);
   assert.equal(ok.draftPatch?.world?.name, "港城");
   assert.equal(ok.draftPatch?.playerStance, "observer");
+});
+
+test("a flat world proposal is repaired instead of silently reduced to a reply", async () => {
+  const flat = {
+    reply: "世界已在齿轮转动中成型。",
+    phase: "proposing",
+    draftPatch: {
+      name: "齿轮余烬", era: "蒸汽纪元", essence: "机械秩序的真相与反抗",
+      style: "western_fantasy", opening_story: "走私犯在飞艇上发现纸带秘密。",
+      player_role: "走私犯", companions: [{ name: "机械师", role: "工程师", summary: "修理飞艇。" }],
+      scene: { location: "飞艇" },
+    },
+  };
+  const repaired = {
+    reply: "提案整理好了。", phase: "proposing",
+    draftPatch: {
+      world: { name: "齿轮余烬", era: "蒸汽纪元", summary: "机械秩序的真相与反抗" },
+      story: { title: "纸带密令", premise: "走私犯在飞艇上发现纸带秘密。" },
+      record: { title: "飞艇上的交易" }, playerRole: "走私犯",
+      companions: flat.draftPatch.companions, scene: flat.draftPatch.scene,
+    },
+  };
+  const { gateway, calls } = fakeGateway([{ content: JSON.stringify(flat) }, { content: JSON.stringify(repaired) }]);
+  const result = await generateGenesisChatReply(gateway, {
+    message: "帮我编一个完整故事", transcript: [], draft: null, language: "zh-CN",
+  });
+  assert.equal(calls.length, 2, "an unusable proposing patch must trigger the bounded schema repair");
+  assert.equal(result?.draftPatch?.world?.name, "齿轮余烬");
+  assert.equal(result?.draftPatch?.story?.premise, repaired.draftPatch.story.premise);
+  assert.equal(result?.draftPatch?.playerRole, "走私犯");
+  assert.match(calls[1]?.messages.at(-1)?.content ?? "", /Failure category: schema/);
+});
+
+test("scribe proposal and repair both specify the nested draft field contract", async () => {
+  const { gateway, calls } = fakeGateway([
+    { content: JSON.stringify({ reply: "提案来了。", phase: "proposing", draftPatch: { name: "云城" } }) },
+    { content: JSON.stringify({ reply: "提案整理好了。", phase: "proposing", draftPatch: BASE_DRAFT }) },
+  ]);
+  assert.ok(await generateGenesisChatReply(gateway, {
+    message: "做一份完整提案", transcript: [], draft: null, language: "zh-CN",
+  }));
+  assert.equal(calls.length, 2);
+  for (const schema of [calls[0]?.messages[0]?.content ?? "", calls[1]?.messages.at(-1)?.content ?? ""]) {
+    assert.match(schema, /"world"\?:\s*\{"name":/);
+    assert.match(schema, /"story"\?:\s*\{"title"\?:/);
+    assert.match(schema, /"record"\?:\s*\{"title"\?:/);
+    assert.match(schema, /"playerRole"\?:/);
+    assert.match(schema, /"summary"\?:.*300 chars/);
+    assert.match(schema, /"draftPatch": object or null/);
+    assert.match(schema, /Do not flatten/);
+  }
+});
+
+test("proposal updates cannot silently discard unrecognized fields against an existing draft", () => {
+  for (const draftPatch of [
+    { name: "被丢弃的新世界名", style: "western_fantasy" },
+    { world: { name: "新世界名", essence: "被丢弃的新世界概述" } },
+    { player_role: "被丢弃的新身份", scene: { location: "飞艇" } },
+  ]) {
+    assert.equal(normalizeGenesisChatResponse({ reply: "提案已更新。", phase: "proposing", draftPatch }, BASE_DRAFT), null);
+  }
+});
+
+test("proposing and ready require a usable draft rather than a bare success sentence", () => {
+  for (const phase of ["proposing", "ready"] as const) {
+    for (const draftPatch of [null, { scene: { location: "飞艇" } }]) {
+      assert.equal(normalizeGenesisChatResponse({ reply: "世界已成型。", phase, draftPatch }, null), null);
+    }
+    assert.ok(normalizeGenesisChatResponse({ reply: "保留这份提案。", phase, draftPatch: null }, BASE_DRAFT));
+  }
 });
 
 test("generateGenesisChatReply rejects an oversized draft before calling the model", async () => {
