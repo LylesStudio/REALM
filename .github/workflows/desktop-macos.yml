@@ -29,7 +29,6 @@ jobs:
     timeout-minutes: 90
     env:
       ARCH_TAG: ${{ matrix.arch_tag }}
-      OUTPUT_DIR: ${{ runner.temp }}/realm-artifacts
 
     steps:
       - name: Check out repository
@@ -45,7 +44,7 @@ jobs:
         run: |
           bash scripts/desktop/package-macos.sh \
             --arch "$ARCH_TAG" \
-            --output "$OUTPUT_DIR"
+            --output "$RUNNER_TEMP/realm-artifacts"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
