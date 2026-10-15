@@ -20,7 +20,9 @@ import {
 } from "./first-night.ts";
 import { genesisDraftFromResolvedContent } from "./preset-worlds.ts";
 import {
+  GENESIS_CREATION_REQUEST_ID,
   genesisBindingFromDraft,
+  genesisDraftFingerprint,
   normalizeGenesisLanguage,
   type GenesisLanguage,
   type WorldGenesisDraft,
@@ -47,7 +49,7 @@ import {
 import type { RealmWorldRuntimeInstantiationPlan } from "../world-transfer/realmworld-runtime-content.ts";
 import {
   cloneGoalInstancesForBranch,
-  enqueueGoalAssessmentJobsForCommittedEvents,
+  reconcileGoalAssessmentJobsForCommittedEvents,
   lockGoalInstancesForBranch,
   materializeGoalInstances,
   type GoalMaterializationDeclaration,
@@ -244,7 +246,13 @@ export interface LibraryService {
   createGenesis(
     scope: LibraryScope,
     draft: WorldGenesisDraft,
+    options?: { creationRequestId?: string },
   ): Promise<{ worldId: string; storyId: string; recordId: string }>;
+  /** 创世请求回读。没有行表示该 id 尚未提交。 */
+  readGenesisCreation(
+    scope: LibraryScope,
+    creationRequestId: string,
+  ): Promise<{ worldId: string; storyId: string; recordId: string } | null>;
   /**
    * 内容驱动的 genesis 入口（内容解析层 §2.2/§6）：按 WorldBinding +
    * contentKey + language 经注入的 ContentResolver 解析完整创世内容，
@@ -300,7 +308,8 @@ export class LibraryServiceError extends Error {
     | "INVALID_FORK"
     | "BRANCH_GOAL_STATE_UNAVAILABLE"
     | "REALMWORLD_INSTANCE_CONFLICT"
-    | "REALMWORLD_IDENTITY_CONFLICT";
+    | "REALMWORLD_IDENTITY_CONFLICT"
+    | "GENESIS_REQUEST_CONFLICT";
 
   constructor(
     code:
@@ -319,7 +328,8 @@ export class LibraryServiceError extends Error {
       | "INVALID_FORK"
       | "BRANCH_GOAL_STATE_UNAVAILABLE"
       | "REALMWORLD_INSTANCE_CONFLICT"
-      | "REALMWORLD_IDENTITY_CONFLICT",
+      | "REALMWORLD_IDENTITY_CONFLICT"
+      | "GENESIS_REQUEST_CONFLICT",
     message: string,
   ) {
     super(message);
@@ -399,6 +409,102 @@ const VISIBLE_WORLDLINE_RULE = `(
         AND record_check.timeline_kind = 'primary'
     )
   )`;
+
+type GenesisCreationClaim =
+  | { kind: "replay"; worldId: string; storyId: string; recordId: string }
+  | { kind: "reserved"; worldId: string; storyId: string; recordId: string };
+
+function newGenesisTopologyId(prefix: string): string {
+  return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+}
+
+/**
+ * 在创世事务内占用请求行。已提交且指纹相同则重放；
+ * 指纹不同则冲突回滚；插入成功则使用行上预留的拓扑 id。
+ */
+async function claimGenesisCreation(
+  client: PoolClient,
+  scope: LibraryScope,
+  creationRequestId: string,
+  fingerprint: string,
+): Promise<GenesisCreationClaim> {
+  const worldId = newGenesisTopologyId("world");
+  const storyId = newGenesisTopologyId("story");
+  const recordId = newGenesisTopologyId("record");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const inserted = await client.query<{
+      world_id: string;
+      story_id: string;
+      record_id: string;
+    }>(
+      `INSERT INTO genesis_creation_requests (
+         workspace_id, principal_id, creation_request_id, draft_fingerprint,
+         state, world_id, story_id, record_id
+       ) VALUES ($1, $2, $3, $4, 'accepted', $5, $6, $7)
+       ON CONFLICT (workspace_id, principal_id, creation_request_id) DO NOTHING
+       RETURNING world_id, story_id, record_id`,
+      [
+        scope.workspaceId,
+        scope.principalId,
+        creationRequestId,
+        fingerprint,
+        worldId,
+        storyId,
+        recordId,
+      ],
+    );
+    const created = inserted.rows[0];
+    if (created) {
+      return {
+        kind: "reserved",
+        worldId: created.world_id,
+        storyId: created.story_id,
+        recordId: created.record_id,
+      };
+    }
+    const locked = await client.query<{
+      draft_fingerprint: string;
+      state: string;
+      world_id: string;
+      story_id: string;
+      record_id: string;
+    }>(
+      `SELECT draft_fingerprint, state, world_id, story_id, record_id
+       FROM genesis_creation_requests
+       WHERE workspace_id = $1
+         AND principal_id = $2
+         AND creation_request_id = $3
+       FOR UPDATE`,
+      [scope.workspaceId, scope.principalId, creationRequestId],
+    );
+    const row = locked.rows[0];
+    if (!row) continue;
+    if (row.draft_fingerprint !== fingerprint) {
+      throw new LibraryServiceError(
+        "GENESIS_REQUEST_CONFLICT",
+        "This creation request was already used for a different draft.",
+      );
+    }
+    if (row.state === "committed") {
+      return {
+        kind: "replay",
+        worldId: row.world_id,
+        storyId: row.story_id,
+        recordId: row.record_id,
+      };
+    }
+    return {
+      kind: "reserved",
+      worldId: row.world_id,
+      storyId: row.story_id,
+      recordId: row.record_id,
+    };
+  }
+  throw new LibraryServiceError(
+    "INVALID_COMMAND",
+    "Creation request could not be claimed.",
+  );
+}
 
 export function createPostgresLibraryService(
   database: WorkspaceDatabase,
@@ -1011,11 +1117,30 @@ export function createPostgresLibraryService(
       );
     },
 
-    async createGenesis(scope, draft) {
+    async createGenesis(scope, draft, options) {
+      const creationRequestId = options?.creationRequestId?.trim() ?? "";
+      if (creationRequestId && !GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) {
+        throw new LibraryServiceError("INVALID_COMMAND", "Creation request id is invalid.");
+      }
       return withWorkspaceTransaction(
         database,
         scope.workspaceId,
         async (client) => {
+          const claimed = creationRequestId
+            ? await claimGenesisCreation(
+              client,
+              scope,
+              creationRequestId,
+              genesisDraftFingerprint(draft),
+            )
+            : null;
+          if (claimed?.kind === "replay") {
+            return {
+              worldId: claimed.worldId,
+              storyId: claimed.storyId,
+              recordId: claimed.recordId,
+            };
+          }
           // Goal 声明在任何 topology 写入前校验（fail-closed）；事务
           // 回滚兜底零残留。
           const declaredGoals = validateGenesisGoalDeclarations(draft.goals);
@@ -1045,14 +1170,17 @@ export function createPostgresLibraryService(
               }
             }
           }
-          const worldId = draft.worldIdentity?.worldId
-            ?? `world_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+          const worldId = claimed?.worldId
+            ?? draft.worldIdentity?.worldId
+            ?? newGenesisTopologyId("world");
           const worldlineId = draft.runtimeIdentity?.worldlineId
-            ?? `worldline_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
-          const storyId = draft.runtimeIdentity?.storyId
-            ?? `story_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
-          const recordId = draft.runtimeIdentity?.recordId
-            ?? `record_${randomUUID().replaceAll("-", "").slice(0, 18)}`;
+            ?? newGenesisTopologyId("worldline");
+          const storyId = claimed?.storyId
+            ?? draft.runtimeIdentity?.storyId
+            ?? newGenesisTopologyId("story");
+          const recordId = claimed?.recordId
+            ?? draft.runtimeIdentity?.recordId
+            ?? newGenesisTopologyId("record");
           if (draft.runtimeIdentity) {
             const existing = await client.query<{
               world_id: string;
@@ -1236,9 +1364,11 @@ export function createPostgresLibraryService(
               summary: companion.summary,
             })),
             scene: {
+              ...(draft.scene.title ? { title: draft.scene.title } : {}),
               location: draft.scene.location,
               weather: draft.scene.weather,
               tension: draft.scene.tension,
+              ...(draft.scene.displayTime ? { displayTime: draft.scene.displayTime } : {}),
               objective: draft.scene.objective,
             },
             opening: draft.opening,
@@ -1264,7 +1394,7 @@ export function createPostgresLibraryService(
               recordId,
             };
             await materializeGoalInstances(client, goalScope, declaredGoals);
-            await enqueueGoalAssessmentJobsForCommittedEvents(client, {
+            await reconcileGoalAssessmentJobsForCommittedEvents(client, {
               ...goalScope,
               eventIds: [openingEventId],
             });
@@ -1280,8 +1410,46 @@ export function createPostgresLibraryService(
               JSON.stringify(firstNightContext),
             ],
           );
+          if (creationRequestId) {
+            await client.query(
+              `UPDATE genesis_creation_requests
+               SET state = 'committed', updated_at = CURRENT_TIMESTAMP
+               WHERE workspace_id = $1
+                 AND principal_id = $2
+                 AND creation_request_id = $3`,
+              [scope.workspaceId, scope.principalId, creationRequestId],
+            );
+          }
           return { worldId, storyId, recordId };
         },
+      );
+    },
+
+    async readGenesisCreation(scope, creationRequestId) {
+      if (!GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) return null;
+      return withWorkspaceTransaction(
+        database,
+        scope.workspaceId,
+        async (client) => {
+          const result = await client.query<{
+            world_id: string;
+            story_id: string;
+            record_id: string;
+          }>(
+            `SELECT world_id, story_id, record_id
+             FROM genesis_creation_requests
+             WHERE workspace_id = $1
+               AND principal_id = $2
+               AND creation_request_id = $3
+               AND state = 'committed'`,
+            [scope.workspaceId, scope.principalId, creationRequestId],
+          );
+          const row = result.rows[0];
+          return row
+            ? { worldId: row.world_id, storyId: row.story_id, recordId: row.record_id }
+            : null;
+        },
+        { readOnly: true },
       );
     },
 

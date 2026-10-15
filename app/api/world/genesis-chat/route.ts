@@ -7,8 +7,9 @@ import {
   truncateTranscript,
 } from "../../../../modules/application/genesis-chat.ts";
 import {
+  genesisPromptInputWithinBudget,
   normalizeGenesisLanguage,
-  type WorldGenesisDraft,
+  sanitizeUntrustedGenesisDraft,
 } from "../../../../modules/application/world-genesis.ts";
 import {
   resolveRequestPrincipal,
@@ -54,9 +55,18 @@ export async function POST(request: Request) {
       : "";
     const language = normalizeGenesisLanguage(parsed.language);
     const transcript = truncateTranscript(parsed.transcript);
-    const draft = isObject(parsed.draft)
-      ? (parsed.draft as Partial<WorldGenesisDraft>)
-      : null;
+    if (parsed.draft != null && !genesisPromptInputWithinBudget(parsed.draft)) {
+      console.warn("[realm] genesis chat rejected: draft over budget");
+      return Response.json(
+        {
+          ok: false as const,
+          error: { code: "INVALID_COMMAND", message: "Genesis chat draft exceeds the input budget." },
+        },
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    const sanitized = sanitizeUntrustedGenesisDraft(parsed.draft);
+    const draft = Object.keys(sanitized).length > 0 ? sanitized : null;
 
     try {
       const service = getModelSettingsService();

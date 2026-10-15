@@ -97,6 +97,38 @@ test("normalizeGenesisSuggestions fails closed on malformed payloads", () => {
   assert.equal(normalizeGenesisSuggestions("scene", { suggestions: [] }), null);
 });
 
+test("generateGenesisSuggestions ignores malformed context and refuses oversized context", async () => {
+  const ok = await generateGenesisSuggestions(
+    fakeGateway(JSON.stringify({ suggestions: ["雾桑"] })),
+    {
+      step: "world-name",
+      intent: "云上的港口",
+      context: { companions: "nope", scene: 4, goals: [{ goalKey: "secret-goal" }] },
+    },
+  );
+  assert.deepEqual(ok, ["雾桑"]);
+
+  let called = false;
+  const gateway: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat() {
+      called = true;
+      throw new Error("model must not run");
+    },
+  };
+  assert.equal(
+    await generateGenesisSuggestions(gateway, {
+      step: "era",
+      intent: "",
+      context: { world: { summary: "x".repeat(9_000) } },
+    }),
+    null,
+  );
+  assert.equal(called, false);
+});
+
 test("generateGenesisSuggestions returns null on every failure branch", async () => {
   const context = { world: { name: "云港志", era: "", summary: "" } };
 

@@ -60,6 +60,15 @@ function fakeService(initial: ProjectionEvent[]): FakeService {
     async submitMessage() {
       throw new Error("not used");
     },
+    async admitMessage() {
+      throw new Error("not used");
+    },
+    async runAdmittedTurn() {
+      return null;
+    },
+    async readTurnStatus() {
+      throw new Error("not used");
+    },
     async startSelfPlay() {
       throw new Error("not used");
     },

@@ -363,6 +363,8 @@ async function callModelJson<T>(options: {
   transport?: "chat" | "stream";
   stage?: string;
   signal?: AbortSignal;
+  /** 外层阶段已经打开的总时限。传入后本调用不再另开预算。 */
+  deadline?: StageDeadline;
   onChunk?: (content: string) => void;
   normalize: (body: Record<string, unknown>) => T | null;
 }): Promise<{ value: T; model: string; repaired: boolean } | null> {
@@ -376,7 +378,9 @@ async function callModelJson<T>(options: {
   const transport = options.transport ?? "chat";
   const startedAt = Date.now();
   // P1-7：一次逻辑调用（初次 + repair + transport 阶梯）共享一个总 deadline。
-  const deadline = createStageDeadline(options.timeoutMs, options.deadlineMs);
+  // 外层复核/旁白重试传入的 deadline 继续扣同一笔预算，不在每次 attempt 重开。
+  const deadline = options.deadline
+    ?? createStageDeadline(options.timeoutMs, options.deadlineMs);
   let providerAttempts = 0;
   // 用对象属性承接闭包内赋值（避免 CFA 把局部变量收窄为 never）。
   const observed: { response: Awaited<ReturnType<ModelGateway["chat"]>> | null } = {
@@ -1018,6 +1022,10 @@ async function reviewCandidateWithModel(
   // 硬门（权限/回执/预算/旁白权限），不再裸挂回合——确定性降级接受 +
   // 审计标记（不伪装成模型复核成功，不产生新增模型事实）。
   let vetoes = 0;
+  const reviewDeadline = createStageDeadline(
+    MODEL_STAGE_POLICIES.classifier.timeoutMs,
+    stageDeadlineMs,
+  );
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let body: Record<string, unknown>;
     try {
@@ -1054,7 +1062,7 @@ async function reviewCandidateWithModel(
         code: "DM_REVIEW_INVALID",
         temperature: attempt === 2 ? 0.4 : 0,
         ...MODEL_STAGE_POLICIES.classifier,
-        ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
+        deadline: reviewDeadline,
         ...(signal ? { signal } : {}),
         normalize: (value) =>
           typeof value.accepted === "boolean"
@@ -1501,6 +1509,10 @@ function createModelNarrator(
         ...activatedCharacters.map((character) => character.displayName),
         ...actionTransactions.map((transaction) => transaction.actor.displayName),
       ])];
+      const narratorDeadline = createStageDeadline(
+        MODEL_STAGE_POLICIES.previewNlg.timeoutMs,
+        stageDeadlineMs,
+      );
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const result = await callModelJson({
           getGateway,
@@ -1546,7 +1558,7 @@ function createModelNarrator(
           code: "NARRATOR_RESPONSE_INVALID",
           temperature: attempt === 0 ? 0.5 : 0.2,
           ...MODEL_STAGE_POLICIES.previewNlg,
-          ...(stageDeadlineMs !== undefined ? { deadlineMs: stageDeadlineMs } : {}),
+          deadline: narratorDeadline,
           ...(signal ? { signal } : {}),
           onChunk,
           normalize: (body) =>
@@ -1890,6 +1902,7 @@ async function chatWithStream(
           toolCalls: [],
           finishReason: "stop",
           usage: null,
+          delivery: "stream",
         };
       }
     }
@@ -1900,6 +1913,7 @@ async function chatWithStream(
   deadline?.throwIfExceeded();
   onProviderRequest?.();
   const response = await gateway.chat(scopedRequest());
+  if (!response.delivery) response.delivery = "buffered";
   if (!request.tools && !response.content.trim() && response.toolCalls.length === 0) {
     throw new RetryableTurnError(
       "MODEL_EMPTY_COMPLETION",

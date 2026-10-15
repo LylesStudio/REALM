@@ -76,6 +76,8 @@ test("2. 来源返回语义：library 来源收/回世界库；fallback 保留 s
   // 创建成功：复用既有 confirmWorldGenesis（/api/world/generate 语义不变），
   // 关闭 overlay；新 record 由组件 onOpenRecord 打开。
   assert.match(confirm, /confirmWorldGenesis\(draft\)/);
+  assert.match(realmClient, /creationRequestId/);
+  assert.match(realmClient, /\/api\/world\/generate\/status/);
   assert.match(confirm, /if \(recordId\) setCreationOverlay\(null\)/);
   // chat → guided fallback 保留来源并移交对谈上下文（turns/未发送文本/草案），
   // 不产生第二套 overlay 状态。

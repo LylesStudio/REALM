@@ -177,7 +177,7 @@ test("message route returns a safe stage diagnostic instead of collapsing every 
     attempt: 1,
   };
   const failingService = {
-    async submitMessage() {
+    async admitMessage() {
       throw new LocalRecordServiceError(
         "TURN_FAILED",
         "本轮在「内容生成」阶段未完成（CHARACTER_ACTION_INVALID）：角色行动没有通过结构化字段校验。",
@@ -524,10 +524,14 @@ test("GET and POST routes expose only the Application Service envelope", async (
   assert.equal(loaded.writeToken, "opaque-1");
 
   const first = await post(service, loaded.writeToken, "route-message");
-  assert.equal(first.status, 201);
+  assert.equal(first.status, 202);
+  const firstBody = await first.json() as { turnId: string; status: string };
+  assert.equal(typeof firstBody.turnId, "string");
   const duplicate = await post(service, loaded.writeToken, "route-message");
-  assert.equal(duplicate.status, 200);
-  const payload = await duplicate.text();
+  assert.equal(duplicate.status, 202);
+  const duplicateBody = await duplicate.json() as { turnId: string };
+  assert.equal(duplicateBody.turnId, firstBody.turnId);
+  const payload = JSON.stringify(duplicateBody);
   assert.equal(payload.includes("candidate"), false);
   assert.equal(payload.includes("contextManifest"), false);
 });
@@ -571,6 +575,9 @@ test("committed SSE replays only projected events and honors viewer-local cursor
       return event.ordinal > afterOrdinal ? [event] : [];
     },
     async authorizeRecordViewer() { return undefined; },
+    async admitMessage() { throw new Error("not used"); },
+    async runAdmittedTurn() { return null; },
+    async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
     },
@@ -632,6 +639,9 @@ test("SSE cancellation stops projection polling immediately", async () => {
       return [];
     },
     async authorizeRecordViewer() { return undefined; },
+    async admitMessage() { throw new Error("not used"); },
+    async runAdmittedTurn() { return null; },
+    async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
     },
@@ -667,6 +677,9 @@ test("SSE request abort stops projection polling", async () => {
       return [];
     },
     async authorizeRecordViewer() { return undefined; },
+    async admitMessage() { throw new Error("not used"); },
+    async runAdmittedTurn() { return null; },
+    async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
     },
@@ -704,6 +717,9 @@ test("SSE does not poll when the request was already aborted", async () => {
       return [];
     },
     async authorizeRecordViewer() { return undefined; },
+    async admitMessage() { throw new Error("not used"); },
+    async runAdmittedTurn() { return null; },
+    async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
     },

@@ -56,7 +56,9 @@ export async function handleCancelPost(
     if (!principalId) return unauthorizedResponse();
     // 未知 Record / 非成员 / 无 viewer projection → 404；未初始化 → 503。
     await service.authorizeRecordViewer(recordId, principalId);
-    const cancelled = service.cancelMessage(recordId, clientMessageId);
+    const cancelledLocally = service.cancelMessage(recordId, clientMessageId);
+    const cancelledDurably = await service.noteTurnCancelled?.(recordId, clientMessageId) ?? false;
+    const cancelled = cancelledLocally || cancelledDurably;
     return Response.json(
       { ok: true as const, cancelled },
       { status: cancelled ? 202 : 404 },

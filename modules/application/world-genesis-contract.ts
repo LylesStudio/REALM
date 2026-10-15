@@ -1,4 +1,8 @@
-import { normalizeWorldStyle, type WorldStyle } from "../style/world-style.ts";
+import {
+  WORLD_STYLE_KEYS,
+  normalizeWorldStyle,
+  type WorldStyle,
+} from "../style/world-style.ts";
 import type { WorldBinding } from "../world-transfer/realm-save.ts";
 
 /**
@@ -98,10 +102,18 @@ export const GENESIS_LIMITS = {
   companionName: 24,
   companionRole: 40,
   companionSummary: 120,
+  sceneTitle: 60,
   sceneField: 60,
+  displayTime: 60,
   objective: 120,
   opening: 300,
 } as const;
+
+/**
+ * 送进模型前的未信草稿/context JSON 上限。诚实草稿远小于此值；
+ * 超限在路由层拒绝，不启动模型调用。不含对谈 transcript。
+ */
+export const GENESIS_PROMPT_INPUT_MAX_CHARS = 8_000;
 
 function clamp(value: unknown, maxLength: number): string {
   if (typeof value !== "string") return "";
@@ -143,15 +155,9 @@ export function normalizeGenesisDraft(
   const name = clamp(world.name, GENESIS_LIMITS.worldName) || deriveWorldName(prompt);
   if (!name) return null;
 
-  const companions = (Array.isArray(source.companions) ? source.companions : [])
-    .map((item) => (isObject(item) ? item : {}))
-    .map((item) => ({
-      name: clamp(item.name, GENESIS_LIMITS.companionName),
-      role: clamp(item.role, GENESIS_LIMITS.companionRole),
-      summary: clamp(item.summary, GENESIS_LIMITS.companionSummary),
-    }))
-    .filter((item) => item.name.length > 0)
-    .slice(0, MAX_COMPANIONS);
+  const companions = clampCompanions(source.companions);
+  const sceneTitle = clamp(scene.title, GENESIS_LIMITS.sceneTitle);
+  const sceneDisplayTime = clamp(scene.displayTime, GENESIS_LIMITS.displayTime);
 
   return {
     ...(normalizeGenesisLanguage(source.language)
@@ -175,12 +181,141 @@ export function normalizeGenesisDraft(
     playerRole: clamp(source.playerRole, GENESIS_LIMITS.playerRole),
     companions,
     scene: {
+      ...(sceneTitle ? { title: sceneTitle } : {}),
       location: clamp(scene.location, GENESIS_LIMITS.sceneField),
       weather: clamp(scene.weather, GENESIS_LIMITS.sceneField),
       tension: clamp(scene.tension, GENESIS_LIMITS.sceneField),
+      ...(sceneDisplayTime ? { displayTime: sceneDisplayTime } : {}),
       objective: clamp(scene.objective, GENESIS_LIMITS.objective),
     },
   };
+}
+
+function clampCompanions(value: unknown): WorldGenesisDraft["companions"] {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => (isObject(item) ? item : {}))
+    .map((item) => ({
+      name: clamp(item.name, GENESIS_LIMITS.companionName),
+      role: clamp(item.role, GENESIS_LIMITS.companionRole),
+      summary: clamp(item.summary, GENESIS_LIMITS.companionSummary),
+    }))
+    .filter((item) => item.name.length > 0)
+    .slice(0, MAX_COMPANIONS);
+}
+
+function knownStyle(value: unknown): WorldStyle | undefined {
+  return typeof value === "string"
+    && (WORLD_STYLE_KEYS as readonly string[]).includes(value)
+    ? value as WorldStyle
+    : undefined;
+}
+
+/** 未信 JSON 在进入 prompt 之前的体积闸门。无法序列化视为超限。 */
+export function genesisPromptInputWithinBudget(value: unknown): boolean {
+  if (value == null) return true;
+  try {
+    return JSON.stringify(value).length <= GENESIS_PROMPT_INPUT_MAX_CHARS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把客户端草稿收成 prompt 可用的有界 DTO。
+ * 不发明默认标题，不接收 goals / worldIdentity / runtimeIdentity，
+ * 错误形状（companions 不是数组、scene 不是对象）直接丢弃而不是抛错。
+ */
+export function sanitizeUntrustedGenesisDraft(value: unknown): Partial<WorldGenesisDraft> {
+  if (!isObject(value)) return {};
+  const result: Partial<WorldGenesisDraft> = {};
+  const language = normalizeGenesisLanguage(value.language);
+  if (language) result.language = language;
+
+  if (isObject(value.world)) {
+    const name = clamp(value.world.name, GENESIS_LIMITS.worldName);
+    const era = clamp(value.world.era, GENESIS_LIMITS.era);
+    const summary = clamp(value.world.summary, GENESIS_LIMITS.summary);
+    if (name || era || summary) result.world = { name, era, summary };
+  }
+  const style = knownStyle(value.style);
+  if (style) result.style = style;
+
+  if (isObject(value.story)) {
+    const title = clamp(value.story.title, GENESIS_LIMITS.storyTitle);
+    const premise = clamp(value.story.premise, GENESIS_LIMITS.premise);
+    if (title || premise) result.story = { title, premise };
+  }
+  if (isObject(value.record)) {
+    const title = clamp(value.record.title, GENESIS_LIMITS.recordTitle);
+    if (title) result.record = { title };
+  }
+  const playerRole = clamp(value.playerRole, GENESIS_LIMITS.playerRole);
+  if (playerRole) result.playerRole = playerRole;
+  if (value.playerStance === "observer" || value.playerStance === "player") {
+    result.playerStance = value.playerStance;
+  }
+  const opening = clamp(value.opening, GENESIS_LIMITS.opening);
+  if (opening) result.opening = opening;
+
+  const companions = clampCompanions(value.companions);
+  if (companions.length > 0) result.companions = companions;
+
+  if (isObject(value.scene)) {
+    const title = clamp(value.scene.title, GENESIS_LIMITS.sceneTitle);
+    const location = clamp(value.scene.location, GENESIS_LIMITS.sceneField);
+    const weather = clamp(value.scene.weather, GENESIS_LIMITS.sceneField);
+    const tension = clamp(value.scene.tension, GENESIS_LIMITS.sceneField);
+    const displayTime = clamp(value.scene.displayTime, GENESIS_LIMITS.displayTime);
+    const objective = clamp(value.scene.objective, GENESIS_LIMITS.objective);
+    if (title || location || weather || tension || displayTime || objective) {
+      result.scene = {
+        ...(title ? { title } : {}),
+        location,
+        weather,
+        tension,
+        ...(displayTime ? { displayTime } : {}),
+        objective,
+      };
+    }
+  }
+  return result;
+}
+
+/** 模型可见的已定稿视图。只含规整后的字段，供 describeDraft / describeContext 共用。 */
+export function settledGenesisView(value: unknown): Record<string, unknown> | null {
+  const draft = sanitizeUntrustedGenesisDraft(value);
+  const view: Record<string, unknown> = {};
+  if (draft.language) view.language = draft.language;
+  if (draft.world?.name) view.world = draft.world.name;
+  if (draft.world?.era) view.era = draft.world.era;
+  if (draft.world?.summary) view.summary = draft.world.summary;
+  if (draft.style && draft.style !== "modern") view.style = draft.style;
+  if (draft.story?.title) {
+    view.openingStory = draft.story.title;
+    if (draft.story.premise) view.premise = draft.story.premise;
+  }
+  if (draft.record?.title) view.recordTitle = draft.record.title;
+  if (draft.playerRole) view.playerRole = draft.playerRole;
+  if (draft.playerStance === "observer") {
+    view.playerStance = "observer (the player does not play a character)";
+  }
+  if (draft.opening) view.opening = draft.opening;
+  if (draft.companions?.length) {
+    view.companions = draft.companions.map((item) => ({
+      name: item.name,
+      ...(item.role ? { role: item.role } : {}),
+      ...(item.summary ? { summary: item.summary } : {}),
+    }));
+  }
+  const scene: Record<string, string> = {};
+  if (draft.scene?.title) scene.title = draft.scene.title;
+  if (draft.scene?.location) scene.location = draft.scene.location;
+  if (draft.scene?.weather) scene.weather = draft.scene.weather;
+  if (draft.scene?.tension) scene.tension = draft.scene.tension;
+  if (draft.scene?.displayTime) scene.displayTime = draft.scene.displayTime;
+  if (draft.scene?.objective) scene.objective = draft.scene.objective;
+  if (Object.keys(scene).length > 0) view.scene = scene;
+  return Object.keys(view).length > 0 ? view : null;
 }
 
 /** 模型不可用时的确定性本地生成：只从灵感原文提炼，不虚构阵容。 */

@@ -7,6 +7,10 @@ import {
   isGuidedGenesisStep,
 } from "../../../../modules/application/genesis-suggestions.ts";
 import {
+  genesisPromptInputWithinBudget,
+  sanitizeUntrustedGenesisDraft,
+} from "../../../../modules/application/world-genesis-contract.ts";
+import {
   resolveRequestPrincipal,
   unauthorizedResponse,
 } from "../../auth-context.ts";
@@ -56,14 +60,24 @@ export async function handleSuggestPost(
     const intent = typeof parsed.intent === "string"
       ? parsed.intent.trim().slice(0, MAX_INTENT_LENGTH)
       : "";
-    const context = isObject(parsed.context) ? parsed.context : {};
+    if (parsed.context != null && !genesisPromptInputWithinBudget(parsed.context)) {
+      console.warn("[realm] genesis suggestion rejected: context over budget");
+      return Response.json(
+        {
+          ok: false as const,
+          error: { code: "INVALID_COMMAND", message: "Suggestion context exceeds the input budget." },
+        },
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    const context = sanitizeUntrustedGenesisDraft(parsed.context);
 
     try {
       const gateway = options.gateway ?? await getModelSettingsService().gateway();
       const suggestions = await generateGenesisSuggestions(gateway, {
         step: parsed.step,
         intent,
-        context: context as Record<string, never>,
+        context,
       });
       if (!suggestions) {
         return Response.json(

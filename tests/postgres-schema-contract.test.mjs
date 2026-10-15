@@ -62,6 +62,15 @@ const migrationPaths = [
   "../database/postgres/migrations/0057_realmworld_record_binding.sql",
   "../database/postgres/migrations/0058_durable_job_queue.sql",
   "../database/postgres/migrations/0059_world_commands.sql",
+  "../database/postgres/migrations/0060_goal_scope_terminal_lifecycle.sql",
+  "../database/postgres/migrations/0061_story_graph_runtime.sql",
+  "../database/postgres/migrations/0062_project_finance_foundation.sql",
+  "../database/postgres/migrations/0063_genesis_creation_requests.sql",
+  "../database/postgres/migrations/0064_record_turn_jobs.sql",
+  "../database/postgres/migrations/0065_funding_obligations.sql",
+  "../database/postgres/migrations/0066_committed_fact_commands.sql",
+  "../database/postgres/migrations/0067_member_relationship_revisions.sql",
+  "../database/postgres/migrations/0068_inventory_grant_command.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
@@ -141,6 +150,22 @@ const scopedTables = [
   "realm_durable_jobs",
   "world_command_groups",
   "world_command_records",
+  "genesis_creation_requests",
+  "turn_cancel_requests",
+  "story_node_instances",
+  "story_unlock_ledger",
+  "projects",
+  "project_milestones",
+  "project_story_links",
+  "budget_allocations",
+  "finance_accounts",
+  "ledger_entries",
+  "project_finance_command_groups",
+  "obligations",
+  "obligation_settlements",
+  "committed_fact_commands",
+  "performance_assessments",
+  "member_relationship_revisions",
 ];
 
 function canonical(value) {
@@ -313,6 +338,22 @@ test("forced row-level security denies unscoped workspace access", () => {
       "realm_durable_jobs",
       "world_command_groups",
       "world_command_records",
+      "genesis_creation_requests",
+      "turn_cancel_requests",
+      "story_node_instances",
+      "story_unlock_ledger",
+      "projects",
+      "project_milestones",
+      "project_story_links",
+      "budget_allocations",
+      "finance_accounts",
+      "ledger_entries",
+      "project_finance_command_groups",
+      "obligations",
+      "obligation_settlements",
+      "committed_fact_commands",
+      "performance_assessments",
+      "member_relationship_revisions",
     ].includes(tableName)) {
       assert.match(
         canonicalSql,
@@ -334,7 +375,30 @@ test("Goal runtime schema keeps definitions out of facts and evidence immutable"
   assert.match(instances, /state text not null/);
   assert.match(instances, /progress jsonb not null/);
   assert.match(instances, /outcome jsonb/);
-  assert.match(instances, /unique \(workspace_id, record_id, goal_key\)/);
+  // 0055 的 Record-only 唯一键在 0060 中被 scope 感知唯一索引取代
+  // （重试 attempt 需要同 goal_key 多行；CREATE TABLE 原文保持不动，
+  // DROP 在 0060 的 ALTER 中）。
+  assert.match(
+    canonicalSql,
+    /drop constraint if exists goal_instances_workspace_id_record_id_goal_key_key/,
+  );
+  // B1：scope_kind 判别位 + nullable 锚恰好一个 + attempt/supersedes。
+  assert.match(
+    canonicalSql,
+    /check \(scope_kind in \('record', 'story', 'worldline'\)\)/,
+  );
+  assert.match(canonicalSql, /alter table goal_instances alter column record_id drop not null/);
+  assert.match(canonicalSql, /add column if not exists scope_kind text not null default 'record'/);
+  assert.match(canonicalSql, /add column if not exists story_id text/);
+  assert.match(canonicalSql, /add column if not exists attempt integer not null default 1/);
+  assert.match(canonicalSql, /add column if not exists supersedes_instance_id text/);
+  assert.match(canonicalSql, /create unique index if not exists goal_instances_scope_goal_attempt_key/);
+  assert.match(canonicalSql, /create unique index if not exists goal_instances_scope_single_active_key/);
+  assert.match(canonicalSql, /where state = 'active'/);
+  // 终态不可变触发器 + 四态 CHECK 不变。
+  assert.match(canonicalSql, /create trigger goal_instances_terminal_immutable_guard/);
+  assert.match(canonicalSql, /terminal goal instances are immutable/);
+  assert.match(canonicalSql, /check \(state in \('active', 'completed', 'failed', 'settled'\)\)/);
 
   const assessments = tableBody("goal_assessments");
   assert.match(assessments, /evidence_event_ids text\[\] not null/);
@@ -355,6 +419,28 @@ test("Goal runtime schema keeps definitions out of facts and evidence immutable"
   assert.match(canonicalSql, /grant select, insert, update on goal_assessment_jobs to realm_runtime/);
 });
 
+test("Story Graph runtime keeps unlock evidence append-only and Record binding atomic", () => {
+  const nodes = tableBody("story_node_instances");
+  assert.match(nodes, /state text not null default 'locked'/);
+  assert.match(nodes, /record_id text/);
+  assert.match(nodes, /definition_hash text not null/);
+  assert.match(nodes, /unlock_evidence_event_ids text\[\] not null/);
+  assert.match(nodes, /unique \(workspace_id, world_id, worldline_id, story_id, node_key\)/);
+  assert.match(canonicalSql, /create unique index if not exists records_story_node_identity_key/);
+  assert.match(canonicalSql, /create unique index if not exists story_node_instances_scope_identity_key/);
+  assert.match(canonicalSql, /story_node_instances_record_fk/);
+  assert.match(canonicalSql, /story_node_instances_state_shape_check/);
+
+  const ledger = tableBody("story_unlock_ledger");
+  assert.match(ledger, /transition text not null/);
+  assert.match(ledger, /idempotency_key text not null/);
+  assert.match(ledger, /unique \(workspace_id, idempotency_key\)/);
+  assert.match(canonicalSql, /create trigger story_unlock_ledger_append_only_guard/);
+  assert.match(canonicalSql, /story unlock ledger is immutable/);
+  assert.match(canonicalSql, /grant select, insert on story_unlock_ledger to realm_runtime/);
+  assert.match(canonicalSql, /grant select, insert, update on story_node_instances to realm_runtime/);
+});
+
 test("action state is durable, scoped, atomic and least-privilege", () => {
   const receipts = tableBody("action_receipts");
   assert.match(receipts, /source_event_id text not null/);
@@ -373,6 +459,51 @@ test("action state is durable, scoped, atomic and least-privilege", () => {
   assert.match(canonicalSql, /character_effects_one_active_idx/);
   assert.match(canonicalSql, /grant update \(quantity, revision, updated_at\) on character_assets to realm_runtime/);
   assert.doesNotMatch(canonicalSql, /grant delete on action_receipts to realm_runtime/);
+});
+
+test("Project and Finance facts are scoped, integer-valued, append-only where required, and excluded from realm packs", () => {
+  for (const tableName of [
+    "projects",
+    "project_milestones",
+    "project_story_links",
+    "budget_allocations",
+    "finance_accounts",
+    "ledger_entries",
+    "project_finance_command_groups",
+  ]) {
+    const body = tableBody(tableName);
+    assert.match(body, /workspace_id text not null/);
+    assert.match(body, /world_id text not null/);
+    assert.match(body, /worldline_id text not null/);
+    assert.match(body, /primary key \(workspace_id, id\)/);
+    assert.match(body, /foreign key \(workspace_id\) references workspaces \(id\)/);
+  }
+  assert.match(canonicalSql, /'project\.created'/);
+  assert.match(canonicalSql, /'finance\.adjustment\.recorded'/);
+  assert.match(canonicalSql, /amount_minor bigint not null/);
+  assert.match(canonicalSql, /ledger_entries_kind_direction_check/);
+  assert.match(canonicalSql, /create trigger ledger_entries_append_only_guard/);
+  assert.match(canonicalSql, /ledger entries are immutable/);
+  assert.match(canonicalSql, /grant select, insert on ledger_entries to realm_runtime/);
+  assert.doesNotMatch(canonicalSql, /grant update(?:\s*\([^;]*\))?\s+on ledger_entries to realm_runtime/);
+  assert.doesNotMatch(canonicalSql, /grant [^;]*delete[^;]*on ledger_entries to realm_runtime/);
+  assert.match(canonicalSql, /performance assessments record a score and evidence hash/);
+  assert.match(canonicalSql, /create trigger performance_assessments_append_only_guard/);
+  assert.match(canonicalSql, /create trigger member_relationship_revisions_append_only_guard/);
+  assert.doesNotMatch(canonicalSql, /grant update(?:\s*\([^;]*\))?\s+on member_relationship_revisions to realm_runtime/);
+  assert.match(canonicalSql, /grant select, insert on member_relationship_revisions to realm_runtime/);
+  assert.match(canonicalSql, /grant update \(state, result_manifest, rejection_code, updated_at, completed_at\)\s+on project_finance_command_groups to realm_runtime/);
+  for (const tableName of [
+    "projects",
+    "project_milestones",
+    "project_story_links",
+    "budget_allocations",
+    "finance_accounts",
+    "ledger_entries",
+    "project_finance_command_groups",
+  ]) {
+    assert.match(canonicalSql, new RegExp(`alter table ${tableName} force row level security`));
+  }
 });
 
 test("world and Record ordering use explicit cursors rather than display time", () => {

@@ -34,7 +34,10 @@ function instance(overrides: Partial<GoalProjectionInstance> = {}): GoalProjecti
 test("visible active Goal projection exposes runtime state without terminal outcome", () => {
   assert.deepEqual(projectGoal({ definition, instance: instance() }), {
     goalKey: "harbor.signal",
+    scopeKind: "record",
     state: "active",
+    attempt: 1,
+    supersedesInstanceId: null,
     progress: { signals: 1 },
     outcome: null,
   });
@@ -50,8 +53,31 @@ test("terminal Goal projection uses content outcome and ignores private runtime 
     }),
   }), {
     goalKey: "harbor.signal",
+    scopeKind: "record",
     state: "completed",
+    attempt: 1,
+    supersedesInstanceId: null,
     progress: { signals: 2 },
+    outcome: { title: "Signal received", public: true },
+  });
+});
+
+test("projection carries scope kind, attempt and supersedes identity for retried attempts", () => {
+  assert.deepEqual(projectGoal({
+    definition,
+    instance: instance({
+      state: "failed",
+      attempt: 2,
+      supersedesInstanceId: "goal_previous",
+      scopeKind: "record",
+    }),
+  }), {
+    goalKey: "harbor.signal",
+    scopeKind: "record",
+    state: "failed",
+    attempt: 2,
+    supersedesInstanceId: "goal_previous",
+    progress: { signals: 1 },
     outcome: { title: "Signal received", public: true },
   });
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   evaluateDeterministicGoal,
+  goalEvidenceSnapshotHash,
   type GoalDefinition,
   type GoalEvent,
   type GoalInstanceSnapshot,
@@ -151,4 +152,160 @@ test("evidence snapshot hashes are stable for the same ordered facts", () => {
   });
 
   assert.equal(first.evidenceSnapshotHash, second.evidenceSnapshotHash);
+});
+
+const failableDefinition: GoalDefinition = {
+  ...definition,
+  rubric: {
+    kind: "event_count",
+    eventKind: "clue.revealed",
+    progressKey: "clues",
+    threshold: 2,
+    failure: {
+      eventKind: "signal.lost",
+      progressKey: "losses",
+      threshold: 1,
+    },
+  },
+};
+
+function failureEvent(
+  eventId: string,
+  recordVersion: number,
+  ordinal: number,
+): GoalEvent {
+  return {
+    eventId,
+    recordId: "record-1",
+    recordVersion,
+    ordinal,
+    kind: "signal.lost",
+    payload: { reason: eventId },
+  };
+}
+
+test("deterministic failure condition transitions the Goal to failed with failure evidence", () => {
+  const result = evaluateDeterministicGoal({
+    definition: failableDefinition,
+    instance,
+    events: [event("event-1", 1, 0), failureEvent("event-2", 2, 1)],
+  });
+
+  assert.equal(result.kind, "transition");
+  if (result.kind !== "transition") return;
+  assert.equal(result.transition.from, "active");
+  assert.equal(result.transition.to, "failed");
+  assert.equal(result.transition.revision, 1);
+  assert.deepEqual(result.transition.evidenceEventIds, ["event-2"]);
+  assert.deepEqual(result.transition.evidenceHead, { recordVersion: 2, ordinal: 1 });
+  assert.deepEqual(result.transition.progress, { clues: 1, losses: 1 });
+  assert.equal(result.transition.outcome, failableDefinition.outcome);
+  // 失败证据 hash 由失败事件集确定性派生（与完成事件集无关）。
+  assert.equal(
+    result.transition.evidenceSnapshotHash,
+    goalEvidenceSnapshotHash({
+      definition: failableDefinition,
+      instance,
+      events: [failureEvent("event-2", 2, 1)],
+      evidenceHead: { recordVersion: 2, ordinal: 1 },
+    }),
+  );
+});
+
+test("failure below its threshold keeps the Goal active and still reports failure progress", () => {
+  const belowFailure = evaluateDeterministicGoal({
+    definition: {
+      ...failableDefinition,
+      rubric: {
+        kind: "event_count",
+        eventKind: "clue.revealed",
+        progressKey: "clues",
+        threshold: 2,
+        failure: { eventKind: "signal.lost", progressKey: "losses", threshold: 2 },
+      },
+    },
+    instance,
+    events: [failureEvent("event-9", 1, 0)],
+  });
+  assert.equal(belowFailure.kind, "unchanged");
+  assert.deepEqual(belowFailure.progress, { clues: 0, losses: 1 });
+
+  // 完成条件先满足时仍走 completed（失败条件未达阈值）。
+  const completedFirst = evaluateDeterministicGoal({
+    definition: {
+      ...failableDefinition,
+      rubric: {
+        kind: "event_count",
+        eventKind: "clue.revealed",
+        progressKey: "clues",
+        threshold: 2,
+        failure: { eventKind: "signal.lost", progressKey: "losses", threshold: 3 },
+      },
+    },
+    instance,
+    events: [event("event-1", 1, 0), event("event-2", 2, 1), failureEvent("event-3", 3, 2)],
+  });
+  assert.equal(completedFirst.kind, "transition");
+  if (completedFirst.kind !== "transition") return;
+  assert.equal(completedFirst.transition.to, "completed");
+});
+
+test("terminals allow-list gates deterministic terminals fail-closed", () => {
+  // 内容声明失败条件但不允许 failed 终态 → invalid，绝不静默改终态。
+  const failureDisallowed = evaluateDeterministicGoal({
+    definition: { ...failableDefinition, terminals: ["completed", "settled"] },
+    instance,
+    events: [failureEvent("event-2", 2, 1)],
+  });
+  assert.equal(failureDisallowed.kind, "invalid");
+
+  // 完成条件满足但 completed 不在允许终态内 → invalid。
+  const completionDisallowed = evaluateDeterministicGoal({
+    definition: { ...definition, terminals: ["failed", "settled"] },
+    instance,
+    events: [event("event-1", 1, 0), event("event-2", 2, 1)],
+  });
+  assert.equal(completionDisallowed.kind, "invalid");
+
+  // 非法 terminals 声明本身即 invalid。
+  const malformed = evaluateDeterministicGoal({
+    definition: { ...definition, terminals: [] },
+    instance,
+    events: [event("event-1", 1, 0), event("event-2", 2, 1)],
+  });
+  assert.equal(malformed.kind, "invalid");
+});
+
+test("malformed failure rubric shapes fail closed", () => {
+  const malformedThreshold = evaluateDeterministicGoal({
+    definition: {
+      ...definition,
+      rubric: {
+        kind: "event_count",
+        eventKind: "clue.revealed",
+        progressKey: "clues",
+        threshold: 2,
+        failure: { eventKind: "signal.lost", progressKey: "losses", threshold: 0 },
+      },
+    },
+    instance,
+    events: [failureEvent("event-2", 2, 1)],
+  });
+  assert.equal(malformedThreshold.kind, "invalid");
+
+  const sameKind = evaluateDeterministicGoal({
+    definition: {
+      ...definition,
+      rubric: {
+        kind: "event_count",
+        eventKind: "clue.revealed",
+        progressKey: "clues",
+        threshold: 2,
+        failure: { eventKind: "clue.revealed", progressKey: "losses", threshold: 1 },
+      },
+    },
+    instance,
+    events: [event("event-1", 1, 0), event("event-2", 2, 1)],
+  });
+  assert.equal(sameKind.kind, "invalid");
 });

@@ -336,6 +336,18 @@ test("invalid decision enums and unknown fields fail closed", async () => {
   }
 });
 
+test("fail and settle decisions are valid structured Judge output", async () => {
+  for (const decision of ["fail", "settle"] as const) {
+    const { candidate } = await assessWith(async () => ({
+      content: JSON.stringify(validModelOutput({ decision })),
+    }));
+    assert.equal(candidate.decision, decision);
+    // policyVersion 与 evidenceSnapshotHash 仍由引擎注入，模型不可覆盖。
+    assert.equal(candidate.policyVersion, semanticDefinition.policyVersion);
+    assert.notEqual(candidate.evidenceSnapshotHash, "");
+  }
+});
+
 test("empty, duplicated, wrong-typed or invented evidence ids fail closed", async () => {
   for (const evidenceEventIds of [
     [],

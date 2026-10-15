@@ -4,7 +4,10 @@ import {
   type GenesisChatPhase,
   type GenesisChatTurn,
 } from "../../modules/application/genesis-chat-contract.ts";
-import type { WorldGenesisDraft } from "../../modules/application/world-genesis-contract.ts";
+import {
+  GENESIS_LIMITS,
+  type WorldGenesisDraft,
+} from "../../modules/application/world-genesis-contract.ts";
 import {
   WORLD_STYLE_KEYS,
   worldStyleText,
@@ -426,6 +429,16 @@ export function GuidedGenesisChat({
                 <span>{uiText("ui.genesisChat.field.scene", uiLanguage)}</span>
                 <div className="scene-grid">
                   <input
+                    maxLength={GENESIS_LIMITS.sceneTitle}
+                    onChange={(event) =>
+                      patchDraft((current) => ({
+                        ...current,
+                        scene: { ...current.scene, title: event.target.value },
+                      }))}
+                    placeholder={uiText("ui.genesisChat.ph.sceneTitle", uiLanguage)}
+                    value={draft.scene.title ?? ""}
+                  />
+                  <input
                     maxLength={60}
                     onChange={(event) =>
                       patchDraft((current) => ({
@@ -454,6 +467,16 @@ export function GuidedGenesisChat({
                       }))}
                     placeholder={uiText("ui.genesisChat.ph.tension", uiLanguage)}
                     value={draft.scene.tension}
+                  />
+                  <input
+                    maxLength={GENESIS_LIMITS.displayTime}
+                    onChange={(event) =>
+                      patchDraft((current) => ({
+                        ...current,
+                        scene: { ...current.scene, displayTime: event.target.value },
+                      }))}
+                    placeholder={uiText("ui.genesisChat.ph.displayTime", uiLanguage)}
+                    value={draft.scene.displayTime ?? ""}
                   />
                   <input
                     maxLength={120}

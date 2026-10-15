@@ -5,7 +5,10 @@ import type { GoalProjection } from "../modules/goals/projection.ts";
 
 const active: GoalProjection = {
   goalKey: "harbor.signal",
+  scopeKind: "record",
   state: "active",
+  attempt: 1,
+  supersedesInstanceId: null,
   progress: { signals: 1 },
   outcome: null,
 };

@@ -316,6 +316,15 @@ export interface CharacterRunner {
   }): Promise<SemanticOutputDraft>;
 }
 
+export interface DraftProgress {
+  ordinal: number;
+  intents?: CharacterIntent[];
+  actionTransactions?: ActionTransaction[];
+  narrationDone?: boolean;
+  narration?: SemanticOutputDraft | null;
+  characterResponses?: SemanticOutputDraft[];
+}
+
 export interface M2TurnOrchestrator {
   plan(input: {
     turnId: string;
@@ -331,6 +340,9 @@ export interface M2TurnOrchestrator {
     plan: M2TurnPlan;
     /** Batch 2D：本地取消信号（可选，向后兼容）。 */
     signal?: AbortSignal;
+    /** 已完成的起草子阶段。重试时跳过这些调用。 */
+    progress?: DraftProgress;
+    onProgress?: (progress: DraftProgress) => Promise<void>;
   }): Promise<M2TurnCandidate>;
   validate(input: {
     plan: M2TurnPlan;
@@ -372,7 +384,11 @@ export function createLocalM2TurnOrchestrator(options: {
     },
 
     async draft(input) {
-      const intents = await Promise.all(
+      const saved = input.progress;
+      const remember = async (progress: DraftProgress) => {
+        await input.onProgress?.(progress);
+      };
+      const intents = saved?.intents ?? await Promise.all(
         input.plan.activatedCharacters.map((character) =>
           characterRunner.propose({
             turnId: input.turnId,
@@ -383,36 +399,77 @@ export function createLocalM2TurnOrchestrator(options: {
           })
         ),
       );
-      const approved = await dm.approveActions({
-        plan: input.plan,
-        intents,
-      });
-      const actionTransactions: ActionTransaction[] = [];
-      if (input.plan.playerAction) {
-        actionTransactions.push(await actionResolver.resolve(input.plan.playerAction));
-      }
-      for (const action of approved) {
-        actionTransactions.push(await actionResolver.resolve(action));
+      if (!saved?.intents) await remember({ ordinal: 1, intents });
+      const approved = saved?.actionTransactions
+        ? []
+        : await dm.approveActions({ plan: input.plan, intents });
+      const actionTransactions: ActionTransaction[] = saved?.actionTransactions
+        ? [...saved.actionTransactions]
+        : [];
+      if (!saved?.actionTransactions) {
+        if (input.plan.playerAction) {
+          actionTransactions.push(await actionResolver.resolve(input.plan.playerAction));
+        }
+        for (const action of approved) {
+          actionTransactions.push(await actionResolver.resolve(action));
+        }
+        await remember({ ordinal: 2, intents, actionTransactions });
       }
 
-      const narration = input.plan.narratorEnabled
-        ? await narrator.narrate({
-            playerText: input.playerText,
+      const narration = saved?.narrationDone
+        ? (saved.narration ?? null)
+        : input.plan.narratorEnabled
+          ? await narrator.narrate({
+              playerText: input.playerText,
+              actionTransactions,
+              activatedCharacters: input.plan.activatedCharacters,
+              ...(input.signal ? { signal: input.signal } : {}),
+            })
+          : null;
+      if (!saved?.narrationDone) {
+        await remember({ ordinal: 3, intents, actionTransactions, narrationDone: true, narration });
+      }
+      const doneResponses = new Map(
+        (saved?.characterResponses ?? []).map((response) => [response.characterInstanceId, response]),
+      );
+      // 角色反应属于同一阶段，必须并行启动；但每个完成结果仍要顺序写入
+      // checkpoint，保证其中一路失败时其它已完成反应可以在恢复时跳过重算。
+      const responseSlots: Array<SemanticOutputDraft | undefined> =
+        input.plan.activatedCharacters.map((character) => doneResponses.get(character.characterInstanceId));
+      let checkpointChain = Promise.resolve();
+      const reactionTasks = input.plan.activatedCharacters.map(async (character, index) => {
+        const existing = responseSlots[index];
+        if (existing) return existing;
+        const response = await characterRunner.react({
+          playerText: input.playerText,
+          character,
+          actionTransactions,
+          ...(input.plan.presence ? { presence: input.plan.presence } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        responseSlots[index] = response;
+        checkpointChain = checkpointChain.then(async () => {
+          await remember({
+            ordinal: 4,
+            intents,
             actionTransactions,
-            activatedCharacters: input.plan.activatedCharacters,
-            ...(input.signal ? { signal: input.signal } : {}),
-          })
-        : null;
-      const characterResponses = await Promise.all(
-        input.plan.activatedCharacters.map((character) =>
-          characterRunner.react({
-            playerText: input.playerText,
-            character,
-            actionTransactions,
-            ...(input.plan.presence ? { presence: input.plan.presence } : {}),
-            ...(input.signal ? { signal: input.signal } : {}),
-          })
-        ),
+            narrationDone: true,
+            narration,
+            characterResponses: responseSlots.filter(
+              (candidate): candidate is SemanticOutputDraft => candidate !== undefined,
+            ),
+          });
+        });
+        return response;
+      });
+      const reactionResults = await Promise.allSettled(reactionTasks);
+      await checkpointChain;
+      const failedReaction = reactionResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failedReaction) throw failedReaction.reason;
+      const characterResponses = responseSlots.filter(
+        (response): response is SemanticOutputDraft => response !== undefined,
       );
       // 提案随回合一次产出：旁白结构化输出附带，fail-closed 规整后
       // 并入候选（经运行时 checkpoint 持久化，release 后随信封返回前端）。

@@ -4178,6 +4178,31 @@ button:disabled {
   border-color: var(--accent);
 }
 
+.guided-companion-editor .companion-row input {
+  background: var(--paper-soft);
+  border: 1px solid var(--line-dark);
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.guided-structured label {
+  display: grid;
+  gap: 4px;
+}
+
+.guided-structured label > span {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.guided-structured input.guided-input {
+  resize: none;
+}
+
 .guided-actions {
   display: flex;
   gap: 10px;

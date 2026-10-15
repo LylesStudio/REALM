@@ -5,8 +5,11 @@ import {
 import {
   goalAssessmentJobIdFor,
   goalInstanceIdFor,
+  goalScopeKind,
   type GoalState,
+  type GoalScope,
   type GoalRuntimeScope,
+  type GoalStoryScope,
 } from "../../modules/goals/public.ts";
 
 /**
@@ -49,6 +52,8 @@ export interface GoalBranchCloneSource {
   outcome: unknown;
   policyVersion: string;
   completedAt: Date | null;
+  /** 源 attempt（int4；分支克隆保留 attempt，supersedes 不随分支复制）。 */
+  attempt: number;
 }
 
 /**
@@ -76,11 +81,12 @@ export async function lockGoalInstancesForBranch(
     outcome: unknown;
     policy_version: string;
     completed_at: Date | null;
+    attempt: number;
   }>(
     `SELECT goal_key, state, revision::text AS revision,
-            progress, outcome, policy_version, completed_at
+            progress, outcome, policy_version, completed_at, attempt
      FROM goal_instances
-     WHERE workspace_id = $1 AND record_id = $2
+     WHERE workspace_id = $1 AND record_id = $2 AND scope_kind = 'record'
      ORDER BY goal_key
      FOR UPDATE`,
     [workspaceId, sourceRecordId],
@@ -93,6 +99,7 @@ export async function lockGoalInstancesForBranch(
     outcome: row.outcome,
     policyVersion: row.policy_version,
     completedAt: row.completed_at,
+    attempt: row.attempt,
   }));
 }
 
@@ -119,12 +126,13 @@ export async function cloneGoalInstancesForBranch(
 ): Promise<readonly string[]> {
   const ids: string[] = [];
   for (const goal of goals) {
-    const id = goalInstanceIdFor(target, goal.goalKey);
+    const id = goalInstanceIdFor(target, goal.goalKey, goal.attempt);
     await client.query(
       `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version, completed_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12)`,
+         workspace_id, world_id, worldline_id, record_id, scope_kind, id,
+         goal_key, state, revision, progress, outcome, policy_version,
+         completed_at, attempt
+       ) VALUES ($1, $2, $3, $4, 'record', $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13)`,
       [
         target.workspaceId,
         target.worldId,
@@ -140,6 +148,7 @@ export async function cloneGoalInstancesForBranch(
           : JSON.stringify(goal.outcome),
         goal.policyVersion,
         goal.completedAt,
+        goal.attempt,
       ],
     );
     ids.push(id);
@@ -149,29 +158,43 @@ export async function cloneGoalInstancesForBranch(
 
 /**
  * 物化声明式 Goal 为 goal_instances 行（state='active'、revision=0、
- * progress='{}'、outcome=NULL）。调用方负责在事前校验声明合法性
- * （非空/去重）；此处使用无 ON CONFLICT 的 plain INSERT——任何冲突
- * （重复 goalKey、identity 碰撞、RLS/workspace 不符）都中止事务，
- * fail-closed 且零残留。返回物化的 instance id（顺序与输入一致）。
+ * progress='{}'、outcome=NULL、attempt=1）。scope 为判别联合
+ * （record | story | worldline）；Record scope 的 instance id 保持历史
+ * digest，story/worldline scope 使用域分隔的新 digest。调用方负责在事
+ * 前校验声明合法性（非空/去重）；此处使用无 ON CONFLICT 的 plain
+ * INSERT——任何冲突（重复 goalKey、scope 锚 CHECK、identity 碰撞、
+ * RLS/workspace 不符）都中止事务，fail-closed 且零残留。返回物化的
+ * instance id（顺序与输入一致）。
  */
 export async function materializeGoalInstances(
   client: PoolClient,
-  scope: GoalRuntimeScope,
+  scope: GoalScope,
   goals: readonly GoalMaterializationDeclaration[],
 ): Promise<readonly string[]> {
+  const scopeKind = goalScopeKind(scope);
+  const recordId = scopeKind === "record"
+    ? (scope as GoalRuntimeScope).recordId
+    : null;
+  const storyId = scopeKind === "story"
+    ? (scope as GoalStoryScope).storyId
+    : null;
   const ids: string[] = [];
   for (const goal of goals) {
     const id = goalInstanceIdFor(scope, goal.goalKey);
     await client.query(
       `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version
-       ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, '{}'::jsonb, NULL, $7)`,
+         workspace_id, world_id, worldline_id, record_id, story_id,
+         scope_kind, id, goal_key,
+         state, revision, progress, outcome, policy_version, attempt
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                 'active', 0, '{}'::jsonb, NULL, $9, 1)`,
       [
         scope.workspaceId,
         scope.worldId,
         scope.worldlineId,
-        scope.recordId,
+        recordId,
+        storyId,
+        scopeKind,
         id,
         goal.goalKey,
         goal.policyVersion,
@@ -182,9 +205,113 @@ export async function materializeGoalInstances(
   return ids;
 }
 
+export interface GoalRetryDeclaration extends GoalMaterializationDeclaration {
+  /** 内容声明的 retryable；未显式声明 retryable: true 时拒绝重试。 */
+  retryable?: boolean;
+}
+
 /**
- * 为本事务内已提交的正式事件 enqueue durable assessment job：对该 Record
- * 仍 active 的每个 Goal × 每条事件一行。
+ * 终态重试（B1）：为同 scope+goalKey 的最新终态实例开启新 attempt——
+ * 新确定性 instance id（goalInstanceIdFor(scope, goalKey, attempt)）、
+ * supersedes_instance_id 指向前序终态实例、state='active'、revision=0。
+ *
+ * - 终态绝不原地复活：旧实例行不被 UPDATE（0060 终态不可变触发器
+ *   兜底）；
+ * - 同 scope+goal_key 只能一个 active：旧实例仍 active 时抛
+ *   GOAL_RETRY_ACTIVE_EXISTS；partial unique index
+ *   goal_instances_scope_single_active_key 在并发下兜底；
+ * - 调用方必须在同一 workspace 事务内调用；任何冲突 fail-closed 中止
+ *   事务，零残留。
+ *
+ * 返回新 attempt 的 instance id。
+ */
+export async function retryGoalInstance(
+  client: PoolClient,
+  scope: GoalScope,
+  goal: GoalRetryDeclaration,
+): Promise<string> {
+  if (goal.retryable !== true) {
+    throw new GoalRuntimeRepositoryError(
+      "GOAL_RETRY_NOT_ALLOWED",
+      "Goal content does not allow retrying this terminal instance.",
+    );
+  }
+  const scopeKind = goalScopeKind(scope);
+  const scopeFilter = scopeKind === "record"
+    ? "scope_kind = 'record' AND record_id = $4"
+    : scopeKind === "story"
+      ? "scope_kind = 'story' AND story_id = $4"
+      : "scope_kind = 'worldline'";
+  const scopeParams: string[] = scopeKind === "worldline"
+    ? [scope.workspaceId, scope.worldId, scope.worldlineId]
+    : [
+        scope.workspaceId,
+        scope.worldId,
+        scope.worldlineId,
+        scopeKind === "story"
+          ? (scope as GoalStoryScope).storyId
+          : (scope as GoalRuntimeScope).recordId,
+      ];
+  const goalKeyParam = scopeParams.length + 1;
+  const previousResult = await client.query<{
+    id: string;
+    state: GoalState;
+    attempt: number;
+  }>(
+    `SELECT id, state, attempt
+     FROM goal_instances
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND ${scopeFilter}
+       AND goal_key = $${goalKeyParam}
+     ORDER BY attempt DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [...scopeParams, goal.goalKey],
+  );
+  const previous = previousResult.rows[0];
+  if (!previous) {
+    throw new GoalRuntimeRepositoryError(
+      "GOAL_RETRY_SOURCE_NOT_FOUND",
+      "Goal retry requires an existing terminal instance.",
+    );
+  }
+  if (previous.state === "active") {
+    throw new GoalRuntimeRepositoryError(
+      "GOAL_RETRY_ACTIVE_EXISTS",
+      "Goal retry is refused while an active attempt exists.",
+    );
+  }
+  const attempt = previous.attempt + 1;
+  const id = goalInstanceIdFor(scope, goal.goalKey, attempt);
+  await client.query(
+    `INSERT INTO goal_instances (
+       workspace_id, world_id, worldline_id, record_id, story_id,
+       scope_kind, id, goal_key,
+       state, revision, progress, outcome, policy_version,
+       attempt, supersedes_instance_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+               'active', 0, '{}'::jsonb, NULL, $9, $10, $11)`,
+    [
+      scope.workspaceId,
+      scope.worldId,
+      scope.worldlineId,
+      scopeKind === "record" ? (scope as GoalRuntimeScope).recordId : null,
+      scopeKind === "story" ? (scope as GoalStoryScope).storyId : null,
+      scopeKind,
+      id,
+      goal.goalKey,
+      goal.policyVersion,
+      attempt,
+      previous.id,
+    ],
+  );
+  return id;
+}
+
+/**
+ * 为本事务内已提交的正式事件 reconcile durable assessment jobs：只对该 Record
+ * 仍 active 的每个 Goal × 每条事件一行。terminal Goal 永不被重新打开、翻转或
+ * 重新排队；这条 active-only 边界就是 Goal runtime 的 reconcile 入口。
  *
  * - 作用域精确到 Record binding（world_id/worldline_id/record_id 均取自
  *   Record scope，不读 worlds.world_version）；world_version 的解析仍由
@@ -197,7 +324,7 @@ export async function materializeGoalInstances(
  *
  * 返回实际插入的 job 数。
  */
-export async function enqueueGoalAssessmentJobsForCommittedEvents(
+export async function reconcileGoalAssessmentJobsForCommittedEvents(
   client: PoolClient,
   committed: GoalCommittedEventScope,
 ): Promise<number> {
@@ -217,6 +344,7 @@ export async function enqueueGoalAssessmentJobsForCommittedEvents(
       AND goal.world_id = $2
       AND goal.worldline_id = $3
       AND goal.record_id = $4
+      AND goal.scope_kind = 'record'
       AND goal.state = 'active'
      ORDER BY goal.id`,
     [
@@ -281,4 +409,15 @@ export async function enqueueGoalAssessmentJobsForCommittedEvents(
     );
   }
   return inserted.rowCount ?? 0;
+}
+
+/**
+ * @deprecated Use reconcileGoalAssessmentJobsForCommittedEvents. The old name
+ * remains as a source-compatible alias for existing Record commit hooks.
+ */
+export async function enqueueGoalAssessmentJobsForCommittedEvents(
+  client: PoolClient,
+  committed: GoalCommittedEventScope,
+): Promise<number> {
+  return reconcileGoalAssessmentJobsForCommittedEvents(client, committed);
 }

@@ -46,13 +46,10 @@ export async function handleMessagePost(
       parsed as CreateMessageBody,
       request.headers.get("Idempotency-Key"),
     );
-    const result = await service.submitMessage({ ...input, principalId });
+    const admitted = await service.admitMessage({ ...input, principalId });
     return Response.json(
-      { ok: true as const, ...result },
-      {
-        status: result.disposition === "committed" ? 201 : 200,
-        headers: { "Cache-Control": "no-store" },
-      },
+      { ok: true as const, ...admitted },
+      { status: 202, headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
     return messageRouteError(error);

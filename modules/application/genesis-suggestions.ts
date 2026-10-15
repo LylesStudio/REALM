@@ -9,7 +9,12 @@ import {
   stylePromptBlock,
 } from "../inference/public.ts";
 import { normalizeWorldStyle } from "../style/world-style.ts";
-import { GENESIS_LIMITS, type WorldGenesisDraft } from "./world-genesis.ts";
+import {
+  GENESIS_LIMITS,
+  genesisPromptInputWithinBudget,
+  sanitizeUntrustedGenesisDraft,
+  settledGenesisView,
+} from "./world-genesis-contract.ts";
 
 /**
  * 司卷问答 · AI 代笔：按引导步骤与已定之卷生成候选。
@@ -124,18 +129,11 @@ export function normalizeGenesisSuggestions(
   return suggestions.length > 0 ? suggestions : null;
 }
 
-function describeContext(context: Partial<WorldGenesisDraft>): string {
-  if (!isObject(context)) return contextBlock("Settled so far", "(nothing settled yet)");
-  return contextBlock("Settled so far", {
-    ...(context.world?.name ? { world: context.world.name } : {}),
-    ...(context.world?.era ? { era: context.world.era } : {}),
-    ...(context.world?.summary ? { summary: context.world.summary } : {}),
-    ...(context.story?.title ? { openingStory: context.story.title } : {}),
-    ...(context.playerRole ? { playerRole: context.playerRole } : {}),
-    ...(context.companions?.length
-      ? { companions: context.companions.map((item) => item.name) }
-      : {}),
-  });
+function describeContext(context: unknown): string {
+  return contextBlock(
+    "Settled so far",
+    settledGenesisView(context) ?? "(nothing settled yet)",
+  );
 }
 
 /** 各引导步任务（English；上限数字与 normalizer 同源常量）。 */
@@ -193,9 +191,12 @@ export async function generateGenesisSuggestions(
   input: {
     step: GuidedGenesisStep;
     intent: string;
-    context: Partial<WorldGenesisDraft>;
+    context: unknown;
   },
 ): Promise<GenesisSuggestions | null> {
+  if (!genesisPromptInputWithinBudget(input.context)) return null;
+  const context = sanitizeUntrustedGenesisDraft(input.context);
+  const intent = typeof input.intent === "string" ? input.intent.trim().slice(0, 200) : "";
   try {
     const result = await requestStructuredObject({
       call: async (messages) => {
@@ -216,7 +217,7 @@ export async function generateGenesisSuggestions(
           role: "system",
           content: [
             suggestionSystemPrompt(input.step),
-            stylePromptBlock(normalizeWorldStyle(input.context.style)),
+            stylePromptBlock(normalizeWorldStyle(context.style)),
             NATURAL_VOICE_RULES,
             outputLanguageRule(),
           ].join("\n"),
@@ -224,8 +225,8 @@ export async function generateGenesisSuggestions(
         {
           role: "user",
           content: composeContext([
-            describeContext(input.context),
-            contextBlock("Player intent", input.intent.trim() || "(none — improvise freely)"),
+            describeContext(context),
+            contextBlock("Player intent", intent || "(none — improvise freely)"),
             contextBlock("Task for this step", STEP_INSTRUCTIONS[input.step]),
           ]),
         },

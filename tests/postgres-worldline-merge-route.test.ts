@@ -73,6 +73,7 @@ const MIGRATIONS = [
   // Phase 4D：records.world_version（branch/genesis 写路径显式携带）。
   "0057_realmworld_record_binding.sql",
   "0058_durable_job_queue.sql",
+  "0060_goal_scope_terminal_lifecycle.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

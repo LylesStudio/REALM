@@ -71,6 +71,7 @@ async function createMigratedDatabase(t: test.TestContext) {
     "0055_goal_runtime.sql",
     "0057_realmworld_record_binding.sql",
   "0058_durable_job_queue.sql",
+  "0060_goal_scope_terminal_lifecycle.sql",
   ]) {
     const sql = await readFile(
       new URL(`../database/postgres/migrations/${filename}`, import.meta.url),

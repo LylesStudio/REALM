@@ -172,7 +172,14 @@ function deterministicDecision(
       observedHead,
       transition: evaluation.transition,
       evidence: evaluation.transition,
-      result: { kind: "transition", decision: "complete" },
+      result: {
+        kind: "transition",
+        decision: evaluation.transition.to === "completed"
+          ? "complete"
+          : evaluation.transition.to === "failed"
+            ? "fail"
+            : "settle",
+      },
     };
   }
   return {

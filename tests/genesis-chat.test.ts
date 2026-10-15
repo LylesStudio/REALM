@@ -11,6 +11,7 @@ import {
 } from "../modules/application/genesis-chat.ts";
 import type { ModelChatRequest, ModelChatResponse, ModelGateway } from "../modules/inference/public.ts";
 import type { WorldGenesisDraft } from "../modules/application/world-genesis.ts";
+import { POST as postGenesisChat } from "../app/api/world/genesis-chat/route.ts";
 
 function fakeGateway(responses: Array<{ content: string; model?: string }>) {
   const calls: ModelChatRequest[] = [];
@@ -125,6 +126,57 @@ test("mergeDraftPatch overwrites only present fields and normalizes", () => {
   assert.equal(merged.companions[0].name, "新伴");
 });
 
+test("mergeDraftPatch replaces companions as a full snapshot", () => {
+  const replaced = mergeDraftPatch(BASE_DRAFT, {
+    companions: [{ name: "老锚", role: "向导", summary: "认得旧航线。" }],
+  });
+  assert.deepEqual(replaced?.companions.map((item) => item.name), ["老锚"]);
+
+  const both = mergeDraftPatch(BASE_DRAFT, {
+    companions: [
+      { name: "烛芯", role: "灯芯匠", summary: "记得每一盏灯的脾气。" },
+      { name: "老锚", role: "向导", summary: "认得旧航线。" },
+    ],
+  });
+  assert.ok(both);
+  assert.deepEqual(both.companions.map((item) => item.name), ["烛芯", "老锚"]);
+
+  const edited = mergeDraftPatch(both, {
+    companions: [
+      { name: "烛芯", role: "守灯人", summary: "记得每一盏灯的脾气。" },
+      { name: "老锚", role: "向导", summary: "认得旧航线。" },
+    ],
+  });
+  assert.equal(edited?.companions[0]?.role, "守灯人");
+  assert.equal(edited?.companions[1]?.name, "老锚");
+
+  const removed = mergeDraftPatch(both, {
+    companions: [{ name: "老锚", role: "向导", summary: "认得旧航线。" }],
+  });
+  assert.deepEqual(removed?.companions.map((item) => item.name), ["老锚"]);
+
+  const cleared = mergeDraftPatch(BASE_DRAFT, { companions: [] });
+  assert.equal(cleared?.companions.length, 0);
+
+  const unchanged = mergeDraftPatch(BASE_DRAFT, { world: { era: "新纪元" } });
+  assert.equal(unchanged?.companions[0]?.name, "烛芯");
+});
+
+test("mergeDraftPatch keeps scene title and display time across field merges", () => {
+  const titled = mergeDraftPatch(BASE_DRAFT, {
+    scene: { title: "雾夜", displayTime: "入夜" },
+  });
+  assert.ok(titled);
+  assert.equal(titled.scene.title, "雾夜");
+  assert.equal(titled.scene.displayTime, "入夜");
+  assert.equal(titled.scene.location, "主灯塔");
+  const patched = mergeDraftPatch(titled, { scene: { weather: "大雾" } });
+  assert.equal(patched?.scene.title, "雾夜");
+  assert.equal(patched?.scene.displayTime, "入夜");
+  assert.equal(patched?.scene.weather, "大雾");
+  assert.equal(patched?.scene.location, "主灯塔");
+});
+
 test("mergeDraftPatch is fail-closed on illegal merged structure", () => {
   // 无 base、patch 也不含世界名 → 规整后整体非法。
   assert.equal(mergeDraftPatch(null, { scene: { location: "某地" } }), null);
@@ -199,6 +251,49 @@ test("normalizeGenesisChatResponse drops an illegal patch but keeps the reply", 
   assert.ok(ok);
   assert.equal(ok.draftPatch?.world?.name, "港城");
   assert.equal(ok.draftPatch?.playerStance, "observer");
+});
+
+test("generateGenesisChatReply rejects an oversized draft before calling the model", async () => {
+  let calls = 0;
+  const gateway: ModelGateway = {
+    async discoverModels() {
+      return [];
+    },
+    async chat() {
+      calls += 1;
+      throw new Error("model must not run");
+    },
+  };
+  const outcome = await generateGenesisChatReply(gateway, {
+    message: "一座雾港",
+    transcript: [],
+    draft: { world: { name: "雾港", era: "", summary: "x".repeat(9_000) } },
+  });
+  assert.equal(outcome, null);
+  assert.equal(calls, 0);
+});
+
+test("scribe prompt requires a full companion snapshot and shows settled roles", async () => {
+  const { gateway, calls } = fakeGateway([
+    {
+      content: JSON.stringify({
+        reply: "再加一位？",
+        phase: "exploring",
+        draftPatch: null,
+      }),
+    },
+  ]);
+  const outcome = await generateGenesisChatReply(gateway, {
+    message: "再加一位向导",
+    transcript: [],
+    draft: BASE_DRAFT,
+  });
+  assert.ok(outcome);
+  const system = calls[0]?.messages[0]?.content ?? "";
+  assert.match(system, /replaces the entire companion list/);
+  const user = calls[0]?.messages.at(-1)?.content ?? "";
+  assert.match(user, /烛芯/);
+  assert.match(user, /灯芯匠/);
 });
 
 test("generateGenesisChatReply escalates model/thinking on degenerate responses", async () => {
@@ -276,4 +371,20 @@ test("normalizeGenesisChatResponse keeps opening only at ready phase", () => {
   );
   assert.ok(proposing);
   assert.equal(proposing.opening, "");
+});
+
+test("genesis chat route rejects an oversized draft before the model", async () => {
+  const response = await postGenesisChat(new Request("http://localhost/api/world/genesis-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: "一座雾港",
+      draft: { world: { name: "雾港", summary: "x".repeat(9_000) } },
+    }),
+  }));
+  assert.equal(response.status, 400);
+  const body = await response.json() as { ok: boolean; error: { code: string; message: string } };
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "INVALID_COMMAND");
+  assert.equal(body.error.message.includes("xxxxx"), false);
 });

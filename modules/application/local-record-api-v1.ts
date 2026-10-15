@@ -222,9 +222,17 @@ export interface LocalRecordEnvelopeV1 {
 /** Player-safe Goal projection (content-owned visibility, no runtime evidence). */
 export type GoalStateV1 = "active" | "completed" | "failed" | "settled";
 
+/** Goal runtime scope 判别位（B1；story Goal 的投影路由在 B2）。 */
+export type GoalScopeKindV1 = "record" | "story" | "worldline";
+
 export interface GoalProjectionV1 {
   goalKey: string;
+  scopeKind: GoalScopeKindV1;
   state: GoalStateV1;
+  /** 当前 attempt（终态重试开新 attempt，终态绝不原地复活）。 */
+  attempt: number;
+  /** 本 attempt 取代的前序终态实例 id（首个 attempt 为 null）。 */
+  supersedesInstanceId: string | null;
   progress: Readonly<Record<string, JsonValueV1>>;
   /** Content-declared outcome; present only on terminal states. */
   outcome: Readonly<Record<string, JsonValueV1>> | null;

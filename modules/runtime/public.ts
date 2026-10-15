@@ -106,6 +106,11 @@ export interface TurnRun<
   acceptedAt: string;
   updatedAt: string;
   completedAt?: string;
+  /**
+   * 起草子阶段进度。正式 Event 仍只在 release 一次提交；
+   * 这里只避免重试时重做已经完成的角色意图、行动、旁白或回应。
+   */
+  draftProgress?: JsonValue;
 }
 
 export interface RuntimeFormalEventDraft<TPayload extends JsonValue = JsonValue> {
@@ -299,6 +304,16 @@ export interface RuntimeRepository<
   ): Promise<
     TurnRun<TCommandPayload, TPlan, TCandidate, TValidation> | null
   >;
+  findTurnByIdempotency(
+    recordId: string,
+    idempotencyKey: string,
+  ): Promise<TurnRun<TCommandPayload, TPlan, TCandidate, TValidation> | null>;
+  saveDraftProgress?(input: {
+    turnId: string;
+    expectedRevision: number;
+    progress: JsonValue;
+    now: string;
+  }): Promise<TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>>;
   advanceTurn(
     input: AdvanceTurnInput<TPlan, TCandidate, TValidation>,
   ): Promise<TurnRun<TCommandPayload, TPlan, TCandidate, TValidation>>;
@@ -345,6 +360,8 @@ export interface RuntimeDraftingContext<
   TPlan extends JsonValue = JsonValue,
 > extends RuntimePlanningContext<TPayload> {
   plan: Readonly<TurnPlan<TPlan>>;
+  draftProgress?: JsonValue;
+  saveDraftProgress?: (progress: JsonValue) => Promise<void>;
 }
 
 export interface RuntimeValidationContext<
@@ -457,6 +474,8 @@ export interface TurnRuntimeDependencies<
    * retryTurn 在 signal 已 aborted 时拒绝重启 provider 请求。
    */
   signal?: AbortSignal;
+  /** 跨进程取消。阶段开始前读取；为真则不再调用模型、不再 release。 */
+  isCancelled?: (turnId: string) => Promise<boolean>;
 }
 
 export class RuntimeInvariantError extends Error {
@@ -535,6 +554,35 @@ export function createReleaseFingerprint(
   return `release_${hash(canonicalJson(bundle))}`;
 }
 
+/** Accepts idempotently and returns without running planner, drafter, or release. */
+export async function acceptTurn<
+  TPayload extends JsonValue,
+  TPlan extends JsonValue,
+  TCandidate extends JsonValue,
+  TValidation extends JsonValue,
+  TEvent extends JsonValue,
+  TOutbox extends JsonValue,
+>(
+  command: RuntimeCommand<TPayload>,
+  dependencies: TurnRuntimeDependencies<
+    TPayload,
+    TPlan,
+    TCandidate,
+    TValidation,
+    TEvent,
+    TOutbox
+  >,
+): Promise<AcceptCommandResult<TPayload>> {
+  const normalized = normalizeCommand(command);
+  const commandFingerprint = createCommandFingerprint(normalized);
+  return dependencies.repository.acceptCommand({
+    turnId: (dependencies.idFactory ?? defaultIdFactory)(),
+    command: normalized,
+    commandFingerprint,
+    now: now(dependencies),
+  });
+}
+
 /** Accepts idempotently, then resumes every durable active checkpoint. */
 export async function executeTurn<
   TPayload extends JsonValue,
@@ -554,14 +602,7 @@ export async function executeTurn<
     TOutbox
   >,
 ): Promise<TurnRun<TPayload, TPlan, TCandidate, TValidation>> {
-  const normalized = normalizeCommand(command);
-  const commandFingerprint = createCommandFingerprint(normalized);
-  const accepted = await dependencies.repository.acceptCommand({
-    turnId: (dependencies.idFactory ?? defaultIdFactory)(),
-    command: normalized,
-    commandFingerprint,
-    now: now(dependencies),
-  });
+  const accepted = await acceptTurn(command, dependencies);
   return continueTurn(accepted.run.turnId, dependencies);
 }
 
@@ -653,9 +694,10 @@ async function continueTurn<
   let run = await requireTurn(dependencies.repository, turnId);
 
   while (!isPausedOrTerminal(run.state)) {
-    // Batch 2D：阶段开始前检查取消信号——取消后以统一终态 markTurnFailure，
-    // 不进入下一阶段，不提交正式 release。
-    if (dependencies.signal?.aborted) {
+    // 阶段开始前检查本进程信号和跨进程取消。取消后不进入下一阶段，不 release。
+    const cancelRequested = dependencies.signal?.aborted
+      || await dependencies.isCancelled?.(turnId) === true;
+    if (cancelRequested) {
       if (run.state === "accepted") {
         // durable accepted 行保留（本批不新增 cancel 状态写入）；仅以内存
         // 失败形态返回统一的取消终态，不产生正式 Event/Outbox。
@@ -742,12 +784,28 @@ async function continueTurn<
           now: now(dependencies),
         });
         try {
+          let progressRevision = run.revision;
           const body = await dependencies.drafter.draft({
             turnId,
             command: clone(run.command),
             plan: clone(plan),
             attempt: run.attempts.drafting,
             ...(dependencies.signal ? { signal: dependencies.signal } : {}),
+            ...(run.draftProgress !== undefined ? { draftProgress: clone(run.draftProgress) } : {}),
+            ...(dependencies.repository.saveDraftProgress
+              ? {
+                saveDraftProgress: async (progress: JsonValue) => {
+                  const saved = await dependencies.repository.saveDraftProgress!({
+                    turnId,
+                    expectedRevision: progressRevision,
+                    progress,
+                    now: now(dependencies),
+                  });
+                  progressRevision = saved.revision;
+                  run = saved;
+                },
+              }
+              : {}),
           });
           assertJsonValue(body, "CANDIDATE_NOT_JSON");
           run = await dependencies.repository.advanceTurn({
@@ -1067,6 +1125,26 @@ export function createInMemoryRuntimeRepository<
       const normalized = normalizeCheckpoint(run);
       if (normalized !== run) turns.set(turnId, normalized);
       return clone(normalized);
+    },
+
+    async findTurnByIdempotency(recordId, idempotencyKey) {
+      const turnId = commandIndex.get(commandKey(recordId, idempotencyKey));
+      if (!turnId) return null;
+      return this.loadTurn(turnId);
+    },
+
+    async saveDraftProgress(input) {
+      const run = getMutableTurn(input.turnId);
+      assertTurnVersion(run, input.expectedRevision, "drafting");
+      const previousOrdinal = ordinalOf(run.draftProgress);
+      const nextOrdinal = ordinalOf(input.progress);
+      if (nextOrdinal < previousOrdinal) {
+        throw new RuntimeConcurrencyError();
+      }
+      run.draftProgress = clone(input.progress);
+      run.revision += 1;
+      run.updatedAt = input.now;
+      return clone(run);
     },
 
     async advanceTurn(input) {
@@ -1598,6 +1676,18 @@ function emptyAttempts(): Record<TurnStage, number> {
 
 function commandKey(recordId: string, idempotencyKey: string): string {
   return `${recordId}\u0000${idempotencyKey}`;
+}
+
+function ordinalOf(value: unknown): number {
+  if (
+    value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { ordinal?: unknown }).ordinal === "number"
+  ) {
+    return (value as { ordinal: number }).ordinal;
+  }
+  return -1;
 }
 
 function now(dependencies: { clock?: () => string }): string {

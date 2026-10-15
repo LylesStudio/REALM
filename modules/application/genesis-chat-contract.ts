@@ -125,6 +125,7 @@ export function sanitizeDraftPatch(
   if (patch.playerRole !== undefined) {
     result.playerRole = clampText(patch.playerRole, 60);
   }
+  // companions 是完整快照替换，不是逐条增量。空数组表示清空，省略字段才是不改。
   if (Array.isArray(patch.companions)) {
     result.companions = patch.companions
       .map((item) => clampCompanion(item))
@@ -133,13 +134,17 @@ export function sanitizeDraftPatch(
   }
   if (isObject(patch.scene)) {
     const scene: Record<string, string> = {};
+    const title = clampText(patch.scene.title, 60);
     const location = clampText(patch.scene.location, 60);
     const weather = clampText(patch.scene.weather, 60);
     const tension = clampText(patch.scene.tension, 60);
+    const displayTime = clampText(patch.scene.displayTime, 60);
     const objective = clampText(patch.scene.objective, 120);
+    if (title) scene.title = title;
     if (location) scene.location = location;
     if (weather) scene.weather = weather;
     if (tension) scene.tension = tension;
+    if (displayTime) scene.displayTime = displayTime;
     if (objective) scene.objective = objective;
     if (Object.keys(scene).length > 0) result.scene = scene;
   }
@@ -156,7 +161,8 @@ export function sanitizeDraftPatch(
 }
 
 /**
- * draftPatch 合并：只覆盖 patch 中出现的字段（对象字段做浅层合并），
+ * draftPatch 合并：只覆盖 patch 中出现的字段（对象字段做浅层合并）。
+ * companions 例外：出现即整表替换，不按匿名下标猜测增量。
  * 合并结果经 normalizeGenesisDraft 同源规整；整体非法（如世界名缺失）
  * 返回 null——fail-closed。
  */

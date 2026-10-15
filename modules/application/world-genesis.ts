@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ModelGateway } from "../inference/public.ts";
 import {
   NATURAL_VOICE_RULES,
@@ -27,11 +28,15 @@ import {
 export {
   fallbackGenesisDraft,
   genesisBindingFromDraft,
+  genesisPromptInputWithinBudget,
   GENESIS_LANGUAGES,
+  GENESIS_PROMPT_INPUT_MAX_CHARS,
   normalizeGenesisLanguage,
   GENESIS_LIMITS,
   MAX_COMPANIONS,
   normalizeGenesisDraft,
+  sanitizeUntrustedGenesisDraft,
+  settledGenesisView,
   type GenesisLanguage,
   type WorldGenesisDraft,
   type WorldGenesisSource,
@@ -107,3 +112,37 @@ export async function generateGenesisDraft(
   });
   return result?.value.draft ?? null;
 }
+
+/** 已规整草稿的稳定指纹。不包含 identity/goals，那些字段不走普通创世表单。 */
+export function genesisDraftFingerprint(draft: WorldGenesisDraft): string {
+  const canonical = JSON.stringify({
+    language: draft.language ?? null,
+    world: {
+      name: draft.world.name,
+      era: draft.world.era,
+      summary: draft.world.summary,
+    },
+    style: draft.style,
+    story: { title: draft.story.title, premise: draft.story.premise },
+    record: { title: draft.record.title },
+    playerRole: draft.playerRole,
+    companions: draft.companions.map((companion) => ({
+      name: companion.name,
+      role: companion.role,
+      summary: companion.summary,
+    })),
+    scene: {
+      title: draft.scene.title ?? "",
+      location: draft.scene.location,
+      weather: draft.scene.weather,
+      tension: draft.scene.tension,
+      displayTime: draft.scene.displayTime ?? "",
+      objective: draft.scene.objective,
+    },
+    playerStance: draft.playerStance,
+    opening: draft.opening,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+export const GENESIS_CREATION_REQUEST_ID = /^[A-Za-z0-9_-]{8,80}$/;

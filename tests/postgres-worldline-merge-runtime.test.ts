@@ -83,6 +83,8 @@ const MIGRATIONS = [
   // Slice 3 统一 durable job 队列：merge 对在途（pending/claimed）行
   // fail-closed 探针所依赖的表。
   "0058_durable_job_queue.sql",
+  // B1：branch Goal clone reads scope/retry columns.
+  "0060_goal_scope_terminal_lifecycle.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

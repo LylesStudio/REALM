@@ -1,7 +1,11 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import type { WorldGenesisDraft } from "../../modules/application/world-genesis.ts";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  GENESIS_LIMITS,
+  MAX_COMPANIONS,
+  type WorldGenesisDraft,
+} from "../../modules/application/world-genesis-contract.ts";
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 import {
   WORLD_STYLE_KEYS,
@@ -21,9 +25,17 @@ import type {
  */
 
 import {
+  addCompanionRow,
   applyStepConfirm,
+  inviteCompanionRow,
+  namedCompanionCount,
+  patchCompanionField,
+  patchSceneField,
+  removeCompanionAt,
+  sceneHasContent,
   stepSavedValue,
   type GuidedStepId as StepId,
+  type ScenePatchField,
 } from "./guided-genesis-steps.ts";
 import type { GenesisChatFallback } from "./guided-genesis-chat.tsx";
 
@@ -90,6 +102,19 @@ const STEPS: readonly StepDef[] = [
   { id: "companions", skippable: true, suggestStep: "companions" },
   { id: "scene", skippable: true, suggestStep: "scene" },
   { id: "review", skippable: false, suggestStep: null },
+];
+
+const SCENE_EDITOR_FIELDS: readonly {
+  field: ScenePatchField;
+  labelKey: string;
+  maxLength: number;
+}[] = [
+  { field: "title", labelKey: "ui.guided.scene.title", maxLength: GENESIS_LIMITS.sceneTitle },
+  { field: "location", labelKey: "ui.guided.scene.location", maxLength: GENESIS_LIMITS.sceneField },
+  { field: "weather", labelKey: "ui.guided.scene.weather", maxLength: GENESIS_LIMITS.sceneField },
+  { field: "tension", labelKey: "ui.guided.scene.tension", maxLength: GENESIS_LIMITS.sceneField },
+  { field: "displayTime", labelKey: "ui.guided.scene.displayTime", maxLength: GENESIS_LIMITS.displayTime },
+  { field: "objective", labelKey: "ui.guided.scene.objective", maxLength: GENESIS_LIMITS.objective },
 ];
 
 const STEP_QUESTION_TEMPLATE_KEYS: Record<StepId, string> = {
@@ -173,11 +198,13 @@ function scrollEntries(
     }
   }
   const scene = [
+    draft.scene.title,
     draft.scene.location,
     draft.scene.weather,
     draft.scene.tension,
+    draft.scene.displayTime,
     draft.scene.objective,
-  ].filter((part) => part.length > 0);
+  ].filter((part): part is string => typeof part === "string" && part.length > 0);
   if (scene.length > 0) {
     entries.push({
       key: "scene",
@@ -216,6 +243,10 @@ export function GuidedGenesis({
   const initialStepValues = stepSavedValue(STEPS[0]!.id, initialDraft);
   const [stepIndex, setStepIndex] = useState(0);
   const [draft, setDraft] = useState<WorldGenesisDraft>(initialDraft);
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
   const [text, setText] = useState(initialStepValues.text);
   const [storyTitle, setStoryTitle] = useState(initialStepValues.storyTitle);
   const [storyPremise, setStoryPremise] = useState(initialStepValues.storyPremise);
@@ -287,7 +318,7 @@ export function GuidedGenesis({
       const result = await onSuggest({
         step: step.suggestStep,
         intent: currentValue() || text.trim(),
-        context: draft,
+        context: draftRef.current,
       });
       // AI 失败给出可见安全提示（可重试）；手动填写随时可继续。
       if (result.suggestions) {
@@ -320,20 +351,20 @@ export function GuidedGenesis({
     setSuggestions(null);
   }
 
+  function finishStep(stepId: "companions" | "scene") {
+    const current = draftRef.current;
+    advance(applyStepConfirm(stepId, current, stepSavedValue(stepId, current)));
+  }
+
   function inviteCompanion(companion: CompanionSuggestion) {
-    // 邀请后停留本步：可再邀一位（至多两位），或点「就这些 ▸」继续。
-    setDraft({
-      ...draft,
-      companions: [...draft.companions, companion].slice(0, 2),
-    });
+    // 邀请后停留本步：可再邀一位（至多两位），或点「就这些」继续。
+    setDraft((current) => inviteCompanionRow(current, companion));
     setSuggestions(null);
   }
 
-  function pickSceneSuggestion(scene: SceneSuggestions, field: keyof SceneSuggestions, value: string) {
-    // 点选只更新对应字段并停留在本步骤——其余字段可继续填写；
-    // 点「下一步」才进入 review。
-    setDraft({ ...draft, scene: { ...draft.scene, [field]: value } });
-    void scene;
+  function pickSceneSuggestion(_scene: SceneSuggestions, field: keyof SceneSuggestions, value: string) {
+    // 点选只更新对应字段并停留在本步骤——其余字段可继续填写。
+    setDraft((current) => patchSceneField(current, field, value));
   }
 
   async function sealWorld() {
@@ -506,23 +537,65 @@ export function GuidedGenesis({
           {step.id === "companions" ? (
             <div className="guided-input-area">
               <p className="guided-note">{uiText("ui.guided.companionNote", uiLanguage)}</p>
-              <textarea
-                aria-label={uiText("ui.guided.companionIntentLabel", uiLanguage)}
-                className="guided-input"
-                onChange={(event) => setText(event.target.value)}
-                placeholder={uiText("ui.guided.companionPlaceholder", uiLanguage)}
-                rows={2}
-                value={text}
-              />
+              <div className="guided-companion-editor">
+                {draft.companions.map((companion, index) => (
+                  <div className="companion-row" key={`companion-${index}`}>
+                    <input
+                      aria-label={`${uiText("ui.guided.companionName", uiLanguage)} ${index + 1}`}
+                      maxLength={GENESIS_LIMITS.companionName}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setDraft((current) => patchCompanionField(current, index, "name", value));
+                      }}
+                      placeholder={uiText("ui.guided.companionName", uiLanguage)}
+                      value={companion.name}
+                    />
+                    <input
+                      aria-label={`${uiText("ui.guided.companionRole", uiLanguage)} ${index + 1}`}
+                      maxLength={GENESIS_LIMITS.companionRole}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setDraft((current) => patchCompanionField(current, index, "role", value));
+                      }}
+                      placeholder={uiText("ui.guided.companionRole", uiLanguage)}
+                      value={companion.role}
+                    />
+                    <input
+                      aria-label={`${uiText("ui.guided.companionSummary", uiLanguage)} ${index + 1}`}
+                      maxLength={GENESIS_LIMITS.companionSummary}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setDraft((current) => patchCompanionField(current, index, "summary", value));
+                      }}
+                      placeholder={uiText("ui.guided.companionSummary", uiLanguage)}
+                      value={companion.summary}
+                    />
+                    <button
+                      aria-label={`${uiText("ui.guided.companionRemove", uiLanguage)} ${index + 1}`}
+                      onClick={() => setDraft((current) => removeCompanionAt(current, index))}
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {draft.companions.length < MAX_COMPANIONS ? (
+                <button
+                  className="companion-add"
+                  onClick={() => setDraft((current) => addCompanionRow(current))}
+                  type="button"
+                >
+                  ＋ {uiText("ui.guided.companionAdd", uiLanguage)}
+                </button>
+              ) : null}
               <GuidedActions
                 busy={busy}
                 canConfirm={false}
                 hideConfirm
                 onSuggest={requestSuggestions}
-                onSkip={draft.companions.length > 0
-                  ? () => advance(draft)
-                  : skipStep}
-                skipLabelKey={draft.companions.length > 0
+                onSkip={() => finishStep("companions")}
+                skipLabelKey={namedCompanionCount(draft) > 0
                   ? "ui.guided.companionsDone"
                   : "ui.guided.companionsSolo"}
                 uiLanguage={uiLanguage}
@@ -533,13 +606,30 @@ export function GuidedGenesis({
           {step.id === "scene" ? (
             <div className="guided-input-area">
               <p className="guided-note">{uiText("ui.guided.sceneNote", uiLanguage)}</p>
+              <div className="guided-structured scene-grid">
+                {SCENE_EDITOR_FIELDS.map((entry) => (
+                  <label key={entry.field}>
+                    <span>{uiText(entry.labelKey, uiLanguage)}</span>
+                    <input
+                      aria-label={uiText(entry.labelKey, uiLanguage)}
+                      className="guided-input"
+                      maxLength={entry.maxLength}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setDraft((current) => patchSceneField(current, entry.field, value));
+                      }}
+                      value={draft.scene[entry.field] ?? ""}
+                    />
+                  </label>
+                ))}
+              </div>
               <GuidedActions
                 busy={busy}
                 canConfirm={false}
                 hideConfirm
                 onSuggest={requestSuggestions}
-                onSkip={() => advance(draft)}
-                skipLabelKey={scrollEntries(draft, uiLanguage).some((entry) => entry.key === "scene")
+                onSkip={() => finishStep("scene")}
+                skipLabelKey={sceneHasContent(draft)
                   ? "ui.guided.sceneDone"
                   : "ui.guided.sceneBlank"}
                 uiLanguage={uiLanguage}

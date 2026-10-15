@@ -119,6 +119,8 @@ test(
       // Phase 3/本批：Goal runtime（goal_instances + goal_assessment_jobs），
       // RealmWorld instantiate 的 Goal 物化与 opening event enqueue 落库于此。
       "0055_goal_runtime.sql",
+      // B1：branch clone/materialization 的 scope 与 retry-attempt columns。
+      "0060_goal_scope_terminal_lifecycle.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),

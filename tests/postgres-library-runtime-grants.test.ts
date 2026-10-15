@@ -91,6 +91,10 @@ const CURRENT_MIGRATIONS = [
   // Phase 4D：records.world_version（Record 级 binding）+ 切换审计台账；
   // library 的 records INSERT 现在显式携带该列。
   "0057_realmworld_record_binding.sql",
+  // B1：branch Goal clone reads the retry-attempt columns。
+  "0060_goal_scope_terminal_lifecycle.sql",
+  // 创世请求幂等台账（合并后迁移序号为 0063）。
+  "0063_genesis_creation_requests.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -284,18 +288,93 @@ test(
       stance: "player",
     });
     // createGenesis（world generate 路径）
-    const genesis = await library.createGenesis(scope, {
+    const genesisDraft = {
       world: { name: "下沉创世", era: "新纪元", summary: "创世下沉。" },
-      style: "modern",
+      style: "modern" as const,
       story: { title: "开幕", premise: "……" },
       record: { title: "第一幕" },
       playerRole: "记录者",
-      companions: [{ name: "同行者", role: "旅伴", summary: "" }],
-      scene: { location: "渡口", weather: "", tension: "", objective: "" },
-      playerStance: "player",
+      companions: [{ name: "同行者", role: "旅伴", summary: "一同赶路。" }],
+      scene: {
+        title: "渡口夜",
+        location: "渡口",
+        weather: "",
+        tension: "",
+        displayTime: "入夜",
+        objective: "",
+      },
+      playerStance: "player" as const,
       opening: "",
+    };
+    const genesis = await library.createGenesis(scope, genesisDraft, {
+      creationRequestId: "genesisreq01",
     });
     assert.ok(genesis.recordId);
+    const replay = await library.createGenesis(scope, genesisDraft, {
+      creationRequestId: "genesisreq01",
+    });
+    assert.equal(replay.worldId, genesis.worldId);
+    assert.equal(replay.recordId, genesis.recordId);
+    const worldsAfterReplay = await post.ownerPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM worlds WHERE workspace_id = $1 AND name = '下沉创世'`,
+      [scope.workspaceId],
+    );
+    assert.equal(worldsAfterReplay.rows[0]?.count, "1");
+    await assert.rejects(
+      library.createGenesis(scope, {
+        ...genesisDraft,
+        world: { ...genesisDraft.world, name: "另一份草稿" },
+      }, { creationRequestId: "genesisreq01" }),
+      (error: unknown) => error instanceof LibraryServiceError
+        && error.code === "GENESIS_REQUEST_CONFLICT",
+    );
+    const other = await library.createGenesis(scope, genesisDraft, {
+      creationRequestId: "genesisreq02",
+    });
+    assert.notEqual(other.worldId, genesis.worldId);
+    const readBack = await library.readGenesisCreation(scope, "genesisreq01");
+    assert.equal(readBack?.recordId, genesis.recordId);
+    const chain = await post.ownerPool.query<{
+      display_name: string;
+      role: string;
+      summary: string;
+      continuity_id: string;
+      instance_id: string;
+      participant_id: string;
+      controller_mode: string;
+    }>(
+      `SELECT definition.display_name,
+              definition.profile->>'role' AS role,
+              definition.profile->>'summary' AS summary,
+              continuity.id AS continuity_id,
+              instance.id AS instance_id,
+              participant.id AS participant_id,
+              participant.controller_mode
+       FROM character_definitions AS definition
+       JOIN character_continuities AS continuity
+         ON continuity.workspace_id = definition.workspace_id
+        AND continuity.world_id = definition.world_id
+        AND continuity.definition_id = definition.id
+       JOIN character_instances AS instance
+         ON instance.workspace_id = continuity.workspace_id
+        AND instance.worldline_id = continuity.worldline_id
+        AND instance.continuity_id = continuity.id
+       JOIN participants AS participant
+         ON participant.workspace_id = instance.workspace_id
+        AND participant.record_id = instance.record_id
+        AND participant.character_instance_id = instance.id
+       WHERE definition.workspace_id = $1
+         AND definition.world_id = $2
+         AND definition.display_name = '同行者'`,
+      [scope.workspaceId, genesis.worldId],
+    );
+    assert.equal(chain.rows.length, 1);
+    assert.equal(chain.rows[0]?.role, "旅伴");
+    assert.equal(chain.rows[0]?.summary, "一同赶路。");
+    assert.equal(chain.rows[0]?.controller_mode, "ai");
+    assert.ok(chain.rows[0]?.continuity_id);
+    assert.ok(chain.rows[0]?.instance_id);
+    assert.ok(chain.rows[0]?.participant_id);
     await library.create(scope, {
       kind: "delete-record",
       worldId: genesis.worldId,

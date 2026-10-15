@@ -1,7 +1,7 @@
 /**
  * v37 Y0：realm-pack 库测试——G.5 冻结九向量逐值相等、双 codec
  * round-trip、字节确定性、G.3 恶意包矩阵逐项、multipart 边界矩阵、
- * export-matrix 围栏（61 表 diff / text[] 清单 === 8 / scope 23/36/41）。
+ * export-matrix 围栏（85 schema 表 / 83 export 表 diff / text[] 清单 === 8 / scope 23/36/41）。
  */
 import assert from "node:assert/strict";
 import { readdir } from "node:fs/promises";
@@ -864,20 +864,27 @@ test("export-matrix fences: runtime table diff / text[] list / scope sets", asyn
       fs.readFile(new URL(filename, migrationDir), "utf8"));
     for (const match of sql.matchAll(tablePattern)) actual.add(match[1]!);
   }
-  // 0042 已入库：5 个规划表成为实有表；0055 Goal runtime 三表与 0057
-  // 版本切换审计表明确作为 excluded 行进入矩阵，planned 集合保持为空。
+  // 0042 已入库：5 个规划表成为实有表；0055 Goal runtime 三表、B2
+  // Story Graph 两表、版本切换审计表、Project/Finance 七表、筹资义务两表，以及
+  // Genesis/Record Turn 两张 durable 台账表进入 schema；后两者明确不进入 realm-pack。
   const planned: string[] = [];
-  assert.equal(actual.size, 74, `实有表应为 74（67+0055 Goal runtime 三表+0057 realmworld_version_switches+0058 realm_durable_jobs+0059 World Command 两表；Goal/切换审计/durable job/Command Group 台账在 dedicated 路由前保持 excluded），实际 ${actual.size}`);
+  const nonExportable = new Set(["genesis_creation_requests", "turn_cancel_requests"]);
+  assert.equal(actual.size, 90, `schema 实有表应为 90（88 个可导出表 + 2 张 durable 台账表），实际 ${actual.size}`);
+  const exportableActual = new Set([...actual].filter((table) => !nonExportable.has(table)));
+  assert.equal(exportableActual.size, 88, `可导出实有表应为 88，实际 ${exportableActual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 74, `矩阵应为 74 行，实际 ${matrixTables.size}`);
-  for (const table of [...actual, ...planned]) {
+  assert.equal(matrixTables.size, 88, `矩阵应为 88 行，实际 ${matrixTables.size}`);
+  for (const table of [...exportableActual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }
   for (const table of matrixTables) {
     assert.ok(
-      actual.has(table) || planned.includes(table),
+      exportableActual.has(table) || planned.includes(table),
       `矩阵多表（无 schema 来源）：${table}`,
     );
+  }
+  for (const table of nonExportable) {
+    assert.ok(!matrixTables.has(table), `内部 durable 台账不得进入 realm-pack：${table}`);
   }
   assert.equal(TEXT_ARRAY_NON_NULL_COLUMNS.length, 8, "text[] 清单冻结 count=8");
   assert.equal(SCOPE_IMPORTABLE.template.length, 23);

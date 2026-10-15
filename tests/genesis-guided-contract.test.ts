@@ -4,6 +4,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   applyStepConfirm,
+  inviteCompanionRow,
+  patchCompanionField,
+  patchSceneField,
+  removeCompanionAt,
   stepSavedValue,
 } from "../app/components/guided-genesis-steps.ts";
 import type { WorldGenesisDraft } from "../modules/application/world-genesis.ts";
@@ -147,7 +151,105 @@ test("A: scene 点选只更新对应字段（状态机契约：不触发 advance
     source.indexOf("async function sealWorld"),
   );
   assert.ok(!pickFn.includes("advance("), "scene 点选不得 advance 跳步");
-  assert.match(pickFn, /setDraft\(\{ \.\.\.draft, scene: \{ \.\.\.draft\.scene, \[field\]: value \} \}\)/);
+  assert.match(pickFn, /setDraft\(\(current\) => patchSceneField\(current, field, value\)\)/);
+  assert.match(
+    source,
+    /setDraft\(\(current\) => inviteCompanionRow\(current, companion\)\)/,
+    "同伴候选必须用 functional updater 写入同一份 draft",
+  );
+});
+
+const blankStep = { text: "", storyTitle: "", storyPremise: "" };
+
+test("A: 同伴手动行进入 canonical draft；空名不造人；改第一人不动第二人", () => {
+  let draft = applyStepConfirm("companions", emptyDraft(), {
+    ...blankStep,
+    companions: [
+      { name: " 阿汐 ", role: "向导", summary: "认得旧航线。" },
+      { name: "   ", role: "空", summary: "不该出现" },
+      { name: "老锚", role: "船工", summary: "掌舵。" },
+    ],
+  });
+  assert.deepEqual(draft.companions.map((item) => item.name), ["阿汐", "老锚"]);
+  draft = patchCompanionField(draft, 0, "role", "灯塔值夜人");
+  assert.equal(draft.companions[0]?.role, "灯塔值夜人");
+  assert.equal(draft.companions[1]?.name, "老锚");
+  assert.equal(draft.companions[1]?.summary, "掌舵。");
+  draft = patchCompanionField(draft, 1, "name", "阿汐");
+  assert.equal(draft.companions.length, 2, "手动同名按行保留，不按名字合并");
+  draft = removeCompanionAt(draft, 0);
+  assert.deepEqual(draft.companions.map((item) => item.name), ["阿汐"]);
+  const restored = stepSavedValue("companions", draft);
+  assert.equal(restored.companions[0]?.name, "阿汐");
+  const again = applyStepConfirm("companions", emptyDraft(), {
+    ...blankStep,
+    companions: restored.companions,
+  });
+  assert.equal(again.companions[0]?.role, "船工");
+});
+
+test("A: 连续邀请同伴按最新 draft 累加，满员后不再追加", () => {
+  let draft = emptyDraft();
+  draft = inviteCompanionRow(draft, { name: "阿汐", role: "向导", summary: "识路" });
+  draft = inviteCompanionRow(draft, { name: "老锚", role: "船工", summary: "掌舵" });
+  draft = inviteCompanionRow(draft, { name: "多余", role: "第三", summary: "不该入场" });
+  assert.deepEqual(draft.companions.map((item) => item.name), ["阿汐", "老锚"]);
+  draft = inviteCompanionRow(draft, { name: "阿汐", role: "重复", summary: "不该再加" });
+  assert.equal(draft.companions.length, 2);
+});
+
+test("A: 场景字段逐项进入 draft；跳过不发明默认值；回退后仍能恢复", () => {
+  let draft = applyStepConfirm("scene", emptyDraft(), {
+    ...blankStep,
+    scene: {
+      title: "夜航",
+      location: "灰鲸港",
+      weather: "",
+      tension: "",
+      displayTime: "入夜",
+      objective: "",
+    },
+  });
+  draft = patchSceneField(draft, "weather", "冷雾");
+  assert.equal(draft.scene.title, "夜航");
+  assert.equal(draft.scene.location, "灰鲸港");
+  assert.equal(draft.scene.weather, "冷雾");
+  assert.equal(draft.scene.displayTime, "入夜");
+  assert.equal(draft.scene.tension, "");
+  assert.equal(draft.scene.objective, "");
+
+  let rapid = emptyDraft();
+  rapid = patchSceneField(rapid, "location", "港");
+  rapid = patchSceneField(rapid, "objective", "靠岸");
+  assert.equal(rapid.scene.location, "港", "连续点选不得丢掉前一项");
+  assert.equal(rapid.scene.objective, "靠岸");
+
+  const skipped = applyStepConfirm("scene", emptyDraft(), {
+    ...blankStep,
+    scene: {
+      title: "",
+      location: "",
+      weather: "",
+      tension: "",
+      displayTime: "",
+      objective: "",
+    },
+  });
+  assert.equal(skipped.scene.location, "");
+  assert.equal(skipped.scene.title, undefined);
+  assert.equal(skipped.scene.displayTime, undefined);
+  assert.equal(JSON.stringify(skipped.scene).includes("未记录"), false);
+  assert.equal(JSON.stringify(skipped.scene).includes("地点未定"), false);
+
+  const restored = stepSavedValue("scene", draft);
+  assert.equal(restored.scene.location, "灰鲸港");
+  assert.equal(restored.scene.weather, "冷雾");
+  assert.equal(restored.scene.title, "夜航");
+  const roundTrip = applyStepConfirm("scene", emptyDraft(), {
+    ...blankStep,
+    scene: restored.scene,
+  });
+  assert.equal(roundTrip.scene.displayTime, "入夜");
 });
 
 function fakeGateway(script: (string | Error)[]): ModelGateway {
@@ -230,6 +332,45 @@ test("B: 正常链返回候选；失败链返回 ok:false + 固定安全提示�
   // 非法 step → 400 INVALID_COMMAND。
   const invalid = await handleSuggestPost(suggestRequest({ step: "hack" }));
   assert.equal(invalid.status, 400);
+
+  // 超限 context 不启动模型；错误形状不把请求打成异常。
+  let called = false;
+  const oversized = await handleSuggestPost(
+    suggestRequest({
+      step: "era",
+      intent: "雾",
+      context: { world: { summary: "x".repeat(9_000) } },
+    }),
+    {
+      gateway: {
+        async discoverModels() {
+          return [];
+        },
+        async chat() {
+          called = true;
+          throw new Error("model must not run");
+        },
+      },
+    },
+  );
+  assert.equal(oversized.status, 400);
+  const oversizedBody = await oversized.json() as { error: { code: string; message: string } };
+  assert.equal(oversizedBody.error.code, "INVALID_COMMAND");
+  assert.equal(called, false);
+  assert.equal(oversizedBody.error.message.includes("xxxxx"), false);
+
+  const malformedContext = await handleSuggestPost(
+    suggestRequest({
+      step: "world-name",
+      intent: "雾港",
+      context: { companions: "nope", scene: "nope", goals: [{ goalKey: "secret-goal" }] },
+    }),
+    { gateway: fakeGateway([JSON.stringify({ suggestions: ["雾港新城"] })]) },
+  );
+  assert.equal(malformedContext.status, 200);
+  const malformedOk = await malformedContext.json() as { ok: boolean; suggestions?: string[] };
+  assert.equal(malformedOk.ok, true);
+  assert.deepEqual(malformedOk.suggestions, ["雾港新城"]);
 });
 
 test("B: realm-client suggestGenesis 区分 HTTP 错误/ok:false/malformed（源码契约）", () => {

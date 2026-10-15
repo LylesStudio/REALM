@@ -17,7 +17,7 @@ import {
   GoalRuntimeRepositoryError,
 } from "../database/postgres/public.ts";
 import {
-  enqueueGoalAssessmentJobsForCommittedEvents,
+  reconcileGoalAssessmentJobsForCommittedEvents,
 } from "../database/postgres/goal-runtime-materialization.ts";
 import {
   goalAssessmentJobIdFor,
@@ -317,6 +317,7 @@ test(
       "0054_world_version_identity.sql",
       "0055_goal_runtime.sql",
       "0057_realmworld_record_binding.sql",
+      "0060_goal_scope_terminal_lifecycle.sql",
     ]) {
       const sql = await readFile(
         new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -477,7 +478,7 @@ test(
         eventIds: readonly string[];
       },
     ) => {
-      await enqueueGoalAssessmentJobsForCommittedEvents(client, committed);
+      await reconcileGoalAssessmentJobsForCommittedEvents(client, committed);
     };
     const dependencies = dependenciesFor(
       { scene: ids.scene, visibility: ids.visibility },
@@ -555,7 +556,7 @@ test(
     // Goal set as an ordinary no-op.
     await assert.rejects(
       inWorkspace(pool, workspaceId, (client) =>
-        enqueueGoalAssessmentJobsForCommittedEvents(client, {
+        reconcileGoalAssessmentJobsForCommittedEvents(client, {
           workspaceId: foreignWorkspaceId,
           worldId: ids.world,
           worldlineId: ids.worldline,
@@ -581,7 +582,7 @@ test(
     });
     await assert.rejects(
       inWorkspace(pool, workspaceId, (client) =>
-        enqueueGoalAssessmentJobsForCommittedEvents(client, {
+        reconcileGoalAssessmentJobsForCommittedEvents(client, {
           workspaceId,
           worldId: ids.world,
           worldlineId: ids.worldline,

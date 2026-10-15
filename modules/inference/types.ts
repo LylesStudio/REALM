@@ -201,6 +201,8 @@ export type ModelChatResponse = {
     completionTokens: number;
     totalTokens: number;
   } | null;
+  /** stream 为逐 token；buffered 为一次完整响应，不能当成 token 流。 */
+  delivery?: "stream" | "buffered";
 };
 
 export interface ModelGateway {

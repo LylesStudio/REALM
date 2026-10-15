@@ -3,7 +3,11 @@ import test from "node:test";
 import {
   fallbackGenesisDraft,
   generateGenesisDraft,
+  genesisDraftFingerprint,
+  genesisPromptInputWithinBudget,
   normalizeGenesisDraft,
+  sanitizeUntrustedGenesisDraft,
+  settledGenesisView,
 } from "../modules/application/world-genesis.ts";
 import type { ModelGateway } from "../modules/inference/public.ts";
 
@@ -34,11 +38,89 @@ test("normalizeGenesisDraft fills missing fields from the prompt and clamps comp
   assert.equal(draft.scene.weather, "");
 });
 
+test("normalizeGenesisDraft keeps scene title and display time", () => {
+  const draft = normalizeGenesisDraft({
+    world: { name: "雾港" },
+    scene: {
+      title: " 夜航 ",
+      location: "七号码头",
+      displayTime: "雾月入夜",
+      weather: "雾",
+    },
+  });
+  assert.ok(draft);
+  assert.equal(draft.scene.title, "夜航");
+  assert.equal(draft.scene.displayTime, "雾月入夜");
+  assert.equal(draft.scene.location, "七号码头");
+  assert.equal(draft.scene.weather, "雾");
+  const omitted = normalizeGenesisDraft({
+    world: { name: "雾港" },
+    scene: { location: "港" },
+  });
+  assert.equal(omitted?.scene.title, undefined);
+  assert.equal(omitted?.scene.displayTime, undefined);
+});
+
+test("sanitizeUntrustedGenesisDraft drops privileged fields and bad shapes", () => {
+  const clean = sanitizeUntrustedGenesisDraft({
+    worldIdentity: { worldId: "w", worldVersion: "1" },
+    runtimeIdentity: { worldlineId: "a", storyId: "b", recordId: "c" },
+    goals: [{ goalKey: "secret-goal", policyVersion: "1" }],
+    world: { name: "雾港" },
+    companions: "nope",
+    scene: "nope",
+  });
+  assert.equal(clean.world?.name, "雾港");
+  assert.equal(clean.companions, undefined);
+  assert.equal(clean.scene, undefined);
+  assert.equal("worldIdentity" in clean, false);
+  assert.equal("runtimeIdentity" in clean, false);
+  assert.equal("goals" in clean, false);
+  const view = settledGenesisView({
+    world: { name: "雾港" },
+    companions: [
+      { name: "阿汐", role: "向导", summary: "识路" },
+      { name: "老锚", role: "船工", summary: "掌舵" },
+    ],
+    scene: { title: "夜航", location: "港", displayTime: "入夜" },
+    goals: [{ goalKey: "secret-goal" }],
+  });
+  assert.equal(view?.world, "雾港");
+  assert.deepEqual(view?.scene, { title: "夜航", location: "港", displayTime: "入夜" });
+  const companions = view?.companions as { name: string; role: string }[];
+  assert.deepEqual(companions.map((item) => item.name), ["阿汐", "老锚"]);
+  assert.equal(JSON.stringify(view).includes("secret-goal"), false);
+  assert.equal(settledGenesisView({ companions: "nope", scene: 12 }), null);
+  assert.equal(genesisPromptInputWithinBudget({ world: { name: "雾港" } }), true);
+  assert.equal(
+    genesisPromptInputWithinBudget({ world: { summary: "x".repeat(9_000) } }),
+    false,
+  );
+});
+
 test("normalizeGenesisDraft rejects drafts without any resolvable world name", () => {
   assert.equal(normalizeGenesisDraft({}), null);
   assert.equal(normalizeGenesisDraft("not an object"), null);
   assert.equal(normalizeGenesisDraft({ world: { name: "  " } }), null);
   assert.ok(normalizeGenesisDraft({}, PROMPT)?.world.name);
+});
+
+test("genesisDraftFingerprint is stable for the same draft and changes with content", () => {
+  const draft = normalizeGenesisDraft({
+    world: { name: "雾港" },
+    companions: [{ name: "阿汐", role: "向导", summary: "识路" }],
+    scene: { title: "夜航", location: "港", displayTime: "入夜" },
+  }, PROMPT);
+  assert.ok(draft);
+  assert.equal(genesisDraftFingerprint(draft), genesisDraftFingerprint({
+    ...draft,
+    scene: { ...draft.scene, title: draft.scene.title },
+  }));
+  const renamed = normalizeGenesisDraft({
+    world: { name: "另一港" },
+    companions: [{ name: "阿汐", role: "向导", summary: "识路" }],
+  }, PROMPT);
+  assert.notEqual(genesisDraftFingerprint(draft), genesisDraftFingerprint(renamed!));
 });
 
 test("fallbackGenesisDraft derives everything from the prompt and invents no cast", () => {

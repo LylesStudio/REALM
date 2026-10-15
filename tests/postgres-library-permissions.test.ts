@@ -68,6 +68,8 @@ const MIGRATIONS = [
   "0056_runtime_save_restore_grants.sql",
   // Phase 4D：records.world_version（branch/duplicate/genesis 写路径显式携带）。
   "0057_realmworld_record_binding.sql",
+  // B1：branch Goal clone reads the retry-attempt columns.
+  "0060_goal_scope_terminal_lifecycle.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

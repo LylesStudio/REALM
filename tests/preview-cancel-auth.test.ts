@@ -104,6 +104,9 @@ function createFakeService(options: {
     loadRecord: unused,
     openDefaultRecord: unused,
     submitMessage: unused,
+    admitMessage: unused,
+    runAdmittedTurn: async () => null,
+    readTurnStatus: unused,
     startSelfPlay: unused,
     stopSelfPlay: unused,
     listCommittedEvents: unused,
@@ -244,8 +247,13 @@ test("preview：已授权 viewer 用 session principal 订阅成功；query 伪�
     spies.emit(LOCAL_RECORD_SCOPE.recordId, {
       kind: "chunk",
       previewId: "pv_1",
+      turnId: "pv_1",
+      segmentIndex: 0,
+      phase: "preview",
       speaker: "旁白",
       content: "chunk-content",
+      status: "preview",
+      visibility: "player",
     });
     const chunk = await readStreamChunk(response);
     assert.match(chunk, /event: preview\ndata: /);
@@ -277,8 +285,13 @@ test("preview：stream cancel/abort/enqueue 失败汇成单次幂等清理（监
     spies.emit(LOCAL_RECORD_SCOPE.recordId, {
       kind: "chunk",
       previewId: "pv_late",
+      turnId: "pv_late",
+      segmentIndex: 0,
+      phase: "preview",
       speaker: "旁白",
       content: "late-chunk",
+      status: "preview",
+      visibility: "player",
     });
     assert.equal(spies.unsubscribeCalls, 1);
     // ③ abort 再触发：幂等，仍是一次。

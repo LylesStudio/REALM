@@ -12,7 +12,7 @@ import type {
   GoalAssessmentDecision,
   GoalAssessmentJobRepository,
 } from "../../modules/goals/assessment-worker.ts";
-import type { GoalEvent, GoalState } from "../../modules/goals/public.ts";
+import type { GoalEvent, GoalScopeKind, GoalState } from "../../modules/goals/public.ts";
 import type { JsonValue } from "../../modules/runtime/public.ts";
 
 export interface GoalAssessmentEnqueueInput {
@@ -74,6 +74,15 @@ interface GoalInstanceRow extends QueryResultRow {
   revision: string | number;
   progress: unknown;
   outcome: unknown;
+  scope_kind: string;
+  attempt: string | number;
+  supersedes_instance_id: string | null;
+}
+
+interface SettleInstanceRow extends QueryResultRow {
+  id: string;
+  state: string;
+  revision: string | number;
 }
 
 interface HeadRow extends QueryResultRow {
@@ -261,7 +270,8 @@ export function createPostgresGoalAssessmentJobQueue(
       return withWorkspaceTransaction(options.pool, workspaceId, async (client) => {
         await assertLease(client, job, Date.now());
         const instanceResult = await client.query<GoalInstanceRow>(
-          `SELECT id, record_id, state, revision, progress, outcome
+          `SELECT id, record_id, state, revision, progress, outcome,
+                  scope_kind, attempt, supersedes_instance_id
            FROM goal_instances
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
              AND record_id = $4 AND id = $5`,
@@ -307,6 +317,9 @@ export function createPostgresGoalAssessmentJobQueue(
             revision: safeInteger(instanceResult.rows[0]!.revision, "GOAL_REVISION_INVALID"),
             progress: jsonObject(instanceResult.rows[0]!.progress, "GOAL_PROGRESS_INVALID"),
             outcome: nullableJsonObject(instanceResult.rows[0]!.outcome, "GOAL_OUTCOME_INVALID"),
+            scopeKind: normalizeGoalScopeKind(instanceResult.rows[0]!.scope_kind),
+            attempt: Math.max(1, safeInteger(instanceResult.rows[0]!.attempt, "GOAL_ATTEMPT_INVALID")),
+            supersedesInstanceId: instanceResult.rows[0]!.supersedes_instance_id,
           },
           events,
           head: { recordVersion, ordinal: Math.max(0, nextOrdinal - 1) },
@@ -372,8 +385,8 @@ export function createPostgresGoalAssessmentJobQueue(
            FOR UPDATE`,
           [workspaceId, input.job.worldId, input.job.worldlineId, input.job.recordId],
         );
-        const instanceResult = await client.query<GoalInstanceRow>(
-          `SELECT id, record_id, state, revision, progress, outcome
+        const instanceResult = await client.query<SettleInstanceRow>(
+          `SELECT id, state, revision
            FROM goal_instances
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
              AND record_id = $4 AND id = $5
@@ -388,6 +401,38 @@ export function createPostgresGoalAssessmentJobQueue(
         }
         const instance = instanceResult.rows[0]!;
         const head = headResult.rows[0]!;
+        const currentRevision = safeInteger(instance.revision, "GOAL_REVISION_INVALID");
+        if (instance.state !== "active") {
+          // 终态不可翻转（B1）：同一逻辑 transition 的幂等 replay
+          // （同目标终态 + 同 revision）直接收口完成 job；其余迟到/重复
+          // 的 complete/fail/settle 结果记录 rejected 证据并稳定拒绝，
+          // 绝不 requeue 翻转终态。
+          const isReplay = instance.state === input.decision.transition.to
+            && currentRevision === input.decision.transition.revision;
+          if (isReplay) {
+            await insertAssessment(client, input.job, input.decision, { replay: true });
+            await updateJobState(client, input.job, "completed", input.now, null, null);
+          } else {
+            await insertAssessment(client, input.job, {
+              status: "rejected",
+              source: input.decision.source,
+              policyVersion: input.decision.policyVersion,
+              observedHead: input.decision.observedHead,
+              code: "GOAL_ALREADY_TERMINAL",
+              evidence: input.decision.evidence,
+              result: { kind: "terminal", code: "GOAL_ALREADY_TERMINAL" },
+            });
+            await updateJobState(
+              client,
+              input.job,
+              "completed",
+              input.now,
+              "GOAL_ALREADY_TERMINAL",
+              null,
+            );
+          }
+          return "applied";
+        }
         const currentVersion = safeInteger(head.record_version, "GOAL_RECORD_VERSION_INVALID");
         const nextOrdinal = safeInteger(head.next_record_ordinal, "GOAL_RECORD_ORDINAL_INVALID");
         const currentHead = {
@@ -398,8 +443,7 @@ export function createPostgresGoalAssessmentJobQueue(
           await requeueForConflict(client, input.job, input.now, "GOAL_HEAD_CHANGED", retryDelayMs);
           return "retryable";
         }
-        const currentRevision = safeInteger(instance.revision, "GOAL_REVISION_INVALID");
-        if (instance.state !== "active" || input.decision.transition.revision !== currentRevision + 1) {
+        if (input.decision.transition.revision !== currentRevision + 1) {
           await requeueForConflict(client, input.job, input.now, "GOAL_INSTANCE_CHANGED", retryDelayMs);
           return "retryable";
         }
@@ -429,15 +473,15 @@ export function createPostgresGoalAssessmentJobQueue(
           `INSERT INTO events (
              workspace_id, world_id, worldline_id, record_id, scene_id, id,
              record_version, record_ordinal, batch_index, event_kind,
-             actor_participant_id, speaker_name, content, payload,
-             visibility_policy_id, world_tick, world_ordinal, calendar_id,
-             display_time, causation_command_id, turn_run_id, recorded_at
-           ) VALUES (
-             $1, $2, $3, $4, $5, $6,
-             $7, $8, 0, 'goal.transition.committed',
-             NULL, '', $9, $10::jsonb,
-             $11, $12, $13, $14, $15, NULL, NULL, $16::timestamptz
-           )`,
+            actor_participant_id, speaker_name, content, payload,
+            visibility_policy_id, world_tick, world_ordinal, calendar_id,
+            display_time, causation_command_id, turn_run_id, recorded_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, 0, 'goal.transition.committed',
+            NULL, '', $9, $10::jsonb,
+            $11, $12, $13, $14, $15, NULL, NULL, $16::timestamptz
+          )`,
           [
             workspaceId,
             input.job.worldId,
@@ -447,7 +491,7 @@ export function createPostgresGoalAssessmentJobQueue(
             eventId,
             currentVersion + 1,
             nextOrdinal,
-            `Goal ${input.job.goalKey} completed`,
+            `Goal ${input.job.goalKey} ${input.decision.transition.to}`,
             json({
               __realmRuntimePayload: {
                 goalInstanceId: input.job.goalInstanceId,
@@ -499,7 +543,7 @@ export function createPostgresGoalAssessmentJobQueue(
         );
         await client.query(
           `UPDATE goal_instances
-           SET state = 'completed', revision = $6, progress = $7::jsonb,
+           SET state = $10, revision = $6, progress = $7::jsonb,
                outcome = $8::jsonb, updated_at = $9::timestamptz,
                completed_at = $9::timestamptz
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
@@ -514,6 +558,7 @@ export function createPostgresGoalAssessmentJobQueue(
             json(input.decision.transition.progress),
             json(input.decision.transition.outcome),
             committedAt,
+            input.decision.transition.to,
           ],
         );
         await insertAssessment(client, input.job, input.decision);
@@ -644,6 +689,7 @@ async function insertAssessment(
   client: PoolClient,
   job: ClaimedGoalAssessmentJob,
   decision: GoalAssessmentDecision,
+  options?: { replay?: boolean },
 ): Promise<void> {
   const evidenceHead = decision.evidence.evidenceHead;
   const assessmentId = `goal-assessment:${job.jobId}:${job.attemptCount}`;
@@ -658,7 +704,7 @@ async function insertAssessment(
        $6, $7, $8, $9, $10,
        $11::jsonb, $12::text[], $13, $14,
        $15, $16
-     )`,
+     )${options?.replay ? " ON CONFLICT (workspace_id, id) DO NOTHING" : ""}`,
     [
       job.workspaceId,
       job.worldId,
@@ -748,6 +794,13 @@ function normalizeGoalState(value: string): GoalState {
     return value as GoalState;
   }
   throw new GoalRuntimeRepositoryError("GOAL_STATE_INVALID", "Persisted Goal state is invalid.");
+}
+
+function normalizeGoalScopeKind(value: string): GoalScopeKind {
+  if (["record", "story", "worldline"].includes(value)) {
+    return value as GoalScopeKind;
+  }
+  throw new GoalRuntimeRepositoryError("GOAL_SCOPE_KIND_INVALID", "Persisted Goal scope kind is invalid.");
 }
 
 function jsonObject(value: unknown, code: string): Readonly<Record<string, JsonValue>> {

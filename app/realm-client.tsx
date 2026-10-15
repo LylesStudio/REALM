@@ -169,7 +169,12 @@ export function RealmClient() {
   const creationReturnFocusRef = useRef<HTMLElement | null>(null);
   const creationReturnFocusKeyRef = useRef<string | null>(null);
   const creationRestoreFocusPending = useRef(false);
-  const [creationFailed, setCreationFailed] = useState(false);
+  const [creationFailure, setCreationFailure] = useState<
+    "idle" | "not_committed" | "unknown" | "conflict"
+  >("idle");
+  const creationRequestIdRef = useRef("");
+  /** 上次结果未知时，下一次确认先回读状态，不直接再提交。 */
+  const creationCheckStatusFirstRef = useRef(false);
   /** 游戏大厅 overlay（LAN 约局；与创世 overlay 互斥——打开大厅即收创世）。 */
   const [lobbyOpen, setLobbyOpen] = useState(false);
   /** 邀请深链目标房间（?lobby=<roomId>）；只作导航提示，不作授权依据。 */
@@ -583,10 +588,86 @@ export function RealmClient() {
     }
   }
 
+  function creationErrorMessage(): string | null {
+    if (creationFailure === "not_committed") {
+      return uiText("ui.world.createNotCommitted", uiLanguage);
+    }
+    if (creationFailure === "conflict") {
+      return uiText("ui.world.createConflict", uiLanguage);
+    }
+    if (creationFailure === "unknown") {
+      return uiText("ui.world.createFailed", uiLanguage);
+    }
+    return null;
+  }
+
+  function ensureCreationRequestId(): string {
+    if (!creationRequestIdRef.current) {
+      creationRequestIdRef.current = `genesis_${crypto.randomUUID()}`;
+    }
+    return creationRequestIdRef.current;
+  }
+
+  async function readCreationStatus(requestId: string): Promise<
+    | { kind: "committed"; recordId: string }
+    | { kind: "not_committed" }
+    | { kind: "unknown" }
+  > {
+    try {
+      const response = await fetch(
+        `/api/world/generate/status?requestId=${encodeURIComponent(requestId)}`,
+        { headers: { Accept: "application/json" } },
+      );
+      const payload = await readJson(response);
+      if (!response.ok || !payload || typeof payload !== "object") return { kind: "unknown" };
+      const body = payload as { state?: unknown; recordId?: unknown };
+      if (body.state === "committed" && typeof body.recordId === "string" && body.recordId) {
+        return { kind: "committed", recordId: body.recordId };
+      }
+      if (body.state === "not_committed") return { kind: "not_committed" };
+      return { kind: "unknown" };
+    } catch {
+      return { kind: "unknown" };
+    }
+  }
+
+  async function settleUncertainCreation(requestId: string): Promise<string | null> {
+    const status = await readCreationStatus(requestId);
+    await loadLibrary();
+    if (status.kind === "committed") {
+      creationCheckStatusFirstRef.current = false;
+      setCreationFailure("idle");
+      return status.recordId;
+    }
+    if (status.kind === "not_committed") {
+      creationCheckStatusFirstRef.current = false;
+      setCreationFailure("not_committed");
+      return null;
+    }
+    creationCheckStatusFirstRef.current = true;
+    setCreationFailure("unknown");
+    return null;
+  }
+
   async function confirmWorldGenesis(
     draft: WorldGenesisDraft,
   ): Promise<string | null> {
-    setCreationFailed(false);
+    const requestId = ensureCreationRequestId();
+    if (creationCheckStatusFirstRef.current) {
+      const status = await readCreationStatus(requestId);
+      if (status.kind === "committed") {
+        creationCheckStatusFirstRef.current = false;
+        setCreationFailure("idle");
+        await loadLibrary();
+        return status.recordId;
+      }
+      if (status.kind === "unknown") {
+        setCreationFailure("unknown");
+        return null;
+      }
+      creationCheckStatusFirstRef.current = false;
+    }
+    setCreationFailure("idle");
     try {
       const response = await fetch("/api/world/generate", {
         method: "POST",
@@ -594,26 +675,25 @@ export function RealmClient() {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ draft }),
+        body: JSON.stringify({ draft, creationRequestId: requestId }),
       });
       const payload = await readJson(response);
-      if (!response.ok) {
-        await loadLibrary();
-        setCreationFailed(true);
+      if (response.status === 409) {
+        setCreationFailure("conflict");
         return null;
+      }
+      if (!response.ok) {
+        return await settleUncertainCreation(requestId);
       }
       const recordId = (payload as { recordId?: unknown } | null)?.recordId;
       if (typeof recordId !== "string" || !recordId) {
-        await loadLibrary();
-        setCreationFailed(true);
-        return null;
+        return await settleUncertainCreation(requestId);
       }
+      creationCheckStatusFirstRef.current = false;
       await loadLibrary();
       return recordId;
     } catch {
-      await loadLibrary();
-      setCreationFailed(true);
-      return null;
+      return await settleUncertainCreation(requestId);
     }
   }
 
@@ -623,7 +703,9 @@ export function RealmClient() {
     creationReturnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
     creationReturnFocusKeyRef.current = creationReturnFocusRef.current?.dataset.creationFocusReturn ?? null;
     creationRestoreFocusPending.current = false;
-    setCreationFailed(false);
+    creationRequestIdRef.current = `genesis_${crypto.randomUUID()}`;
+    creationCheckStatusFirstRef.current = false;
+    setCreationFailure("idle");
     if (source === "library") setLibraryOpen(false);
     setCreationOverlay({ kind, source });
   }
@@ -633,7 +715,7 @@ export function RealmClient() {
     const source = creationOverlay?.source;
     creationRestoreFocusPending.current = true;
     setCreationOverlay(null);
-    setCreationFailed(false);
+    setCreationFailure("idle");
     if (source === "library") {
       setLobbyOpen(false);
       setLobbyInvite(null);
@@ -735,7 +817,7 @@ export function RealmClient() {
           <GuidedGenesisChat
             uiLanguage={uiLanguage}
             playerName={playerDisplayName || "旅人"}
-            creationError={creationFailed ? uiText("ui.world.createFailed", uiLanguage) : null}
+            creationError={creationErrorMessage()}
             onConfirm={confirmCreation}
             onOpenRecord={openRecord}
             onFallback={(payload) =>
@@ -760,7 +842,7 @@ export function RealmClient() {
       >
         <GuidedGenesis
           uiLanguage={uiLanguage}
-          creationError={creationFailed ? uiText("ui.world.createFailed", uiLanguage) : null}
+          creationError={creationErrorMessage()}
           fallback={creationOverlay.fallback ?? null}
           onConfirm={confirmCreation}
           onExit={closeCreation}
@@ -1188,6 +1270,31 @@ export function RealmClient() {
     });
   }, [latestEventId, latestEventStatus]);
 
+  async function waitForAdmittedTurn(recordId: string, turnId: string) {
+    const started = Date.now();
+    while (Date.now() - started < 180_000) {
+      const response = await fetch(
+        `/api/record/turns/status?recordId=${encodeURIComponent(recordId)}&turnId=${encodeURIComponent(turnId)}`,
+        { headers: { Accept: "application/json" } },
+      );
+      const payload = await readJson(response);
+      if (response.ok && payload && typeof payload === "object") {
+        const body = payload as { status?: unknown; message?: unknown };
+        if (body.status === "completed" || body.status === "failed") {
+          return {
+            status: body.status,
+            message: typeof body.message === "string" ? body.message : "",
+          };
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    return {
+      status: "failed" as const,
+      message: "回合状态暂时读不到。请刷新记录，不要重复提交同一句。",
+    };
+  }
+
   async function sendMessage(
     content: string,
     actionSelection?: { affordanceId: string },
@@ -1295,6 +1402,21 @@ export function RealmClient() {
           );
         }
         return false;
+      }
+      if (response.status === 202) {
+        const admitted = payload as { turnId?: unknown; status?: unknown; message?: unknown } | null;
+        const turnId = typeof admitted?.turnId === "string" ? admitted.turnId : "";
+        if (!turnId) throw new Error("行动已受理，但没有返回回合编号。");
+        const settled = await waitForAdmittedTurn(projection.record.id, turnId);
+        if (!mounted.current) return false;
+        if (settled.status !== "completed") {
+          throw new Error(settled.message || "本轮没有完成，系统没有写入内容。");
+        }
+        const reloaded = await loadRecord(projection.record.id);
+        if (!reloaded) throw new Error("行动已完成，但记录没有刷新。");
+        setStreamState("live");
+        setVisibilityProposal(null);
+        return true;
       }
       if (!response.ok) {
         throw new Error(errorMessage(payload, `行动提交失败（${response.status}）`));

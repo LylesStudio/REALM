@@ -3,11 +3,13 @@ import {
 } from "../../../../modules/application/local-record-service.ts";
 import { getFirstNightRuntime } from "../../../../modules/application/first-night-runtime.ts";
 import {
+  LibraryServiceError,
   createPostgresLibraryService,
   type LibraryService,
 } from "../../../../modules/application/library-service.ts";
 import { getModelSettingsService } from "../../../../modules/application/model-settings-service.ts";
 import {
+  GENESIS_CREATION_REQUEST_ID,
   fallbackGenesisDraft,
   generateGenesisDraft,
   normalizeGenesisDraft,
@@ -59,6 +61,13 @@ export async function POST(request: Request) {
       if (!draft) {
         return genesisError(400, "INVALID_COMMAND", "World name is required.");
       }
+      const creationRequestId = typeof parsed.creationRequestId === "string"
+        ? parsed.creationRequestId.trim()
+        : "";
+      if (parsed.creationRequestId !== undefined
+        && !GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) {
+        return genesisError(400, "INVALID_COMMAND", "Creation request id is invalid.");
+      }
       const service = await getLibraryService();
       const ids = await service.createGenesis(
         {
@@ -68,6 +77,7 @@ export async function POST(request: Request) {
           sessionProof: sessionProofFromRequest(request) ?? "",
         },
         draft,
+        creationRequestId ? { creationRequestId } : undefined,
       );
       scheduleFirstNight(ids.recordId);
       return Response.json(
@@ -77,7 +87,14 @@ export async function POST(request: Request) {
     }
 
     return genesisError(400, "INVALID_COMMAND", "Provide either prompt or draft.");
-  } catch {
+  } catch (error) {
+    if (error instanceof LibraryServiceError && error.code === "GENESIS_REQUEST_CONFLICT") {
+      return genesisError(
+        409,
+        "GENESIS_REQUEST_CONFLICT",
+        "This creation request was already used for a different draft.",
+      );
+    }
     return genesisError(
       500,
       "INTERNAL_ERROR",

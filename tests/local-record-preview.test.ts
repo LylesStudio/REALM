@@ -197,8 +197,8 @@ test("public 广播：有无身份的订阅者都收到 chunk 与 end", () => {
   hub.end("record", "committed");
 
   const expected: LocalPreviewEvent[] = [
-    { kind: "chunk", previewId: "p1", speaker: "旁白", content: "潮水漫过石阶。" },
-    { kind: "end", previewId: "p1", outcome: "committed" },
+    { kind: "chunk", previewId: "p1", turnId: "p1", segmentIndex: 0, phase: "preview", speaker: "旁白", content: "潮水漫过石阶。", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p1", turnId: "p1", status: "committed", outcome: "committed" },
   ];
   assert.deepEqual(named.events, expected);
   assert.deepEqual(anonymous.events, expected);
@@ -213,8 +213,8 @@ test("restricted：只有 audience 身份收到 chunk 与 end，end 元数据同
   hub.end("record", "committed");
 
   assert.deepEqual(insider.events, [
-    { kind: "chunk", previewId: "p2", speaker: "旁白", content: "密函里写着真名。" },
-    { kind: "end", previewId: "p2", outcome: "committed" },
+    { kind: "chunk", previewId: "p2", turnId: "p2", segmentIndex: 0, phase: "preview", speaker: "旁白", content: "密函里写着真名。", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p2", turnId: "p2", status: "committed", outcome: "committed" },
   ]);
   assert.deepEqual(outsider.events, [], "非 audience 不得收到 restricted chunk/end");
 });
@@ -242,8 +242,8 @@ test("abort 后迟到的 committed cleanup 必须发 aborted；abort 后 chunk �
   hub.end("record", "committed");
 
   assert.deepEqual(events, [
-    { kind: "chunk", previewId: "p4", speaker: "塞娜", content: "第一句" },
-    { kind: "end", previewId: "p4", outcome: "aborted" },
+    { kind: "chunk", previewId: "p4", turnId: "p4", segmentIndex: 0, phase: "preview", speaker: "塞娜", content: "第一句", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p4", turnId: "p4", status: "cancelled", outcome: "aborted" },
   ]);
 });
 
@@ -258,8 +258,8 @@ test("只有 streaming 才能 push：begin 前/end 后的 chunk 与空 chunk 都
   hub.publishChunk("record", "旁白", "结束后的迟到 chunk");
 
   assert.deepEqual(events, [
-    { kind: "chunk", previewId: "p5", speaker: "旁白", content: "有效内容" },
-    { kind: "end", previewId: "p5", outcome: "committed" },
+    { kind: "chunk", previewId: "p5", turnId: "p5", segmentIndex: 0, phase: "preview", speaker: "旁白", content: "有效内容", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p5", turnId: "p5", status: "committed", outcome: "committed" },
   ]);
 });
 
@@ -273,8 +273,8 @@ test("重复 end 幂等：第二次 end 不再广播；未知 record 的 end 是
   hub.end("record", "committed");
 
   assert.deepEqual(events, [
-    { kind: "chunk", previewId: "p6", speaker: "旁白", content: "内容" },
-    { kind: "end", previewId: "p6", outcome: "committed" },
+    { kind: "chunk", previewId: "p6", turnId: "p6", segmentIndex: 0, phase: "preview", speaker: "旁白", content: "内容", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p6", turnId: "p6", status: "committed", outcome: "committed" },
   ]);
 });
 
@@ -294,8 +294,8 @@ test("重复 unsubscribe 幂等：退订后不再接收，监听器零残留", (
   hub.publishChunk("record", "旁白", "新一轮");
   hub.end("record", "committed");
   assert.deepEqual(again.events, [
-    { kind: "chunk", previewId: "p8", speaker: "旁白", content: "新一轮" },
-    { kind: "end", previewId: "p8", outcome: "committed" },
+    { kind: "chunk", previewId: "p8", turnId: "p8", segmentIndex: 0, phase: "preview", speaker: "旁白", content: "新一轮", status: "preview", visibility: "player" },
+    { kind: "end", previewId: "p8", turnId: "p8", status: "committed", outcome: "committed" },
   ]);
 });
 

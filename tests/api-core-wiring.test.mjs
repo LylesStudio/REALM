@@ -18,7 +18,7 @@ const service = readProjectFile("modules/application/local-record-service.ts");
 
 test("GET, POST and SSE delegate through one local Application Service", () => {
   assert.match(recordRoute, /service\.loadRecord\(/);
-  assert.match(messageRoute, /service\.submitMessage\(/);
+  assert.match(messageRoute, /service\.admitMessage\(/);
   assert.match(eventsRoute, /service\.listCommittedEvents\(/);
   for (const route of [recordRoute, messageRoute, eventsRoute]) {
     assert.match(route, /local-record-service\.ts/);

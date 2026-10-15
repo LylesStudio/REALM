@@ -29,6 +29,7 @@ export const DURABLE_JOB_KINDS = [
   "first-night",
   "memory-prefetch",
   "self-play-beat",
+  "record-turn",
 ] as const;
 export type DurableJobKind = (typeof DURABLE_JOB_KINDS)[number];
 
@@ -157,6 +158,27 @@ export function parseMemoryPrefetchJobPayload(
   };
 }
 
+export interface RecordTurnJobPayload {
+  turnId: string;
+  idempotencyKey: string;
+  principalId: string;
+}
+
+export function parseRecordTurnJobPayload(
+  value: unknown,
+): RecordTurnJobPayload | null {
+  if (!isRecord(value)) return null;
+  if (!hasOnlyKeys(value, ["turnId", "idempotencyKey", "principalId"])) return null;
+  if (!isBoundedText(value.turnId, ID_LIMIT)) return null;
+  if (!isBoundedText(value.idempotencyKey, ID_LIMIT)) return null;
+  if (!isBoundedText(value.principalId, NAME_LIMIT)) return null;
+  return {
+    turnId: value.turnId,
+    idempotencyKey: value.idempotencyKey,
+    principalId: value.principalId,
+  };
+}
+
 export function parseSelfPlayBeatJobPayload(
   value: unknown,
 ): SelfPlayBeatJobPayload | null {
@@ -191,6 +213,8 @@ export function validateDurableJobPayload(
       return parseMemoryPrefetchJobPayload(payload) !== null;
     case "self-play-beat":
       return parseSelfPlayBeatJobPayload(payload) !== null;
+    case "record-turn":
+      return parseRecordTurnJobPayload(payload) !== null;
   }
 }
 

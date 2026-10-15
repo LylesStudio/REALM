@@ -122,7 +122,7 @@ if (!adminConnectionString) {
 
 
   // ------------------------------------------------------------------
-  test("full migration chain via real runner: ledger checksums, idempotent replay, 75 tables", { timeout: 300_000 }, async (t) => {
+  test("full migration chain via real runner: ledger checksums, idempotent replay, 91 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -134,7 +134,16 @@ if (!adminConnectionString) {
     assert.match(first, /apply 0057_realmworld_record_binding\.sql/);
     assert.match(first, /apply 0058_durable_job_queue\.sql/);
     assert.match(first, /apply 0059_world_commands\.sql/);
-    assert.match(first, /75 tables/);
+    assert.match(first, /apply 0060_goal_scope_terminal_lifecycle\.sql/);
+    assert.match(first, /apply 0061_story_graph_runtime\.sql/);
+    assert.match(first, /apply 0062_project_finance_foundation\.sql/);
+    assert.match(first, /apply 0063_genesis_creation_requests\.sql/);
+    assert.match(first, /apply 0064_record_turn_jobs\.sql/);
+    assert.match(first, /apply 0065_funding_obligations\.sql/);
+    assert.match(first, /apply 0066_committed_fact_commands\.sql/);
+    assert.match(first, /apply 0067_member_relationship_revisions\.sql/);
+    assert.match(first, /apply 0068_inventory_grant_command\.sql/);
+    assert.match(first, /91 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(

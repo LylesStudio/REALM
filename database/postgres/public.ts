@@ -68,10 +68,17 @@ export {
 } from "./goal-assessment-job-queue.ts";
 export {
   enqueueGoalAssessmentJobsForCommittedEvents,
+  reconcileGoalAssessmentJobsForCommittedEvents,
   materializeGoalInstances,
+  retryGoalInstance,
   type GoalCommittedEventScope,
   type GoalMaterializationDeclaration,
+  type GoalRetryDeclaration,
 } from "./goal-runtime-materialization.ts";
+export {
+  loadGoalScopeCommittedEvents,
+  type GoalScopedCommittedEvent,
+} from "./goal-scope-evidence.ts";
 export {
   createPostgresActionAffordanceCatalog,
   createPostgresCharacterSkillProvider,
@@ -161,9 +168,30 @@ export {
   type RealmRuntimeSaveWorldBindingValidator,
 } from "./realm-runtime-save-repository.ts";
 export {
+  createPostgresStoryGraphRepository,
+  StoryGraphRepositoryError,
+  type StoryGraphRepository,
+  type StoryGraphRepositoryErrorCode,
+  type StoryGraphReconcileResult,
+  type StoryGraphSnapshot,
+  type StoryNodeProjection,
+} from "./story-graph-repository.ts";
+export {
   createPostgresGoalProjectionRepository,
   GoalProjectionRepositoryError,
   type GoalProjectionReadResult,
   type GoalProjectionRepository,
   type GoalProjectionRepositoryErrorCode,
 } from "./goal-projection-repository.ts";
+export {
+  createPostgresProjectRepository,
+  type ProjectRepository,
+  type ProjectRepositoryRead,
+} from "./project-repository.ts";
+export {
+  createPostgresFinanceRepository,
+  type FinanceRepository,
+  type FinanceRepositoryRead,
+} from "./finance-repository.ts";
+export { createPostgresWorkbenchProjection } from "./workbench-projection.ts";
+export { createPostgresProjectFinanceCommandStore } from "./project-finance-command-repository.ts";

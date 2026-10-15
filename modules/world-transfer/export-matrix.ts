@@ -1,5 +1,5 @@
 /**
- * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；61 表 = 56 实有 + 5 规划）。
+ * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；88 表 = 88 实有可导出，另有 2 张 durable 台账不进矩阵）。
  *
  * 档位：T=template / F=full / A=archive(selection)；派生=trigger 重建不进包；
  * flag=仅 includeMemberships 展示形态；excluded=不出包。
@@ -67,7 +67,7 @@ function row(
   };
 }
 
-/** D.7 矩阵全量（61 行；声明序 = 包内 tables/* 序）。 */
+/** D.7 矩阵全量（88 行；声明序 = 包内 tables/* 序）。 */
 export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("workspaces", "excluded", null),
   row("worlds", "bootstrap", "A"),
@@ -142,6 +142,11 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("goal_instances", "excluded", null),
   row("goal_assessment_jobs", "excluded", null),
   row("goal_assessments", "excluded", null),
+  // Story Graph runtime projections and unlock evidence are server-owned
+  // state; they stay out of .realm packages until a dedicated runtime-save
+  // route can preserve their replay/evidence invariants.
+  row("story_node_instances", "excluded", null),
+  row("story_unlock_ledger", "excluded", null),
   // 0057 版本切换审计是控制面台账（谁何时把哪条 Record 切到哪个
   // RealmWorld 版本），不是世界内容；绑定真相随 records.world_version
   // 走，审计行不进 .realm 包。
@@ -151,6 +156,24 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   // 内容，不进 .realm 包。
   row("world_command_groups", "excluded", null),
   row("world_command_records", "excluded", null),
+  // Project/Finance runtime facts are server-owned projections and append-only
+  // ledgers; they remain excluded until a dedicated runtime-save route can
+  // preserve command replay and financial evidence invariants. The dedicated
+  // worldline snapshot in project-finance-runtime-save.ts is that replay
+  // proof. These rows stay excluded from the record pack and the realm-import
+  // allowlist, which cannot own a worldline ledger without applying it twice.
+  row("projects", "excluded", null),
+  row("project_milestones", "excluded", null),
+  row("project_story_links", "excluded", null),
+  row("budget_allocations", "excluded", null),
+  row("finance_accounts", "excluded", null),
+  row("ledger_entries", "excluded", null),
+  row("project_finance_command_groups", "excluded", null),
+  row("obligations", "excluded", null),
+  row("obligation_settlements", "excluded", null),
+  row("committed_fact_commands", "excluded", null),
+  row("performance_assessments", "excluded", null),
+  row("member_relationship_revisions", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [
       "observer_continuity_id",

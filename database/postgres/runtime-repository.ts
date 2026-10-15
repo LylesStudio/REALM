@@ -265,6 +265,18 @@ interface OutboxRow extends QueryResultRow {
  * PostgreSQL adapter for the persistence-neutral RuntimeRepository port.
  * Every operation establishes an RLS workspace inside its own transaction.
  */
+function ordinalOfProgress(value: unknown): number {
+  if (
+    value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { ordinal?: unknown }).ordinal === "number"
+  ) {
+    return (value as { ordinal: number }).ordinal;
+  }
+  return -1;
+}
+
 export function createPostgresRuntimeRepository<
   TCommandPayload extends JsonValue = JsonValue,
   TPlan extends JsonValue = JsonValue,
@@ -542,6 +554,43 @@ export function createPostgresRuntimeRepository<
         return result.rowCount === 1
           ? clone(hydrateRun(result.rows[0]!.run_checkpoint))
           : null;
+      });
+    },
+
+    async findTurnByIdempotency(recordId, idempotencyKey) {
+      return inWorkspaceTransaction(options.pool, workspaceId, async (client) => {
+        const result = await client.query<TurnRow>(
+          `SELECT turn.run_checkpoint
+           FROM command_inbox AS command
+           JOIN turn_runs AS turn
+             ON turn.workspace_id = command.workspace_id
+            AND turn.command_id = command.id
+           WHERE command.workspace_id = $1
+             AND command.record_id = $2
+             AND command.idempotency_key = $3
+           ORDER BY turn.attempt_number DESC
+           LIMIT 1`,
+          [workspaceId, recordId, idempotencyKey],
+        );
+        return result.rowCount === 1
+          ? clone(hydrateRun(result.rows[0]!.run_checkpoint))
+          : null;
+      });
+    },
+
+    async saveDraftProgress(input) {
+      return inWorkspaceTransaction(options.pool, workspaceId, async (client) => {
+        await gateRecordWritePath(client, await readTurnRecordId(client, input.turnId));
+        const run = await lockedRun(client, input.turnId);
+        assertRun(run, input.expectedRevision, "drafting");
+        if (ordinalOfProgress(input.progress) < ordinalOfProgress(run.draftProgress)) {
+          throw new RuntimeConcurrencyError();
+        }
+        run.draftProgress = clone(input.progress);
+        run.revision += 1;
+        run.updatedAt = input.now;
+        await saveRun(client, run);
+        return clone(run);
       });
     },
 

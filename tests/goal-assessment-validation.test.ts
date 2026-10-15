@@ -173,3 +173,116 @@ test("policy mismatch and duplicate evidence fail closed", () => {
     { kind: "rejected", code: "GOAL_EVIDENCE_DUPLICATE" },
   );
 });
+
+test("fail and settle candidates become validated transitions with the same evidence guarantees", () => {
+  for (const [decision, target] of [["fail", "failed"], ["settle", "settled"]] as const) {
+    const result = validateGoalAssessment({
+      definition,
+      instance,
+      candidate: candidate({ decision }),
+      events,
+      head,
+    });
+
+    assert.equal(result.kind, "accepted");
+    if (result.kind !== "accepted") continue;
+    assert.equal(result.transition.from, "active");
+    assert.equal(result.transition.to, target);
+    assert.equal(result.transition.revision, 3);
+    // 与 complete 相同的证据校验：ids/head/hash/policy 全部复验。
+    assert.deepEqual(result.transition.evidenceEventIds, ["event-1"]);
+    assert.deepEqual(result.transition.evidenceHead, head);
+    assert.equal(
+      result.transition.evidenceSnapshotHash,
+      candidate({ decision }).evidenceSnapshotHash,
+    );
+    assert.equal(result.transition.policyVersion, "judge-v1");
+    assert.deepEqual(result.transition.outcome, { outcomeKey: "understood" });
+  }
+});
+
+test("fail/settle candidates keep the full evidence and policy validation burden", () => {
+  assert.deepEqual(
+    validateGoalAssessment({
+      definition,
+      instance,
+      candidate: candidate({ decision: "fail", evidenceEventIds: ["not-an-event"] }),
+      events,
+      head,
+    }),
+    { kind: "rejected", code: "GOAL_EVIDENCE_EVENT_NOT_FOUND" },
+  );
+  assert.deepEqual(
+    validateGoalAssessment({
+      definition,
+      instance,
+      candidate: candidate({ decision: "settle", evidenceSnapshotHash: "forged" }),
+      events,
+      head,
+    }),
+    { kind: "rejected", code: "GOAL_EVIDENCE_HASH_MISMATCH" },
+  );
+  assert.deepEqual(
+    validateGoalAssessment({
+      definition,
+      instance,
+      candidate: candidate({ decision: "fail", policyVersion: "judge-v2" }),
+      events,
+      head,
+    }),
+    { kind: "rejected", code: "GOAL_POLICY_VERSION_MISMATCH" },
+  );
+});
+
+test("content-declared terminal allow-list rejects disallowed terminals", () => {
+  // R6+ 内容可声明 terminals 不含 failed；校验器必须拒绝。
+  const noFail = validateGoalAssessment({
+    definition: { ...definition, terminals: ["completed", "settled"] },
+    instance,
+    candidate: candidate({ decision: "fail" }),
+    events,
+    head,
+  });
+  assert.deepEqual(noFail, { kind: "rejected", code: "GOAL_TERMINAL_NOT_ALLOWED" });
+
+  const noSettle = validateGoalAssessment({
+    definition: { ...definition, terminals: ["completed"] },
+    instance,
+    candidate: candidate({ decision: "settle" }),
+    events,
+    head,
+  });
+  assert.deepEqual(noSettle, { kind: "rejected", code: "GOAL_TERMINAL_NOT_ALLOWED" });
+
+  const noComplete = validateGoalAssessment({
+    definition: { ...definition, terminals: ["failed"] },
+    instance,
+    candidate: candidate({ decision: "complete" }),
+    events,
+    head,
+  });
+  assert.deepEqual(noComplete, { kind: "rejected", code: "GOAL_TERMINAL_NOT_ALLOWED" });
+
+  // 允许时正常接受。
+  const allowed = validateGoalAssessment({
+    definition: { ...definition, terminals: ["failed", "settled"] },
+    instance,
+    candidate: candidate({ decision: "fail" }),
+    events,
+    head,
+  });
+  assert.equal(allowed.kind, "accepted");
+});
+
+test("terminal instances reject every decision without flipping state", () => {
+  for (const decision of ["complete", "fail", "settle"] as const) {
+    const result = validateGoalAssessment({
+      definition,
+      instance: { ...instance, state: "failed" },
+      candidate: candidate({ decision }),
+      events,
+      head,
+    });
+    assert.deepEqual(result, { kind: "terminal", code: "GOAL_ALREADY_TERMINAL" });
+  }
+});

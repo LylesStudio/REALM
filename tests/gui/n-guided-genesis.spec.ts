@@ -88,6 +88,31 @@ test.describe("N. AI 引导创建 · 对话式创世", () => {
     await expect(page.locator(".event-card").first()).toContainText("世界刚刚生成");
   });
 
+  test("N1b 手动填写同伴后创建，阵容回读包含该同伴", async ({ page }) => {
+    test.setTimeout(600_000);
+    const worldName = uniqueName("GUI同伴");
+    await openDemoRecord(page);
+    await openLibrary(page);
+    await page.locator(".guided-entry:not(.is-primary)").click();
+    await page.getByRole("textbox", { name: "世界名称输入" }).fill(worldName);
+    await page.locator(".guided-confirm").click();
+    for (let step = 0; step < 6; step += 1) {
+      await page.locator(".guided-skip").click();
+    }
+    await expect(page.locator(".guided-heading h2")).toHaveText("同伴");
+    await page.getByRole("button", { name: "添加同伴" }).click();
+    await page.getByRole("textbox", { name: "名字 1" }).fill("阿汐");
+    await page.getByRole("textbox", { name: "身份 1" }).fill("向导");
+    await page.getByRole("textbox", { name: "一句话侧写 1" }).fill("认得旧航线");
+    await page.locator(".guided-skip", { hasText: "下一步" }).click();
+    await page.locator(".guided-skip", { hasText: "全部跳过" }).click();
+    await expect(page.locator(".guided-review-scroll")).toContainText("阿汐");
+    await page.locator(".guided-seal-button").click();
+    await waitForRecordReady(page);
+    await expect(page.locator(".cast-list")).toContainText("阿汐");
+    await expect(page.locator(".cast-list")).toContainText("向导");
+  });
+
   test("N2 中途离场不留数据，重开从头开始", async ({ page }) => {
     const worldName = uniqueName("GUI弃卷");
     await openDemoRecord(page);
@@ -179,13 +204,17 @@ test.describe("N. AI 引导创建 · 对话式创世", () => {
 
     let attempts = 0;
     await page.route("**/api/world/generate", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
       attempts += 1;
       await route.fulfill({ status: 503, contentType: "application/json", body: "{}" });
     });
     const submit = page.locator(".guided-seal-button");
     await submit.click();
     await expect(page.locator(".guided-create-error[role=alert]")).toHaveText(
-      "创建状态未能确认。请先检查世界库；确认未出现后，再重试，避免重复创建。",
+      "创建没有写入。可以重试。",
     );
     await expect(page.locator(".guided-review-scroll")).toContainText(worldName);
     await expect(submit).toBeEnabled();

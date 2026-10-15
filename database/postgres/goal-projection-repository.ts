@@ -37,10 +37,14 @@ interface GoalRow extends QueryResultRow {
   progress: unknown;
   outcome: unknown;
   record_id: string;
+  scope_kind: string;
+  attempt: string | number;
+  supersedes_instance_id: string | null;
   latest_goal_transition_ordinal: string | number | null;
 }
 
 const GOAL_STATES = new Set(["active", "completed", "failed", "settled"]);
+const GOAL_SCOPE_KINDS = new Set(["record", "story", "worldline"]);
 
 export interface GoalProjectionRepository {
   load(input: { workspaceId: string; recordId: string }): Promise<GoalProjectionReadResult>;
@@ -69,6 +73,9 @@ export function createPostgresGoalProjectionRepository(
                goal.progress,
                goal.outcome,
                goal.record_id,
+               goal.scope_kind,
+               goal.attempt,
+               goal.supersedes_instance_id,
                (
                  SELECT MAX(goal_event.record_ordinal)
                  FROM events AS goal_event
@@ -87,6 +94,7 @@ export function createPostgresGoalProjectionRepository(
               AND world.id = goal.world_id
              WHERE goal.workspace_id = $1
                AND goal.record_id = $2
+               AND goal.scope_kind = 'record'
                AND record.status <> 'archived'
              ORDER BY goal.created_at ASC, goal.id ASC`,
             [workspaceId, recordId],
@@ -179,6 +187,7 @@ function normalizeGoalRow(row: GoalRow, recordId: string): GoalProjectionInstanc
     || row.goal_key.length === 0
     || row.record_id !== recordId
     || !GOAL_STATES.has(row.state)
+    || !GOAL_SCOPE_KINDS.has(row.scope_kind)
   ) {
     throw new GoalProjectionRepositoryError(
       "GOAL_PROJECTION_ROW_INVALID",
@@ -186,7 +195,21 @@ function normalizeGoalRow(row: GoalRow, recordId: string): GoalProjectionInstanc
     );
   }
   const revision = Number(row.revision);
-  if (!Number.isSafeInteger(revision) || revision < 0 || !isJsonObject(row.progress)) {
+  const attempt = Number(row.attempt);
+  if (
+    !Number.isSafeInteger(revision) || revision < 0
+    || !Number.isSafeInteger(attempt) || attempt < 1
+    || !isJsonObject(row.progress)
+  ) {
+    throw new GoalProjectionRepositoryError(
+      "GOAL_PROJECTION_ROW_INVALID",
+      "Goal projection row is invalid.",
+    );
+  }
+  if (
+    row.supersedes_instance_id !== null
+    && typeof row.supersedes_instance_id !== "string"
+  ) {
     throw new GoalProjectionRepositoryError(
       "GOAL_PROJECTION_ROW_INVALID",
       "Goal projection row is invalid.",
@@ -206,6 +229,9 @@ function normalizeGoalRow(row: GoalRow, recordId: string): GoalProjectionInstanc
     revision,
     progress: row.progress,
     outcome: row.outcome,
+    scopeKind: row.scope_kind as GoalProjectionInstance["scopeKind"],
+    attempt,
+    supersedesInstanceId: row.supersedes_instance_id,
   };
 }
 

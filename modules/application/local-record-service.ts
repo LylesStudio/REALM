@@ -25,11 +25,13 @@ import {
   type SceneImageQueue,
   type SceneImageStore,
 } from "../../database/postgres/public.ts";
-import { enqueueGoalAssessmentJobsForCommittedEvents } from "../../database/postgres/goal-runtime-materialization.ts";
+import { reconcileGoalAssessmentJobsForCommittedEvents } from "../../database/postgres/goal-runtime-materialization.ts";
 import {
   RuntimeIdempotencyConflictError,
   RuntimeInvariantError,
+  acceptTurn,
   executeTurn,
+  resumeTurn,
   retryTurn,
   FatalTurnError,
   type RuntimeCommand,
@@ -38,6 +40,11 @@ import {
   createTurnControl,
   type TurnControl,
 } from "../runtime/turn-control.ts";
+import { parseRecordTurnJobPayload } from "./unified-durable-job-host.ts";
+import {
+  createPostgresTurnCancellation,
+  type TurnCancellationStore,
+} from "../../database/postgres/turn-cancellation.ts";
 import {
   createSceneImageAutoTrigger,
   deltaChangesScene,
@@ -286,6 +293,15 @@ export interface SubmitLocalMessageResult extends LocalRecordEnvelope {
   disposition: "committed" | "duplicate";
 }
 
+/** 玩家可见的回合状态。不含 prompt、候选、推理或内部堆栈。 */
+export interface PlayerTurnStatus {
+  turnId: string;
+  recordId: string;
+  status: "accepted" | "planning" | "drafting" | "validating" | "releasing" | "completed" | "failed";
+  phase: string;
+  message?: string;
+}
+
 /**
  * 批次 S：默认入口解析结果。无「最近打开」记忆（或记忆已失效）时
  * 返回 onboarding 信号，由前端渲染创世引导屏，而不是硬编码演示记录。
@@ -318,6 +334,15 @@ export interface LocalRecordService {
    */
   openDefaultRecord(principalId?: string): Promise<OpenDefaultRecordResult>;
   submitMessage(input: SubmitLocalMessageInput): Promise<SubmitLocalMessageResult>;
+  /**
+   * 受理玩家命令并返回稳定 turnId。不在这个调用里跑完模型。
+   * 相同幂等键和相同正文返回同一个回合；正文不同则冲突。
+   */
+  admitMessage(input: SubmitLocalMessageInput): Promise<PlayerTurnStatus>;
+  /** 从已提交的检查点继续回合。供 durable job 调用。 */
+  runAdmittedTurn(turnId: string): Promise<PlayerTurnStatus | null>;
+  readTurnStatus(recordId: string, turnId: string, principalId?: string): Promise<PlayerTurnStatus>;
+  noteTurnCancelled?(recordId: string, idempotencyKey: string): Promise<boolean>;
   listCommittedEvents(
     recordId: string,
     afterOrdinal: number,
@@ -505,6 +530,8 @@ export interface LocalRecordServiceDependencies {
    * 缺省不启用（内存测试零变化）。
    */
   characterGrowth?: CharacterGrowthStore;
+  /** 跨进程取消表。缺省时只使用本进程 AbortSignal。 */
+  turnCancellation?: TurnCancellationStore;
 }
 
 export function createMemoryWriteTokenRegistry(options: {
@@ -1460,6 +1487,135 @@ export function createLocalRecordService(
     }
   }
 
+  function playerTurnStatus(run: LocalTurnRun): PlayerTurnStatus {
+    const failed = run.state === "failed" || run.state === "retryable";
+    const status = run.state === "retryable" ? "failed" : run.state;
+    return {
+      turnId: run.turnId,
+      recordId: run.command.recordId,
+      status,
+      phase: run.state === "completed" ? "committed" : failed ? "failed" : run.state,
+      ...(failed && run.currentFailure?.message
+        ? { message: run.currentFailure.message }
+        : {}),
+    };
+  }
+
+  async function isTurnCancelled(turnId: string): Promise<boolean> {
+    if (!dependencies.turnCancellation) return false;
+    const run = await dependencies.repository.loadTurn(turnId);
+    if (!run) return false;
+    return dependencies.turnCancellation.isRequested({
+      recordId: run.command.recordId,
+      turnId,
+    });
+  }
+
+  async function runAdmittedTurn(turnId: string): Promise<PlayerTurnStatus | null> {
+    const existing = await dependencies.repository.loadTurn(turnId);
+    if (!existing) return null;
+    if (existing.state === "completed" || existing.state === "failed") {
+      return playerTurnStatus(existing as LocalTurnRun);
+    }
+    const recordId = existing.command.recordId;
+    const idempotencyKey = existing.command.idempotencyKey;
+    const controller = new AbortController();
+    turnSignals.set(idempotencyKey, { recordId, controller });
+    const visibility = existing.command.payload.visibility ?? { kind: "public" as const };
+    previewHub.begin(recordId, idempotencyKey, controller.signal, visibility);
+    try {
+      const turnDependencies = {
+        ...runtimeDependencies,
+        signal: controller.signal,
+        isCancelled: isTurnCancelled,
+      };
+      let run = await resumeTurn(turnId, turnDependencies);
+      if (run.state === "retryable") {
+        run = await retryTurn(turnId, turnDependencies);
+      }
+      if (run.state !== "completed" || !run.release) {
+        previewHub.end(recordId, "aborted");
+        return playerTurnStatus(run);
+      }
+      previewHub.end(recordId, "committed");
+      const scope = existing.command.payload.runtimeScope;
+      const visibility = existing.command.payload.visibility;
+      if (
+        scope
+        && visibility.kind === "public"
+        && !existing.command.payload.selfPlay
+        && !existing.command.payload.interjection
+        && !existing.command.payload.presence
+      ) {
+        const playerText = existing.command.payload.text;
+        const activatedCharacters = run.plan?.body.activatedCharacters ?? [];
+        const interjectionDecision = interjectionPolicy.evaluate({
+          recordId,
+          playerText,
+          activatedCharacters,
+          availableCharacters: scope.aiCharacters,
+        });
+        if (interjectionDecision.kind === "interject") {
+          void scheduleInterjection({
+            recordId,
+            playerText,
+            activatedCharacters,
+            runtimeScope: scope,
+            principalId: scope.principalId,
+          });
+        } else {
+          void schedulePresence({
+            recordId,
+            playerText,
+            runtimeScope: scope,
+            principalId: scope.principalId,
+            committed: {
+              narration: run.candidate?.body.narration ?? null,
+              characterResponses: run.candidate?.body.characterResponses ?? [],
+              actionTransactions: run.candidate?.body.actionTransactions ?? [],
+              activatedCharacters,
+            },
+            prefetchedMemories: new Map(),
+          });
+        }
+        dependencies.memorySync?.schedule({
+          workspaceId: scope.workspaceId,
+          worldId: scope.worldId,
+          worldlineId: scope.worldlineId,
+          recordId,
+        });
+        void scheduleSceneCrystallization({
+          recordId,
+          playerText,
+          runtimeScope: scope,
+          principalId: scope.principalId,
+          visibility,
+          sourceEventId: playerSourceEventId(run) ?? undefined,
+        });
+        void dependencies.sceneImageAuto?.afterPlayerTurn({
+          runtimeScope: scope,
+          principalId: scope.principalId,
+          sourceEventId: idempotencyKey,
+        });
+      }
+      return playerTurnStatus(run);
+    } finally {
+      if (turnSignals.get(idempotencyKey)?.controller === controller) {
+        turnSignals.delete(idempotencyKey);
+      }
+    }
+  }
+
+  if (dependencies.durableJobRuntime) {
+    dependencies.durableJobRuntime.registerHandler("record-turn", async (job) => {
+      const payload = parseRecordTurnJobPayload(job.payload);
+      if (!payload) {
+        throw new Error("JOB_PAYLOAD_INVALID");
+      }
+      await runAdmittedTurn(payload.turnId);
+    });
+  }
+
   return {
     async loadRecord(recordId, principalId) {
       const envelope = await loadConsistentEnvelope(
@@ -1670,7 +1826,11 @@ export function createLocalRecordService(
           turnController.signal,
           visibility.plan,
         );
-        const turnDependencies = { ...runtimeDependencies, signal: turnController.signal };
+        const turnDependencies = {
+        ...runtimeDependencies,
+        signal: turnController.signal,
+        isCancelled: isTurnCancelled,
+      };
         try {
           run = await executeTurn(
             {
@@ -1845,6 +2005,144 @@ export function createLocalRecordService(
           turnSignals.delete(input.idempotencyKey);
         }
       }
+    },
+
+    async admitMessage(input) {
+      const runtimeScope = await resolveRuntimeScope(
+        dependencies,
+        input.recordId,
+        input.principalId,
+      );
+      const before = await loadConsistentSnapshot(
+        dependencies,
+        input.recordId,
+        input.principalId,
+        runtimeScope,
+      );
+      if (runtimeScope.worldStatus === "archived") {
+        throw new LocalRecordServiceError(
+          "WORLD_ARCHIVED",
+          "The world is archived and read-only.",
+        );
+      }
+      const existing = await dependencies.repository.findTurnByIdempotency(
+        input.recordId,
+        input.idempotencyKey,
+      );
+      if (existing) {
+        const previous = existing.command.payload.text;
+        if (previous !== input.content || existing.command.recordId !== input.recordId) {
+          throw new LocalRecordServiceError(
+            "IDEMPOTENCY_CONFLICT",
+            "The idempotency key was already used for different content.",
+          );
+        }
+        return playerTurnStatus(existing as LocalTurnRun);
+      }
+      let authorization: ReturnType<WriteTokenRegistry["authorize"]>;
+      try {
+        authorization = tokens.authorize({
+          token: input.writeToken,
+          scope: writeScope(
+            input.recordId,
+            before.viewer.characterInstanceId,
+            input.principalId ?? runtimeScope.principalId,
+            runtimeScope.workspaceId,
+          ),
+          canonicalVersion: before.canonicalVersion,
+          idempotencyKey: input.idempotencyKey,
+        });
+      } catch (error) {
+        if (error instanceof LocalRecordServiceError && error.code === "WRITE_CONFLICT") {
+          throw new LocalRecordServiceError(
+            "WRITE_CONFLICT",
+            error.message,
+            before.projection.version,
+          );
+        }
+        throw error;
+      }
+      const profileUpdate = extractExplicitCharacterProfileUpdate(
+        input.content,
+        runtimeScope.playerActor,
+      );
+      const scope = writeScope(
+        input.recordId,
+        before.viewer.characterInstanceId,
+        input.principalId ?? runtimeScope.principalId,
+        runtimeScope.workspaceId,
+      );
+      const visibility = await resolveTurnVisibility({
+        input,
+        scope,
+        runtimeScope,
+        canonicalVersion: authorization.expectedRecordVersion,
+        assessor: dependencies.visibilityAssessor,
+        assessorFactory: dependencies.visibilityAssessorFactory,
+        proposals: visibilityProposals,
+        signal: undefined,
+      });
+      const accepted = await acceptTurn(
+        {
+          commandType: "player.utterance",
+          recordId: input.recordId,
+          expectedRecordVersion: authorization.expectedRecordVersion,
+          idempotencyKey: input.idempotencyKey,
+          actorId: runtimeScope.playerActor.participantId,
+          payload: {
+            text: input.content,
+            ...(input.actionSelection ? { actionSelection: input.actionSelection } : {}),
+            visibility: visibility.plan,
+            runtimeScope,
+            ...(profileUpdate ? { profileUpdate } : {}),
+          },
+        },
+        runtimeDependencies,
+      );
+      const status = playerTurnStatus(accepted.run as LocalTurnRun);
+      const terminal = status.status === "completed" || status.status === "failed";
+      if (!terminal && dependencies.durableJobRuntime) {
+        await dependencies.durableJobRuntime.enqueue({
+          jobId: `record-turn:${accepted.run.turnId}`,
+          kind: "record-turn",
+          recordId: input.recordId,
+          payload: {
+            turnId: accepted.run.turnId,
+            idempotencyKey: input.idempotencyKey,
+            principalId: input.principalId ?? runtimeScope.principalId,
+          },
+        });
+      } else if (!terminal) {
+        void runAdmittedTurn(accepted.run.turnId).catch((error) => {
+          console.warn(
+            `[realm] admitted turn ${accepted.run.turnId} failed: ${
+              error instanceof Error ? error.name : "error"
+            }`,
+          );
+        });
+      }
+      return status;
+    },
+
+    runAdmittedTurn,
+
+    async readTurnStatus(recordId, turnId, principalId) {
+      await resolveRuntimeScope(dependencies, recordId, principalId);
+      const run = await dependencies.repository.loadTurn(turnId);
+      if (!run || run.command.recordId !== recordId) {
+        throw new LocalRecordServiceError("NOT_FOUND", "Turn was not found.");
+      }
+      return playerTurnStatus(run);
+    },
+
+    async noteTurnCancelled(recordId, idempotencyKey) {
+      const run = await dependencies.repository.findTurnByIdempotency(
+        recordId,
+        idempotencyKey,
+      );
+      if (!run || run.command.recordId !== recordId) return false;
+      await dependencies.turnCancellation?.request({ recordId, turnId: run.turnId });
+      return true;
     },
 
     cancelMessage(recordId, idempotencyKey) {
@@ -2273,10 +2571,10 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
     mapFormalEvent: mapLocalFormalEvent,
     normalizeCheckpoint: normalizeM2TurnCheckpoint,
     // Goal runtime materialization：commitRelease 同一事务内对该 Record
-    // 仍 active 的 Goal 按每条正式事件 enqueue durable assessment job
-    // （0055 schema；无 Goal 零写入；hook 失败即整事务回滚）。
+    // reconcile 仍 active 的 Goal × 每条正式事件，生成 durable assessment
+    // job（0055 schema；无 Goal 零写入；hook 失败即整事务回滚）。
     onFormalEventsCommitted: async (client, committed) => {
-      await enqueueGoalAssessmentJobsForCommittedEvents(client, committed);
+      await reconcileGoalAssessmentJobsForCommittedEvents(client, committed);
     },
     allocateWorldCursors({ previous, eventCount }) {
       return Array.from({ length: eventCount }, (_, index) => ({
@@ -2301,6 +2599,7 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
     // Slice 3：统一 durable job host——self-play 拍调度入队 durable job，
     // beat handler 在本服务装配点注册（拍内仍走既有 executeTurn 编排）。
     durableJobRuntime: durableJobs,
+    turnCancellation: createPostgresTurnCancellation(pool, LOCAL_RECORD_SCOPE.workspaceId),
     // 批次 T9：晶化入图谱（世界知识服务，0010 既有表，无新迁移）。
     worldKnowledge: createWorldKnowledgeService(
       createPostgresWorldKnowledgeRepository(pool),
@@ -2416,7 +2715,7 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
           recordId: scope.recordId,
         }),
         previewSink: (event) => {
-          previewHub.publishChunk(scope.recordId, event.speaker, event.content);
+          previewHub.publishChunk(scope.recordId, event.speaker, event.content, event.phase);
         },
         async recallMemory(character) {
           // 批次 T2 prefetch：同步消费回合开始时的预取结果；pending/failed

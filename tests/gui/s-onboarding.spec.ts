@@ -178,7 +178,7 @@ test.describe("S. 世界记忆与司卷对谈创世", () => {
     await submit.click();
     const alert = proposal.locator(".guided-create-error[role=alert]");
     await expect(alert).toHaveText(
-      "创建状态未能确认。请先检查世界库；确认未出现后，再重试，避免重复创建。",
+      "创建没有写入。可以重试。",
     );
     await expect(alert).not.toContainText("server detail hidden");
     await expect(proposal.locator("input").first()).toHaveValue(worldName);

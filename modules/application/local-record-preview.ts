@@ -11,8 +11,24 @@ import {
 } from "../streaming/preview-session.ts";
 
 export type LocalPreviewEvent =
-  | { kind: "chunk"; previewId: string; speaker: string; content: string }
-  | { kind: "end"; previewId: string; outcome: "committed" | "aborted" };
+  | {
+    kind: "chunk";
+    previewId: string;
+    turnId: string;
+    segmentIndex: number;
+    phase: string;
+    speaker: string;
+    content: string;
+    status: "preview";
+    visibility: "player";
+  }
+  | {
+    kind: "end";
+    previewId: string;
+    turnId: string;
+    status: "cancelled" | "committed";
+    outcome: "committed" | "aborted";
+  };
 
 export interface LocalPreviewHub {
   begin(
@@ -21,7 +37,12 @@ export interface LocalPreviewHub {
     signal: AbortSignal | undefined,
     visibility: TurnVisibilityPlan,
   ): void;
-  publishChunk(recordId: string, speaker: string, content: string): void;
+  publishChunk(
+    recordId: string,
+    speaker: string,
+    content: string,
+    phase?: string,
+  ): void;
   end(recordId: string, outcome: "committed" | "aborted"): void;
   subscribe(
     recordId: string,
@@ -42,6 +63,8 @@ type LocalPreviewSubscriber = {
 type ActiveLocalPreview = {
   session: PreviewSession;
   visibility: TurnVisibilityPlan;
+  segmentIndex: number;
+  phase: string;
 };
 
 function canViewPreview(
@@ -81,17 +104,27 @@ export function createLocalPreviewHub(): LocalPreviewHub {
       sessions.set(recordId, {
         session: createPreviewSession({ id: previewId, signal }),
         visibility,
+        segmentIndex: 0,
+        phase: "preview",
       });
     },
-    publishChunk(recordId, speaker, content) {
+    publishChunk(recordId, speaker, content, phase = "preview") {
       const active = sessions.get(recordId);
       if (!active || active.session.state !== "streaming" || !content) return;
       active.session.push(content);
+      active.phase = phase;
+      const segmentIndex = active.segmentIndex;
+      active.segmentIndex += 1;
       emit(recordId, {
         kind: "chunk",
         previewId: active.session.id,
+        turnId: active.session.id,
+        segmentIndex,
+        phase,
         speaker,
         content,
+        status: "preview",
+        visibility: "player",
       }, active.visibility);
     },
     end(recordId, outcome) {
@@ -110,6 +143,8 @@ export function createLocalPreviewHub(): LocalPreviewHub {
       emit(recordId, {
         kind: "end",
         previewId: active.session.id,
+        turnId: active.session.id,
+        status: effectiveOutcome === "aborted" ? "cancelled" : "committed",
         outcome: effectiveOutcome,
       }, active.visibility);
     },

@@ -137,20 +137,11 @@ test(
     const archiveAt = (version: string): Uint8Array => {
       const parsed = parseRealmRuntimeSaveArchive(saveBytes);
       return buildRealmRuntimeSaveArchive({
+        ...parsed,
         manifest: {
           ...parsed.manifest,
           world: { worldId: FIXTURE_WORLD, worldVersion: version },
         },
-        record: parsed.record,
-        goals: parsed.goals,
-        topology: parsed.topology,
-        actionReceipts: parsed.actionReceipts,
-        characterEffects: parsed.characterEffects,
-        observations: parsed.observations,
-        memory: parsed.memory,
-        outbox: parsed.outbox,
-        firstNight: parsed.firstNight,
-        selfPlay: parsed.selfPlay,
       });
     };
     const restoreRowCounts = async () => (await ownerPool.query<{

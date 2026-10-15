@@ -17,6 +17,7 @@ import {
 } from "../../database/postgres/public.ts";
 import {
   FatalTurnError,
+  type JsonValue,
   type RuntimeRepository,
   type TurnRun,
   type TurnRuntimeDependencies,
@@ -24,6 +25,7 @@ import {
 import {
   createLocalM2TurnOrchestrator,
   createRuleBasedDMController,
+  type DraftProgress,
   type M2TurnCandidate,
   type M2TurnOrchestrator,
   type M2TurnPlan,
@@ -268,6 +270,17 @@ export function createLocalTurnDependencies(
             ? context.command.payload.interjection.triggerText
             : context.command.payload.text,
           plan: context.plan.body,
+          ...(context.signal ? { signal: context.signal } : {}),
+          ...(context.draftProgress
+            ? { progress: context.draftProgress as unknown as DraftProgress }
+            : {}),
+          ...(context.saveDraftProgress
+            ? {
+              onProgress: async (progress: DraftProgress) => {
+                await context.saveDraftProgress?.(progress as unknown as JsonValue);
+              },
+            }
+            : {}),
         });
       },
     },

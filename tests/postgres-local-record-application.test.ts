@@ -281,7 +281,10 @@ test(
     assert.equal(baseGoalProjectionResponse.status, 200);
     assert.deepEqual((await baseGoalProjectionResponse.json()).goals, [{
       goalKey: "base.first-narration",
+      scopeKind: "record",
       state: "active",
+      attempt: 1,
+      supersedesInstanceId: null,
       progress: {},
       outcome: null,
     }]);
@@ -422,7 +425,10 @@ test(
     assert.equal(availableGoalProjectionResponse.status, 200);
     assert.deepEqual((await availableGoalProjectionResponse.json()).goals, [{
       goalKey: "goal.restore.coverage",
+      scopeKind: "record",
       state: "active",
+      attempt: 1,
+      supersedesInstanceId: null,
       progress: { count: 1 },
       outcome: null,
     }]);

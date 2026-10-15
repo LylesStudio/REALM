@@ -136,6 +136,85 @@ test("deterministic Goal jobs evaluate committed evidence and settle an accepted
   assert.deepEqual(settlement.decision.transition?.evidenceEventIds, ["event-1", "event-2"]);
 });
 
+test("deterministic Goal jobs settle a failed transition when the failure condition is met", async () => {
+  const failable: GoalDefinition = {
+    ...deterministicDefinition,
+    rubric: {
+      kind: "event_count",
+      eventKind: "clue.found",
+      progressKey: "clues",
+      threshold: 2,
+      failure: { eventKind: "clue.destroyed", progressKey: "losses", threshold: 1 },
+    },
+  };
+  const destroyed: GoalEvent = {
+    eventId: "event-lost",
+    recordId: "record-1",
+    recordVersion: 3,
+    ordinal: 2,
+    kind: "clue.destroyed",
+    payload: { clue: "south" },
+  };
+  const repo = repository({ ...context(), events: [...events, destroyed] });
+  const report = await runGoalAssessmentOnce({
+    repository: repo,
+    resolveDefinition: async () => failable,
+    now: "2026-10-05T00:00:00.000Z",
+  });
+
+  assert.equal(report.kind, "settled");
+  assert.equal(repo.failed.length, 0);
+  const settlement = repo.settled[0] as {
+    decision: {
+      status: string;
+      result: { decision?: string };
+      transition?: { to: string; evidenceEventIds: readonly string[] };
+    };
+  };
+  assert.equal(settlement.decision.status, "accepted");
+  assert.equal(settlement.decision.result.decision, "fail");
+  assert.equal(settlement.decision.transition?.to, "failed");
+  assert.deepEqual(settlement.decision.transition?.evidenceEventIds, ["event-lost"]);
+});
+
+test("semantic Goal jobs settle fail and settle decisions through the same evidence validation", async () => {
+  for (const [decision, target] of [["fail", "failed"], ["settle", "settled"]] as const) {
+    const judgeCandidate: GoalAssessmentCandidate = {
+      decision,
+      policyVersion: semanticDefinition.policyVersion,
+      evidenceEventIds: ["event-1", "event-2"],
+      evidenceSnapshotHash: goalEvidenceSnapshotHash({
+        definition: semanticDefinition,
+        instance,
+        events: [...events],
+        evidenceHead: head,
+      }),
+      progress: { chosen: true },
+      outcome: null,
+    };
+    const repo = repository(context(), claimedJob(semanticDefinition.goalKey));
+    const report = await runGoalAssessmentOnce({
+      repository: repo,
+      resolveDefinition: async () => semanticDefinition,
+      judge: { async assess() { return judgeCandidate; } },
+      now: "2026-10-05T00:00:00.000Z",
+    });
+
+    assert.equal(report.kind, "settled");
+    const settlement = repo.settled[0] as {
+      decision: {
+        status: string;
+        result: { decision?: string };
+        transition?: { to: string; outcome: unknown };
+      };
+    };
+    assert.equal(settlement.decision.status, "accepted");
+    assert.equal(settlement.decision.result.decision, decision);
+    assert.equal(settlement.decision.transition?.to, target);
+    assert.deepEqual(settlement.decision.transition?.outcome, semanticDefinition.outcome);
+  }
+});
+
 test("semantic Goal jobs reject a candidate whose evidence hash was built from an old head", async () => {
   const semanticContext = context();
   const staleCandidate: GoalAssessmentCandidate = {

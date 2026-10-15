@@ -46,7 +46,14 @@ export interface FirstNightContext {
   playerName: string;
   playerStance: "player" | "observer";
   companions: { name: string; role: string; summary: string }[];
-  scene: { location: string; weather: string; tension: string; objective: string };
+  scene: {
+    title?: string;
+    location: string;
+    weather: string;
+    tension: string;
+    displayTime?: string;
+    objective: string;
+  };
   /** 卷首旁白（对谈路径产出；逐步引导为空）。 */
   opening: string;
 }
@@ -119,6 +126,8 @@ export function normalizeFirstNightContext(value: unknown): FirstNightContext | 
     }))
     .filter((item) => item.name.length > 0)
     .slice(0, 2);
+  const sceneTitle = clampText(scene.title, 60);
+  const sceneDisplayTime = clampText(scene.displayTime, 60);
   return {
     world: {
       name,
@@ -136,9 +145,11 @@ export function normalizeFirstNightContext(value: unknown): FirstNightContext | 
     playerStance: value.playerStance === "observer" ? "observer" : "player",
     companions,
     scene: {
+      ...(sceneTitle ? { title: sceneTitle } : {}),
       location: clampText(scene.location, 60),
       weather: clampText(scene.weather, 60),
       tension: clampText(scene.tension, 60),
+      ...(sceneDisplayTime ? { displayTime: sceneDisplayTime } : {}),
       objective: clampText(scene.objective, 120),
     },
     opening: clampText(value.opening, 300),
@@ -254,11 +265,13 @@ export function normalizeFirstNightPack(
 }
 
 function describeScene(context: FirstNightContext): string {
-  const { location, weather, tension, objective } = context.scene;
+  const { title, location, weather, tension, displayTime, objective } = context.scene;
   return contextBlock("Initial scene", {
+    ...(title ? { title } : {}),
     location: location || "(blank)",
     weather: weather || "(blank)",
     tension: tension || "(blank)",
+    ...(displayTime ? { displayTime } : {}),
     objective: objective || "(blank)",
   });
 }
