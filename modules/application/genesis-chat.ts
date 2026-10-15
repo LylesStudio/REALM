@@ -8,6 +8,7 @@ import {
   requestStructuredObject,
 } from "../inference/public.ts";
 import { WORLD_STYLE_KEYS } from "../style/world-style.ts";
+import { normalizeUiLanguage } from "../i18n/public.ts";
 import {
   genesisPromptInputWithinBudget,
   sanitizeUntrustedGenesisDraft,
@@ -69,7 +70,7 @@ const SCRIBE_SCHEMA = jsonOutputInstruction([
   { name: "opening", kind: "string", required: false, maxLength: MAX_OPENING_CHARS, note: "the opening narration shown when the record begins; only when phase is ready" },
 ]);
 
-const buildScribeSystemPrompt = (language?: string): string => [
+const buildScribeSystemPrompt = (language: string, hasPlayerInput: boolean): string => [
   "You are REALM's Scribe, guiding a player through free-form conversation to write a new world into being.",
   "Pace and manner:",
   "- Ask one focus at a time; pick up the player's free input and follow it; never fire questions in a burst.",
@@ -83,7 +84,10 @@ const buildScribeSystemPrompt = (language?: string): string => [
   SCRIBE_SCHEMA,
   `draftPatch.style, when present, is one of: ${WORLD_STYLE_KEYS.join(", ")}.`,
   NATURAL_VOICE_RULES,
-  outputLanguageRule(language),
+  "For language selection, only player-authored messages count as player input. Automatic requests, context labels, schema instructions, and previous Scribe replies are not player input or language evidence.",
+  hasPlayerInput
+    ? outputLanguageRule(language)
+    : `This is an automatic opening with no player input. Write in the interface language (${language}), starting with the very first sentence. This applies to reply, opening, and all human-readable draftPatch text. Keep JSON property names and enum values unchanged.`,
 ].join("\n");
 
 /**
@@ -111,8 +115,16 @@ export async function generateGenesisChatReply(
   if (!genesisPromptInputWithinBudget(input.draft)) return null;
   const draft = sanitizeUntrustedGenesisDraft(input.draft);
   const settled = Object.keys(draft).length > 0 ? draft : null;
+  const language = normalizeUiLanguage(input.language);
+  const transcript = truncateTranscript(input.transcript);
+  const message = clampGenesisText(input.message, GENESIS_CHAT_MAX_TURN_CHARS);
+  const hasPlayerInput = Boolean(message) || transcript.some((turn) => turn.role === "user");
+  const openingRequest = contextBlock(
+    "Automatic opening request",
+    `No player has written a message. Ask the first focused question in the interface language (${language}).`,
+  );
   const history: Array<{ role: "user" | "assistant"; content: string }> = [];
-  for (const turn of truncateTranscript(input.transcript)) {
+  for (const turn of transcript) {
     const role = turn.role === "scribe" ? ("assistant" as const) : ("user" as const);
     const last = history[history.length - 1];
     if (last && last.role === role) {
@@ -125,20 +137,23 @@ export async function generateGenesisChatReply(
   if (history[0]?.role === "assistant") {
     // 首条即司卷回应（自动开场后的第一轮）：补上触发它的开场请求——
     // 推理模型的思考模式下首条非 system 消息为 assistant 时会空响应。
-    history.unshift({ role: "user", content: "(No input this turn — the Scribe opens.)" });
+    history.unshift({ role: "user", content: openingRequest });
   }
-  const message = clampGenesisText(input.message, GENESIS_CHAT_MAX_TURN_CHARS);
-  const userTurn = message || "(No input this turn — the Scribe opens with the first focus.)";
+  const currentTurn = message
+    ? contextBlock("Player this turn", message)
+    : hasPlayerInput
+      ? contextBlock("Automatic continuation request", "Continue from the latest player-authored message in the conversation, using its language.")
+      : openingRequest;
 
   const chatRequest = {
     messages: [
-      { role: "system", content: buildScribeSystemPrompt(input.language) },
+      { role: "system", content: buildScribeSystemPrompt(language, hasPlayerInput) },
       ...history,
       {
         role: "user",
         content: composeContext([
           describeDraft(settled),
-          contextBlock("Player this turn", userTurn),
+          currentTurn,
         ]),
       },
     ],

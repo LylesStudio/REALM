@@ -273,6 +273,91 @@ test("generateGenesisChatReply rejects an oversized draft before calling the mod
   assert.equal(calls, 0);
 });
 
+test("automatic genesis opening uses the interface language without inventing player input", async () => {
+  for (const language of ["zh-CN", "en", "ja"] as const) {
+    const { gateway, calls } = fakeGateway([{
+      content: JSON.stringify({ reply: "fixture reply", phase: "exploring", draftPatch: null }),
+    }]);
+    const outcome = await generateGenesisChatReply(gateway, {
+      message: "",
+      transcript: [],
+      draft: null,
+      language,
+    });
+    assert.ok(outcome);
+    const system = calls[0]?.messages[0]?.content ?? "";
+    assert.ok(system.includes(`interface language (${language})`));
+    assert.match(system, /first sentence/);
+    assert.doesNotMatch(system, /Write in the language of the latest player input/);
+    const user = calls[0]?.messages.at(-1)?.content ?? "";
+    assert.match(user, /\[Automatic opening request\]/);
+    assert.doesNotMatch(user, /\[Player this turn\]/);
+    assert.ok(user.includes(`interface language (${language})`));
+  }
+});
+
+test("automatic opening ignores previous Scribe language and uses the UI language default", async () => {
+  for (const [language, expected] of [[undefined, "zh-CN"], ["unsupported", "zh-CN"], ["ja", "ja"]] as const) {
+    const { gateway, calls } = fakeGateway([{
+      content: JSON.stringify({ reply: "fixture reply", phase: "exploring", draftPatch: null }),
+    }]);
+    await generateGenesisChatReply(gateway, {
+      message: "   ",
+      transcript: [{ role: "scribe", content: "What kind of world would you like?" }],
+      draft: { ...BASE_DRAFT, language: "en" },
+      language,
+    });
+    assert.ok(calls[0]?.messages[0]?.content.includes(`interface language (${expected})`));
+    assert.match(calls[0]?.messages[0]?.content ?? "", /previous Scribe replies are not player input/);
+    assert.equal(calls[0]?.messages[1]?.role, "user", "retain the provider's user-first history shape");
+    assert.match(calls[0]?.messages[1]?.content ?? "", /\[Automatic opening request\]/);
+  }
+});
+
+test("real player input keeps its language precedence after the automatic opening", async () => {
+  const playerText = "A floating city above a dry ocean.";
+  for (const message of [playerText, ""] as const) {
+    const { gateway, calls } = fakeGateway([{
+      content: JSON.stringify({ reply: "fixture reply", phase: "exploring", draftPatch: null }),
+    }]);
+    await generateGenesisChatReply(gateway, {
+      message,
+      transcript: message ? [{ role: "scribe", content: "你想创造什么世界？" }] : [
+        { role: "user", content: playerText },
+        { role: "scribe", content: "What keeps it afloat?" },
+      ],
+      draft: null,
+      language: "zh-CN",
+    });
+    const system = calls[0]?.messages[0]?.content ?? "";
+    assert.match(system, /Write in the language of the latest player input/);
+    assert.doesNotMatch(system, /This is an automatic opening with no player input/);
+    const user = calls[0]?.messages.at(-1)?.content ?? "";
+    if (message) assert.ok(user.includes(`[Player this turn]\n${playerText}`));
+    else {
+      assert.match(user, /\[Automatic continuation request\]/);
+      assert.doesNotMatch(user, /\[Player this turn\]/);
+      assert.match(user, /latest player-authored message/);
+    }
+  }
+});
+
+test("structured repair preserves the automatic opening language constraint", async () => {
+  const { gateway, calls } = fakeGateway([
+    { content: "not-json" },
+    { content: JSON.stringify({ reply: "fixture reply", phase: "exploring", draftPatch: null }) },
+  ]);
+  const outcome = await generateGenesisChatReply(gateway, {
+    message: "", transcript: [], draft: null, language: "ja",
+  });
+  assert.ok(outcome);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.ok(call.messages[0]?.content.includes("interface language (ja)"));
+    assert.match(call.messages[1]?.content ?? "", /\[Automatic opening request\]/);
+  }
+});
+
 test("scribe prompt requires a full companion snapshot and shows settled roles", async () => {
   const { gateway, calls } = fakeGateway([
     {
