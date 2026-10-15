@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import {
   MODEL_PROVIDER_CATALOG,
   ModelProviderError,
@@ -12,6 +14,7 @@ import {
 import {
   createLocalModelSettingsStore,
   publicModelSettings,
+  validateModelSettings,
 } from "../modules/inference/local-settings.ts";
 import { createModelSettingsService } from "../modules/application/model-settings-service.ts";
 
@@ -42,6 +45,104 @@ const openrouterSettings: ModelProviderSettings = {
   lastDiscoveredAt: null,
   updatedAt: "2026-08-23T00:00:00.000Z",
 };
+
+test("model identifiers preserve provider-defined printable characters", () => {
+  for (const selectedModel of [
+    "local/qwen@q4_k_m",
+    "local/model+vision (Q4)",
+    "本地模型@实例2",
+    'local/model"quoted\\identifier',
+  ]) {
+    assert.equal(validateModelSettings({ ...lmstudioSettings, selectedModel }).selectedModel, selectedModel);
+  }
+});
+
+test("model identifiers reject controls and invisible formatting rather than silently stripping them", () => {
+  for (const character of ["\u0000", "\t", "\n", "\r", "\u007f", "\u0085", "\u200b", "\u202e", "\u2028", "\u2029"]) {
+    for (const selectedModel of [`local/model${character}bad`, `${character}local/model`, `local/model${character}`]) {
+      assert.throws(
+        () => validateModelSettings({ ...lmstudioSettings, selectedModel }),
+        /selectedModel contains unsupported characters/,
+      );
+    }
+  }
+  for (const selectedModel of ["", " ", "x".repeat(257)]) {
+    assert.throws(() => validateModelSettings({ ...lmstudioSettings, selectedModel }), /selectedModel must be/);
+  }
+});
+
+test("LM Studio accepts alternate local ports without changing the selected model", () => {
+  for (const baseUrl of [
+    "http://127.0.0.1:43210/v1",
+    "http://192.168.1.10:8080/v1",
+    "http://[::1]:54321/v1",
+  ]) {
+    const settings = validateModelSettings({ ...lmstudioSettings, baseUrl });
+    assert.equal(settings.baseUrl, baseUrl);
+    assert.equal(settings.selectedModel, lmstudioSettings.selectedModel);
+  }
+});
+
+test("LM Studio discovery, save/reload and chat retain a custom model ID on a non-default loopback port", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "realm-lmstudio-port-"));
+  const selectedModel = "local/qwen@q4_k_m";
+  const requests: { method?: string; path?: string; body: string }[] = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += String(chunk);
+    requests.push({ method: request.method, path: request.url, body });
+    response.setHeader("Content-Type", "application/json");
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.end(JSON.stringify({ data: [{ id: selectedModel }] }));
+    } else if (request.method === "POST" && request.url === "/v1/chat/completions") {
+      response.end(JSON.stringify({
+        model: selectedModel,
+        choices: [{ message: { content: "port probe ok" }, finish_reason: "stop" }],
+      }));
+    } else {
+      response.statusCode = 404;
+      response.end("{}");
+    }
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    assert.notEqual(address.port, 1234);
+    const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+    const store = createLocalModelSettingsStore({
+      filePath: join(directory, "model-providers.json"),
+      legacyFilePath: join(directory, "absent-legacy.json"),
+      environment: {},
+    });
+    const service = createModelSettingsService({ store });
+    const discovered = await service.discover({ providerId: "lmstudio", baseUrl });
+    const profile = discovered.providers.find((item) => item.providerId === "lmstudio");
+    assert.equal(profile?.baseUrl, baseUrl);
+    assert.equal(profile?.selectedModel, selectedModel);
+    assert.equal(profile?.availableModels[0]?.id, selectedModel);
+    await service.save({ providerId: "lmstudio", baseUrl, selectedModel });
+    const reloaded = await createLocalModelSettingsStore({
+      filePath: join(directory, "model-providers.json"),
+      environment: {},
+    }).load();
+    assert.equal(reloaded.baseUrl, baseUrl);
+    assert.equal(reloaded.selectedModel, selectedModel);
+    const gateway = await service.gateway();
+    const result = await gateway.chat({ messages: [{ role: "user", content: "port probe" }] });
+    assert.equal(result.content, "port probe ok");
+    assert.deepEqual(requests.map(({ method, path }) => ({ method, path })), [
+      { method: "GET", path: "/v1/models" },
+      { method: "POST", path: "/v1/chat/completions" },
+    ]);
+    assert.equal(JSON.parse(requests[1]!.body).model, selectedModel);
+  } finally {
+    server.closeAllConnections();
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("the provider catalog includes a locked-down OpenRouter endpoint", () => {
   const provider = MODEL_PROVIDER_CATALOG.find((item) => item.id === "openrouter");

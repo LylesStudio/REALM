@@ -222,8 +222,10 @@ export function validateModelSettings(raw: unknown): ModelProviderSettings {
   validateEndpoint(provider, endpoint);
   const apiKey = typeof raw.apiKey === "string" ? raw.apiKey.trim() : "";
   const selectedModel = requireText(raw.selectedModel, "selectedModel", 256);
-  // OpenAI 风格 id 允许 publisher/model 与 :free/:thinking 变体。
-  if (!/^[-a-zA-Z0-9_.:/[\]]+$/.test(selectedModel)) {
+  // 模型 ID 由供应商定义（LM Studio 也支持自定义 identifier），不是路径或 URL。
+  // 它仅作为 JSON 字符串发送；保留 @、+、空格及 Unicode 等可见字符。
+  // 在 trim 前拒绝控制/隐藏格式字符，避免静默改写含换行或零宽字符的 ID。
+  if (typeof raw.selectedModel === "string" && /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(raw.selectedModel)) {
     throw invalidSettings("selectedModel contains unsupported characters.");
   }
   if (raw.thinking !== "enabled" && raw.thinking !== "disabled") {
