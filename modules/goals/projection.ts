@@ -2,6 +2,7 @@ import type { JsonValue } from "../runtime/public.ts";
 import type {
   GoalDefinition,
   GoalInstanceSnapshot,
+  GoalResolutionKind,
   GoalScopeKind,
   GoalState,
 } from "./public.ts";
@@ -9,10 +10,14 @@ import type {
 /** Runtime row shape needed to join a Goal instance to its content definition. */
 export interface GoalProjectionInstance extends GoalInstanceSnapshot {
   goalKey: string;
+  definitionSource?: "content" | "record";
+  definitionId?: string | null;
+  policyVersion?: string;
 }
 
 export interface GoalProjection {
   goalKey: string;
+  resolutionKind?: GoalResolutionKind;
   /** scope 判别位（record | story | worldline）；B2 起 story Goal 复用同一投影类型。 */
   scopeKind: GoalScopeKind;
   state: GoalState;
@@ -38,12 +43,15 @@ export function projectGoal(input: {
   if (!input.definition.visible || input.definition.goalKey !== input.instance.goalKey) return null;
   return {
     goalKey: input.instance.goalKey,
+    ...(input.instance.resolutionKind === undefined ? {} : { resolutionKind: input.instance.resolutionKind }),
     scopeKind: input.instance.scopeKind ?? "record",
     state: input.instance.state,
     attempt: input.instance.attempt ?? 1,
     supersedesInstanceId: input.instance.supersedesInstanceId ?? null,
     progress: { ...input.instance.progress },
-    outcome: isTerminal(input.instance.state) ? { ...input.definition.outcome } : null,
+    outcome: isTerminal(input.instance.state)
+      && (input.instance.resolutionKind === undefined || input.instance.resolutionKind === "natural")
+      ? { ...input.definition.outcome } : null,
   };
 }
 

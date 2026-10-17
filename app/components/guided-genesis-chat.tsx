@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { GenesisDraftFields } from "./genesis-draft-fields";
+import { goalDraftsValid } from './record-goal-fields.tsx';
 import {
   applyGenesisFieldEdits,
   diffEditedGenesisFields,
@@ -189,7 +190,7 @@ export function GuidedGenesisChat({
     // 避免迟到响应覆盖刚提交的草稿快照。可创建规则与后端一致：草稿有效
     // （世界名非空）即可，proposing/ready 均可创建（phase 不是门控依据）。
     if (!draft || confirmingRef.current || busyRef.current) return;
-    if (!draft.world.name.trim()) return;
+    if (!draft.world.name.trim() || !goalDraftsValid(draft.recordGoals)) return;
     confirmingRef.current = true;
     setConfirming(true);
     try {
@@ -285,7 +286,7 @@ export function GuidedGenesisChat({
             ) : null}
             <button
               className="genesis-proposal-confirm"
-              disabled={confirming || busy || !draft.world.name.trim()}
+              disabled={confirming || busy || !draft.world.name.trim() || !goalDraftsValid(draft.recordGoals)}
               onClick={() => void confirm()}
               type="button"
             >

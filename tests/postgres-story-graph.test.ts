@@ -51,14 +51,14 @@ function makeDefinition(nextNode: boolean): StoryDefinition {
   });
 }
 
-async function createStory(owner: pg.Pool, suffix: string): Promise<string> {
+async function createStory(owner: pg.Pool, suffix: string, worldlineId: string = WORLDLINE): Promise<string> {
   const storyId = `story_b2_${suffix}`;
   await owner.query(
     `INSERT INTO stories (
        workspace_id, world_id, worldline_id, id, title, status, premise,
        start_tick, start_ordinal
      ) VALUES ($1, $2, $3, $4, 'B2 Story', 'active', 'B2 test', 0, 0)`,
-    [WS, WORLD, WORLDLINE, storyId],
+    [WS, WORLD, worldlineId, storyId],
   );
   return storyId;
 }
@@ -189,6 +189,41 @@ test(
 );
 
 test(
+  "withdrawn and superseded Goals cannot unlock settled Story conditions; natural settlement can",
+  { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
+  async () => {
+    const { owner, runtime } = pools();
+    try {
+      for (const resolution of ["withdrawn", "superseded", "natural"] as const) {
+        const storyId = await createStory(owner, randomUUID().replaceAll("-", "").slice(0, 12));
+        const definition = normalizeStoryDefinition({ ...makeDefinition(true), nodes: [
+          {kind:"record",nodeKey:"start",recordKey:"start-record",title:"Start",sequence:1,initial:true},
+          {kind:"record",nodeKey:"next",recordKey:"next-record",title:"Next",sequence:2,
+            unlock:{kind:"goal_state",goalKey:"story.prep",scope:"story",state:"settled"}},
+        ]});
+        const repository = createPostgresStoryGraphRepository(runtime);
+        const scope = { workspaceId:WS,worldId:WORLD,worldlineId:WORLDLINE,storyId };
+        await repository.materialize({ workspaceId:WS,storyId,definition });
+        await owner.query(`INSERT INTO goal_instances (
+          workspace_id,world_id,worldline_id,story_id,scope_kind,id,goal_key,state,revision,
+          progress,outcome,policy_version,completed_at,resolution_kind
+        ) VALUES ($1,$2,$3,$4,'story',$5,'story.prep','settled',1,'{}'::jsonb,
+          NULL,'story-policy-v1',CURRENT_TIMESTAMP,$6)`,
+          [WS,WORLD,WORLDLINE,storyId,goalInstanceIdFor({kind:"story",...scope},"story.prep"),resolution]);
+        const result = await repository.reconcile({ workspaceId:WS,storyId,definition });
+        assert.equal(result.unlockedNodeKeys.includes("next"), resolution === "natural", resolution);
+        assert.equal(result.nodes.find(node=>node.nodeKey==="next")?.state,
+          resolution === "natural" ? "active" : "locked", resolution);
+        const ledger = await owner.query<{count:string}>(
+          "SELECT count(*)::text FROM story_unlock_ledger WHERE workspace_id=$1 AND story_id=$2 AND node_key='next'",
+          [WS,storyId]);
+        assert.equal(ledger.rows[0].count, resolution === "natural" ? "1" : "0", resolution);
+      }
+    } finally { await runtime.end(); await owner.end(); }
+  },
+);
+
+test(
   "failed Record instantiation rolls back the node row and unlock ledger",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
@@ -230,13 +265,30 @@ test(
   async (t) => {
     const { owner, runtime } = pools();
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
-    const storyId = await createStory(owner, `facts_${suffix}`);
+    const worldlineId = `worldline_facts_${suffix}`;
+    await owner.query(
+      `INSERT INTO worldlines (
+         workspace_id, world_id, id, label, status, head_tick, head_ordinal
+       ) VALUES ($1, $2, $3, 'Isolated facts', 'active', 0, 0)`,
+      [WS, WORLD, worldlineId],
+    );
+    const storyId = await createStory(owner, `facts_${suffix}`, worldlineId);
     const projectId = `project_facts_${suffix}`;
     const milestoneId = `milestone_facts_${suffix}`;
     const obligationId = `obligation_facts_${suffix}`;
     const accountId = `account_facts_${suffix}`;
     const linkId = `link_facts_${suffix}`;
+    // A preceding suite may legitimately leave an active account in the demo
+    // worldline. This fixture must not depend on that worldline being empty.
+    const unrelatedAccountId = `account_unrelated_${suffix}`;
+    await owner.query(
+      `INSERT INTO finance_accounts (
+         workspace_id, world_id, worldline_id, id, currency, status, opening_balance_minor
+       ) VALUES ($1, $2, $3, $4, 'JPY', 'active', 0)`,
+      [WS, WORLD, WORLDLINE, unrelatedAccountId],
+    );
     t.after(async () => {
+      await owner.query("DELETE FROM finance_accounts WHERE workspace_id = $1 AND id = $2", [WS, unrelatedAccountId]);
       await owner.query("DELETE FROM obligations WHERE workspace_id = $1 AND id = $2", [WS, obligationId]);
       await owner.query("DELETE FROM finance_accounts WHERE workspace_id = $1 AND id = $2", [WS, accountId]);
       await owner.query("DELETE FROM projects WHERE workspace_id = $1 AND id = $2", [WS, projectId]);
@@ -248,32 +300,32 @@ test(
       `INSERT INTO projects (
          workspace_id, world_id, worldline_id, id, kind, status, stage, title, currency, version
        ) VALUES ($1, $2, $3, $4, 'production', 'active', 'production', 'Fact project', 'JPY', 1)`,
-      [WS, WORLD, WORLDLINE, projectId],
+      [WS, WORLD, worldlineId, projectId],
     );
     await owner.query(
       `INSERT INTO project_story_links (
          workspace_id, world_id, worldline_id, id, project_id, story_id, link_kind
        ) VALUES ($1, $2, $3, $4, $5, $6, 'primary')`,
-      [WS, WORLD, WORLDLINE, linkId, projectId, storyId],
+      [WS, WORLD, worldlineId, linkId, projectId, storyId],
     );
     await owner.query(
       `INSERT INTO project_milestones (
          workspace_id, world_id, worldline_id, id, project_id, sequence, title, status
        ) VALUES ($1, $2, $3, $4, $5, 1, 'First show', 'active')`,
-      [WS, WORLD, WORLDLINE, milestoneId, projectId],
+      [WS, WORLD, worldlineId, milestoneId, projectId],
     );
     await owner.query(
       `INSERT INTO obligations (
          workspace_id, world_id, worldline_id, id, project_id, kind, status,
          principal_minor, outstanding_minor
        ) VALUES ($1, $2, $3, $4, $5, 'loan', 'open', 0, 0)`,
-      [WS, WORLD, WORLDLINE, obligationId, projectId],
+      [WS, WORLD, worldlineId, obligationId, projectId],
     );
     await owner.query(
       `INSERT INTO finance_accounts (
          workspace_id, world_id, worldline_id, id, currency, status, opening_balance_minor
        ) VALUES ($1, $2, $3, $4, 'JPY', 'active', 5000)`,
-      [WS, WORLD, WORLDLINE, accountId],
+      [WS, WORLD, worldlineId, accountId],
     );
     const definition = normalizeStoryDefinition({
       storyKey: "story.graph.facts",
@@ -315,6 +367,19 @@ test(
        WHERE workspace_id = $1 AND id = $2`,
       [WS, milestoneId],
     );
+    // Ambiguous accounts inside the *same* worldline must still fail closed.
+    // Isolation is not permission to sum or arbitrarily choose an account.
+    const ambiguousAccountId = `account_ambiguous_${suffix}`;
+    await owner.query(
+      `INSERT INTO finance_accounts (
+         workspace_id, world_id, worldline_id, id, currency, status, opening_balance_minor
+       ) VALUES ($1, $2, $3, $4, 'JPY', 'active', 9000)`,
+      [WS, WORLD, worldlineId, ambiguousAccountId],
+    );
+    const ambiguous = await repository.reconcile({ workspaceId: WS, storyId, definition });
+    assert.equal(ambiguous.unlockedNodeKeys.includes("show"), false);
+    assert.equal(ambiguous.nodes.find((node) => node.nodeKey === "show")?.state, "locked");
+    await owner.query("DELETE FROM finance_accounts WHERE workspace_id = $1 AND id = $2", [WS, ambiguousAccountId]);
     const opened = await repository.reconcile({ workspaceId: WS, storyId, definition });
     assert.equal(opened.unlockedNodeKeys.includes("show"), true);
     assert.equal(opened.nodes.find((node) => node.nodeKey === "show")?.state, "active");

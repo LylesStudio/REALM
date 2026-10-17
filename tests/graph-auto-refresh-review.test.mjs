@@ -11,7 +11,7 @@
  * 字符串禁用（注释/文档字样合法）。
  */
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -110,18 +110,21 @@ test("graph read APIs stay cursor-free; the invalidation contract lives in the l
   assert.match(route, /Last-Event-ID/);
 });
 
-test("the T11-A2 spec keeps the ledger-first invariants", () => {
+test("the public graph contract keeps ledger-first invariants and internal reviews stay unchanged", () => {
   const doc = readFileSync(
-    join(projectRoot, "docs/development/T11-A2-GRAPH-SSE-INVALIDATION.md"),
+    join(projectRoot, "docs/architecture/GRAPH-INVALIDATION.md"),
     "utf8",
   );
   assert.match(doc, /graph_invalidation_events/);
   assert.match(doc, /NOTIFY 只是低延迟唤醒|NOTIFY 仅作/);
   assert.match(doc, /事务回滚则失效记录同样\s*回滚/);
-  // T10-B22-A 评审文档是历史记录（当时结论），不静默改写。
-  const review = readFileSync(
-    join(projectRoot, "docs/development/T10-B22-A-GRAPH-AUTO-REFRESH-REVIEW.md"),
-    "utf8",
+  // Internal historical reviews are not public runtime dependencies. When
+  // present in the canonical workspace, their old conclusion still must hold.
+  const reviewPath = join(
+    projectRoot,
+    "docs/development/T10-B22-A-GRAPH-AUTO-REFRESH-REVIEW.md",
   );
-  assert.match(review, /维持手动刷新/);
+  if (existsSync(reviewPath)) {
+    assert.match(readFileSync(reviewPath, "utf8"), /维持手动刷新/);
+  }
 });

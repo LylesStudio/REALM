@@ -573,3 +573,97 @@ test("genesis full-field roundtrip, same-key replay, observer role restore and d
   const foreignView = (await projection.loadForPlayer({ ...scope, recordId: foreign.recordId }))!;
   assert.equal(foreignView.cast.find((member) => member.controlledBy === "human")?.role, "");
 });
+
+test(
+  "A3: hook freshness follows the durable event cursor (real PG evidence)",
+  { skip: !adminConnectionString || !runtimeConnectionString },
+  async (t) => {
+    const { ownerPool, runtimePool } = await createMigratedDatabase(t);
+    const library = createPostgresLibraryService(ownerPool);
+    const store = createPostgresFirstNightStore(runtimePool, LOCAL_RECORD_SCOPE.workspaceId);
+    const scope = {
+      workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+      principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
+    };
+
+    const genesis = await library.createGenesis(scope, GENESIS_DRAFT);
+    const runFirstNight = createFirstNightRunner({
+      store,
+      getGateway: async () => failingGateway,
+    });
+    await runFirstNight(genesis.recordId);
+    const marker = await store.find(genesis.recordId);
+    assert.equal(marker?.state, "degraded");
+    assert.ok(marker?.hookContent);
+    const resolveFreshness = store.resolveHookFreshness;
+    assert.ok(resolveFreshness);
+
+    // hook 刚交付、尚无任何玩家回合 → fresh。
+    const initial = await resolveFreshness(genesis.recordId, null);
+    assert.deepEqual(initial, { content: marker!.hookContent, fresh: true });
+    // 游标判定确定：同参数重读同结果（不依赖进程内状态）。
+    assert.deepEqual(await resolveFreshness(genesis.recordId, null), initial);
+
+    // 注入一条「玩家回合」事件（明确测试数据）：hook 之后的玩家应答。
+    const coords = await withWorkspaceTransaction(
+      ownerPool,
+      scope.workspaceId,
+      (client) =>
+        client.query<{
+          world_id: string; worldline_id: string; scene_id: string;
+          policy_id: string; calendar_id: string;
+          next_ordinal: string; head_tick: string; head_ordinal: string;
+          participant_id: string;
+        }>(
+          `SELECT record.world_id, record.worldline_id,
+                  (SELECT id FROM scenes WHERE workspace_id = record.workspace_id AND record_id = record.id ORDER BY start_tick, start_ordinal LIMIT 1) AS scene_id,
+                  (SELECT id FROM visibility_policies WHERE workspace_id = record.workspace_id AND record_id = record.id AND policy_kind = 'public' LIMIT 1) AS policy_id,
+                  'native_calendar' AS calendar_id,
+                  head.next_record_ordinal AS next_ordinal, line.head_tick, line.head_ordinal,
+                  (SELECT participant.id FROM participants AS participant
+                    WHERE participant.workspace_id = record.workspace_id
+                      AND participant.record_id = record.id
+                      AND participant.controller_mode = 'human' LIMIT 1) AS participant_id
+           FROM records AS record
+           JOIN record_heads AS head ON head.workspace_id = record.workspace_id AND head.record_id = record.id
+           JOIN worldlines AS line ON line.workspace_id = record.workspace_id AND line.id = record.worldline_id
+           WHERE record.workspace_id = $1 AND record.id = $2`,
+          [scope.workspaceId, genesis.recordId],
+        ),
+      { readOnly: true },
+    );
+    const row = coords.rows[0]!;
+    const playerTurnId = "turn_hook_answered";
+    await ownerPool.query(
+      `INSERT INTO events (
+         workspace_id, world_id, worldline_id, record_id, scene_id, id,
+         record_version, record_ordinal, batch_index, event_kind,
+         actor_participant_id, speaker_name, content, payload,
+         visibility_policy_id, world_tick, world_ordinal, calendar_id,
+         display_time, recorded_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,'utterance.committed',$9,$10,$11,$12::jsonb,$13,$14,$15,$16,'',CURRENT_TIMESTAMP)`,
+      [
+        scope.workspaceId, row.world_id, row.worldline_id, genesis.recordId,
+        row.scene_id, `${playerTurnId}:player`,
+        3, Number(row.next_ordinal),
+        row.participant_id, "测试旅人", "我把密函拆开读了出来。",
+        JSON.stringify({ schemaVersion: 1, role: "player", speaker: "测试旅人", participantId: row.participant_id, content: "我把密函拆开读了出来。", segments: [] }),
+        row.policy_id, Number(row.head_tick), Number(row.head_ordinal) + 1, row.calendar_id,
+      ],
+    );
+
+    // 已有后续玩家回合 → 同一旧 hook 不再新鲜（留作背景，不重播）。
+    const answered = await resolveFreshness(genesis.recordId, null);
+    assert.deepEqual(answered, { content: marker!.hookContent, fresh: false });
+    // 当前玩家回合也是正式应答；不能排除它来复活旧 hook。
+    const ownTurn = await resolveFreshness(genesis.recordId, playerTurnId);
+    assert.deepEqual(ownTurn, { content: marker!.hookContent, fresh: false });
+    assert.deepEqual(
+      await resolveFreshness(genesis.recordId, playerTurnId),
+      ownTurn,
+    );
+    // 无状态行的 Record → null（无 hook 素材）。
+    assert.equal(await resolveFreshness("record_nonexistent", null), null);
+  },
+);

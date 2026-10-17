@@ -40,6 +40,7 @@ import {
 } from "./guided-genesis-steps.ts";
 import type { GenesisChatFallback } from "./guided-genesis-chat.tsx";
 import { GenesisDraftFields } from "./genesis-draft-fields";
+import { goalDraftsValid } from './record-goal-fields.tsx';
 
 interface GuidedGenesisProps {
   playerName: string;
@@ -393,7 +394,7 @@ export function GuidedGenesis({
   }
 
   async function sealWorld() {
-    if (confirmingRef.current || suggestionBusy.current || !draft.world.name.trim()) return;
+    if (confirmingRef.current || suggestionBusy.current || !draft.world.name.trim() || !goalDraftsValid(draft.recordGoals)) return;
     confirmingRef.current = true;
     setConfirming(true);
     try {
@@ -737,7 +738,7 @@ export function GuidedGenesis({
               </div>
               <button
                 className="guided-seal-button"
-                disabled={confirming || busy || !draft.world.name.trim()}
+                disabled={confirming || busy || !draft.world.name.trim() || !goalDraftsValid(draft.recordGoals)}
                 onClick={() => void sealWorld()}
                 type="button"
               >

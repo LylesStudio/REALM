@@ -1,5 +1,5 @@
 /**
- * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；88 表 = 88 实有可导出，另有 2 张 durable 台账不进矩阵）。
+ * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；91 行，另有 2 张 durable 台账不进矩阵）。
  *
  * 档位：T=template / F=full / A=archive(selection)；派生=trigger 重建不进包；
  * flag=仅 includeMemberships 展示形态；excluded=不出包。
@@ -67,7 +67,7 @@ function row(
   };
 }
 
-/** D.7 矩阵全量（88 行；声明序 = 包内 tables/* 序）。 */
+/** D.7 矩阵全量（91 行；声明序 = 包内 tables/* 序）。 */
 export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("workspaces", "excluded", null),
   row("worlds", "bootstrap", "A"),
@@ -142,6 +142,11 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("goal_instances", "excluded", null),
   row("goal_assessment_jobs", "excluded", null),
   row("goal_assessments", "excluded", null),
+  // Authoring history and command replay require dedicated runtime-save remapping.
+  row("record_goal_definitions", "excluded", null),
+  row("record_goal_commands", "excluded", null),
+  row("record_goal_restore_admissions", "excluded", null),
+  row("record_narrative_state", "derived", "A", { rewriteColumns: ["record_id", "source_event_id"], semanticColumns: ["document"] }),
   // Story Graph runtime projections and unlock evidence are server-owned
   // state; they stay out of .realm packages until a dedicated runtime-save
   // route can preserve their replay/evidence invariants.

@@ -4,6 +4,7 @@ import {
   RuntimeConcurrencyError,
   RuntimeIdempotencyConflictError,
   RuntimeInvariantError,
+  RetryableTurnError,
   createReleaseFingerprint,
   type AcceptCommandInput,
   type AcceptCommandResult,
@@ -40,6 +41,8 @@ import {
   isWorldWriteGateError,
 } from "./world-write-gate.ts";
 import { withRecordCommittedNotify } from "./record-events.ts";
+import { applyCommittedNarrativeState } from "./narrative-situation-repository.ts";
+import { decodeNarrativeState } from "../../modules/application/narrative-situation.ts";
 
 const RUNTIME_PAYLOAD_KEY = "__realmRuntimePayload";
 
@@ -895,6 +898,14 @@ export function createPostgresRuntimeRepository<
               ],
             );
 
+            const narrativeDocument = (item.draft.payload as { narrativeState?: unknown } | null)?.narrativeState;
+            if (narrativeDocument !== undefined) {
+              const state = decodeNarrativeState(narrativeDocument);
+              await applyCommittedNarrativeState(client, {
+                scope: { workspaceId, worldId: scope.world_id, worldlineId: scope.worldline_id, recordId: run.command.recordId },
+                sourceEventId: item.draft.eventId, expectedRevision: state.revision - 1,
+              });
+            }
             const observationBatch = (item.write.observations ?? []).map(
               (observation) => {
                 validateObservation(observation, item.worldCursor);
@@ -1330,10 +1341,18 @@ async function inWorkspaceTransaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
+    let rolledBack = false;
     try {
       await client.query("ROLLBACK");
+      rolledBack = true;
     } catch {
       // Releasing the client is the final transaction cleanup fence.
+    }
+    // These SQLSTATEs guarantee an aborted transaction. Do not relabel domain,
+    // constraint or ambiguous-commit/connection errors as safe retries.
+    if (rolledBack && error && typeof error === "object" && "code" in error
+      && (error.code === "40001" || error.code === "40P01")) {
+      throw new RetryableTurnError("POSTGRES_TRANSACTION_RETRY", "A concurrent database transaction interrupted this step; retry the same command.");
     }
     throw error;
   } finally {

@@ -44,6 +44,7 @@ export interface GoalCommittedEventScope extends GoalRuntimeScope {
  * terminal state 与 completed_at 同真同假，缺一角即约束冲突、整事务回滚。
  */
 export interface GoalBranchCloneSource {
+  definitionSource?: 'record';
   goalKey: string;
   state: GoalState;
   /** bigint 列的文本形态（node-pg 默认），回写时由 bigint 列直接接受。 */
@@ -75,6 +76,7 @@ export async function lockGoalInstancesForBranch(
 ): Promise<readonly GoalBranchCloneSource[]> {
   const result = await client.query<{
     goal_key: string;
+    definition_source: string;
     state: GoalState;
     revision: string;
     progress: unknown;
@@ -84,14 +86,16 @@ export async function lockGoalInstancesForBranch(
     attempt: number;
   }>(
     `SELECT goal_key, state, revision::text AS revision,
-            progress, outcome, policy_version, completed_at, attempt
-     FROM goal_instances
+            progress, outcome, policy_version, completed_at, attempt,
+            COALESCE(to_jsonb(goal)->>'definition_source','content') AS definition_source
+     FROM goal_instances goal
      WHERE workspace_id = $1 AND record_id = $2 AND scope_kind = 'record'
      ORDER BY goal_key
      FOR UPDATE`,
     [workspaceId, sourceRecordId],
   );
   return result.rows.map((row) => ({
+    ...(row.definition_source==='record'?{definitionSource:'record' as const}:{}),
     goalKey: row.goal_key,
     state: row.state,
     revision: row.revision,

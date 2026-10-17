@@ -1,0 +1,17 @@
+# Optional user-level worker for advanced self-hosted installs.
+# The normal REALM console already supervises its own worker.
+# Requires Node on this user's PATH and an existing configured REALM service.
+[Unit]
+Description=REALM optional scene image worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.realm/app
+ExecStart=/usr/bin/env node --experimental-strip-types %h/.realm/app/launcher/scene-image-worker-host.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

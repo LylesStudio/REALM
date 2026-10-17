@@ -33,6 +33,8 @@ const explicitlyManualPgTests = new Set([
   // 真实 provider opt-in 验收：自举独立 scratch 集群，仅在
   // REALM_TEST_PROVIDER_API_KEY 存在时运行，不进默认 scratch 套件。
   "tests/goal-semantic-judge-real-provider.test.ts",
+  // Explicit external-network opt-in; still uses the official disposable runner.
+  "tests/postgres-record-goals-real-provider.test.ts",
 ]);
 
 const requiredScratchIntegrations = [
@@ -67,4 +69,12 @@ test("database safety and schema contracts are part of the regular contract suit
   ];
   const missing = requiredContracts.filter((file) => !contractScript.includes(file));
   assert.deepEqual(missing, []);
+});
+
+test('native Goal real-provider acceptance is maintained, explicit opt-in and bound to the disposable runner',()=>{
+  const script=packageJson.scripts['test:goals:real-provider'];
+  assert.match(script,/REALM_ENABLE_RECORD_GOAL_REAL_PROVIDER=1/);
+  assert.match(script,/scripts\/test-postgres-runtime-with-scratch\.mjs tests\/postgres-record-goals-real-provider\.test\.ts/);
+  assert.match(runner,/REALM_SCRATCH_POSTGRES_CONTAINER:\s*cluster\.name/);
+  assert.ok(!registered.has('tests/postgres-record-goals-real-provider.test.ts'),'default regressions must not call an external provider');
 });

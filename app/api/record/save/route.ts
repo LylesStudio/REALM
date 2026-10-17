@@ -28,7 +28,7 @@ function invalidRequest(message: string): Response {
 
 function saveError(error: unknown): Response {
   if (error instanceof RealmRuntimeSaveRepositoryError) {
-    const status = error.code === "RECORD_NOT_FOUND" ? 404 : error.code === "RECORD_ARCHIVED" ? 409 : 422;
+    const status = error.code === "RECORD_NOT_FOUND" ? 404 : error.code === 'WORLD_READ_ONLY' ? 403 : error.code === "RECORD_ARCHIVED" ? 409 : 422;
     return Response.json(
       { ok: false as const, error: { code: error.code, message: error.message } },
       { status, headers: { "Cache-Control": "no-store" } },
@@ -83,6 +83,7 @@ export async function POST(request: Request): Promise<Response> {
     const bytes = await buildRealmRuntimeSaveBytes(reader, {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       recordId: input.recordId,
+      principalId,
     });
     if (!bytes) {
       return Response.json(

@@ -1,4 +1,5 @@
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
+import { RecordGoals } from './record-goals.tsx';
 import { demoCharacterText, demoSceneText, demoStoryText } from "../demo-content.ts";
 import type { RecordProjection, ViewerContext } from "./record-types";
 
@@ -77,6 +78,7 @@ export function SceneInspector({
               </div>
             ) : null}
           </section>
+          <RecordGoals key={projection.id} recordId={projection.id} version={projection.version} uiLanguage={uiLanguage}/>
           {firstNightHook.trim() ? (
             <section className="inspector-card hook-card">
               <p className="eyebrow">{uiText("ui.inspector.hook", uiLanguage)}</p>

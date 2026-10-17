@@ -156,14 +156,25 @@ test(
     assert.equal(session.state, "running");
 
     let final = null;
+    let settledJobState: string | undefined;
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       final = await store.load(session.id);
-      if (final && ["completed", "failed", "cancelled"].includes(final.state)) break;
+      // The business session is committed by the handler *before* the host
+      // acknowledges its leased queue row. Observe both durable boundaries,
+      // not whichever happens to win the next PostgreSQL round trip.
+      const job = await ownerPool.query<{ state: string }>(
+        `SELECT state FROM realm_durable_jobs WHERE workspace_id = $1 AND id = $2`,
+        [LOCAL_RECORD_SCOPE.workspaceId, `self-play-beat:${session.id}:1`],
+      );
+      settledJobState = job.rows[0]?.state;
+      if (final && ["completed", "failed", "cancelled"].includes(final.state)
+        && settledJobState && ["completed", "failed", "cancelled"].includes(settledJobState)) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.equal(final?.state, "completed");
     assert.equal(final?.beatsCompleted, 1);
+    assert.equal(settledJobState, "completed", "the host must acknowledge the durable job before assertions");
 
     // durable job 行落 completed（lease fencing 收束）。
     const jobRows = await ownerPool.query<{

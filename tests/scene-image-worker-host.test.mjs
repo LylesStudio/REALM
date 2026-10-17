@@ -91,6 +91,27 @@ test("start：spawn 参数 + 子环境白名单脱敏", (t) => {
   assert.equal(spawnOptions.windowsHide, true);
 });
 
+test('Goal supervisor uses the shared lifecycle, its own script/log and an explicit environment allowlist', async t => {
+  const {createGoalAssessmentWorkerHost}=await import('../launcher/goal-assessment-worker-host.mjs');
+  const home=mkdtempSync(join(tmpdir(),'realm-goal-host-'));
+  t.after(()=>rmSync(home,{recursive:true,force:true}));
+  const child=makeFakeChild();
+  let spawned;
+  const host=createGoalAssessmentWorkerHost({dataHome:home,spawn:(command,args,options)=>{spawned={command,args,options};return child;},
+    stopTimeoutMs:25,parentEnv:{DATABASE_URL:'owner-secret',REALM_MODEL_API_KEY:'provider-secret',PATH:'/usr/bin'},
+    environment:{REALM_RUNTIME_DATABASE_URL:'runtime-fixture',REALM_GOAL_WORKER_INSTALL_ROOT:'worlds-fixture',
+      REALM_REALMWORLD_TRUST_STORE:'trust-fixture',REALM_GOAL_WORKER_WORKSPACES:'workspace-fixture',DATABASE_URL:'owner-secret'}});
+  assert.equal(host.start(),true);
+  assert.match(spawned.args[1],/goal-assessment-worker\.mjs$/);
+  assert.equal(spawned.options.env.REALM_GOAL_WORKER_INSTALL_ROOT,'worlds-fixture');
+  assert.equal(spawned.options.env.REALM_REALMWORLD_TRUST_STORE,'trust-fixture');
+  assert.equal(spawned.options.env.REALM_GOAL_WORKER_WORKSPACES,'workspace-fixture');
+  assert.equal(spawned.options.env.DATABASE_URL,undefined);
+  assert.equal(spawned.options.env.REALM_MODEL_API_KEY,undefined);
+  const stopping=host.stop();child.emitExit(0);await stopping;
+  assert.ok(existsSync(join(home,'logs','goal-assessment-worker.log')));
+});
+
 test("缺 REALM_RUNTIME_DATABASE_URL：不 spawn，上报 not_configured", (t) => {
   const dataHome = mkdtempSync(join(tmpdir(), "realm-worker-host-"));
   t.after(() => rmSync(dataHome, { recursive: true, force: true }));

@@ -113,6 +113,10 @@ import type {
   RealmWorldSignatureVerifier,
 } from "../world-transfer/realmworld-loader.ts";
 import { getModelSettingsService } from "./model-settings-service.ts";
+import { createRecordGoalContextScopeRepository } from "./record-goal-projection.ts";
+import { createProjectionDefinitionResolver } from "./record-goal-content.ts";
+import { resolveBaseGoalDefinition } from "../world-transfer/base-content.ts";
+import { LOCAL_WORLD_VERSION } from "../world-transfer/realm-save.ts";
 import { getFirstNightRuntime } from "./first-night-runtime.ts";
 import {
   closeDurableJobRuntime,
@@ -425,6 +429,8 @@ export interface LocalRecordServiceDependencies {
   /**
    * 批次 T1：初夜状态读取与调度；缺省不启用（内存测试零变化）。
    * load 返回 null 表示旧世界无状态行；pending 时触发一次懒重试调度。
+   * Record Goal A 批（A3）：loadHookFreshness 以持久事件游标判定 hook
+   * 新鲜度；未装配证据读取时不提供 hook 触发素材，生产 PG 装配必须提供。
    */
   firstNight?: {
     load(
@@ -438,6 +444,14 @@ export interface LocalRecordServiceDependencies {
       | null
     >;
     schedule?: (recordId: string) => void;
+    /**
+     * A3：返回 hook 内容与新鲜度；fresh=false 表示该 hook 已被先前玩家
+     * 回合应答（留作背景，不作本轮触发素材）；null 表示无 hook 素材。
+     */
+    loadHookFreshness?(
+      recordId: string,
+      currentTurnId: string | null,
+    ): Promise<{ content: string; fresh: boolean } | null>;
   };
   /**
    * 批次 T2 sync_turn：回合提交完成后异步萃取 observations→conclusions。
@@ -817,6 +831,11 @@ export function createLocalRecordService(
     runtimeScope: RecordRuntimeScope;
     /** 发起回合的 principal；快照加载按真实 membership 解析。 */
     principalId?: string;
+    /**
+     * 触发来源回合 id，供 hook evidence reader 追踪来源。
+     * 当前玩家回合自身也算正式应答，不作为游标排除项。
+     */
+    currentTurnId?: string;
     committed: {
       narration: SemanticOutputDraft | null;
       characterResponses: readonly SemanticOutputDraft[];
@@ -832,25 +851,46 @@ export function createLocalRecordService(
         PRESENCE_HARD_CAP_PER_TURN,
       );
       if (budget < 1) return;
-      // 钩子素材只取 ready/degraded 初夜状态；load 失败按空 fail-closed（F2）。
-      let hookContent: string | null = null;
-      if (dependencies.firstNight) {
+      // A3：当前玩家回合也算应答；没有游标证据时不回退旧状态行。
+      // 历史 hook 仍由授权历史/初夜状态透出，不在此重播。
+      async function loadFreshHookContent(): Promise<string | null> {
         try {
-          const firstNight = await dependencies.firstNight.load(input.recordId);
-          if (firstNight && firstNight.state !== "pending") {
-            hookContent = firstNight.hookContent;
-          }
+          const hook = await dependencies.firstNight?.loadHookFreshness?.(
+            input.recordId,
+            input.currentTurnId ?? null,
+          );
+          return hook?.fresh ? hook.content : null;
         } catch {
-          hookContent = null;
+          return null;
         }
       }
+      // A1: bracket authorization/context resolution with a stable record head.
+      // Never pair a scope from before an interleaved commit with its new version.
+      async function loadPresenceSnapshot() {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const head = await dependencies.repository.loadRecordHead(input.recordId);
+          const scope = await resolveRuntimeScope(dependencies, input.recordId, input.principalId);
+          if (!head
+            || scope.workspaceId !== input.runtimeScope.workspaceId
+            || scope.principalId !== (input.principalId ?? input.runtimeScope.principalId)
+            || scope.worldId !== input.runtimeScope.worldId
+            || scope.worldlineId !== input.runtimeScope.worldlineId
+            || scope.recordId !== input.recordId) {
+            throw new Error("presence scope identity mismatch");
+          }
+          const hookContent = await loadFreshHookContent();
+          const snapshot = await loadConsistentSnapshot(dependencies, input.recordId, input.principalId);
+          if (snapshot.canonicalVersion === head.version) return { scope, snapshot, hookContent };
+        }
+        throw new Error("presence scope could not reach a stable head");
+      }
+      const { scope: freshScope, snapshot: before, hookContent } = await loadPresenceSnapshot();
       const context = extractPresenceContext({
         narration: input.committed.narration,
         characterResponses: input.committed.characterResponses,
         actionTransactions: input.committed.actionTransactions,
         hookContent,
       });
-      // 三类素材全空 → 确定性沉默，不发起模型门禁调用。
       if (presenceContextIsEmpty(context)) return;
       // 候选排除：本回合被 DM 激活或已发声的角色不重复在场；冷却复用 TurnControl。
       const excluded = new Set<string>([
@@ -863,46 +903,48 @@ export function createLocalRecordService(
             characterInstanceId !== null),
       ]);
       const candidates = filterPresenceCandidates({
-        characters: input.runtimeScope.aiCharacters,
+        characters: freshScope.aiCharacters,
         excludedCharacterInstanceIds: excluded,
         turnControl,
       });
       if (candidates.length === 0) return;
-      const decision = await presenceAssessorFor(input.runtimeScope).assess({
+      const decision = await presenceAssessorFor(freshScope).assess({
         context,
         candidates,
         budget,
       });
       if (decision.kind !== "speak") return;
-      const character = candidates.find(
+      const selectedCharacter = candidates.find(
         (candidate) => candidate.characterInstanceId === decision.characterInstanceId,
       );
       // 双保险：确定性规整已拦截越候选选人（F4）。
-      if (!character) return;
+      if (!selectedCharacter) return;
+      let character = selectedCharacter;
       const lease = await turnControl.acquire(
         input.recordId,
         character.characterInstanceId,
       );
       try {
-        const before = await loadConsistentSnapshot(dependencies, input.recordId, input.principalId);
-        // 关系视图读取失败 → 按空注入（F5）。
-        let relationships = "";
-        if (dependencies.characterMemory) {
+        let activeScope = freshScope;
+        // Re-read observer context as well if a version conflict rebuilds scope.
+        async function loadPresenceRelationships(): Promise<string> {
           try {
-            relationships = await dependencies.characterMemory.relationships({
-              workspaceId: input.runtimeScope.workspaceId,
-              worldId: input.runtimeScope.worldId,
-              worldlineId: input.runtimeScope.worldlineId,
+            return await dependencies.characterMemory?.relationships({
+              workspaceId: activeScope.workspaceId,
+              worldId: activeScope.worldId,
+              worldlineId: activeScope.worldlineId,
               recordId: input.recordId,
               characterInstanceId: character.characterInstanceId,
-            });
+            }) ?? "";
           } catch {
-            relationships = "";
+            return "";
           }
         }
+        let relationships = await loadPresenceRelationships();
         const buildPresenceCommand = (
           expectedRecordVersion: number,
           idempotencyKey: string,
+          scope: RecordRuntimeScope,
         ): RuntimeCommand<PlayerUtterancePayload> => ({
           commandType: "player.utterance",
           recordId: input.recordId,
@@ -912,7 +954,7 @@ export function createLocalRecordService(
           payload: {
             text: input.playerText,
             visibility: { kind: "public" as const },
-            runtimeScope: input.runtimeScope,
+            runtimeScope: scope,
             presence: {
               characterInstanceId: character.characterInstanceId,
               triggerKind: decision.triggerKind,
@@ -931,7 +973,7 @@ export function createLocalRecordService(
         const presenceDependencies = { ...runtimeDependencies, signal: presenceController.signal };
         try {
           let run = await executeTurn(
-            buildPresenceCommand(before.canonicalVersion, activeKey),
+            buildPresenceCommand(before.canonicalVersion, activeKey, activeScope),
             presenceDependencies,
           );
           if (run.state === "retryable") {
@@ -939,6 +981,8 @@ export function createLocalRecordService(
           }
           // 批次 T3：生成期间若有异步落库（场景晶化、初夜补录等）推进版本，
           // 重读最新快照重试一次；重试仍冲突则维持 fail-closed 沉默（F9）。
+          // A1：版本冲突必须重建 scope（叙事上下文随 head 变化），不能只换
+          // expectedRecordVersion；重建失败同样 fail-closed 放弃。
           if (
             run.state !== "completed"
             && run.currentFailure?.code === "RECORD_VERSION_CONFLICT"
@@ -947,17 +991,25 @@ export function createLocalRecordService(
               `[realm] presence turn ${run.turnId} hit version conflict; retrying on fresh snapshot`,
             );
             turnSignals.delete(activeKey);
-            const refreshed = await loadConsistentSnapshot(
-              dependencies,
-              input.recordId,
-              input.principalId,
-            );
+            const rebuilt = await loadPresenceSnapshot();
+            if (decision.triggerKind === "hook" && !rebuilt.hookContent) return;
+            activeScope = rebuilt.scope;
+            const refreshed = rebuilt.snapshot;
+            const refreshedCharacter = filterPresenceCandidates({
+              characters: activeScope.aiCharacters,
+              excludedCharacterInstanceIds: excluded,
+              turnControl,
+            }).find((candidate) => candidate.characterInstanceId === character.characterInstanceId
+              && candidate.participantId === character.participantId);
+            if (!refreshedCharacter) return;
+            character = refreshedCharacter;
+            relationships = await loadPresenceRelationships();
             activeKey = `presence-${dependencies.idFactory?.() ?? crypto.randomUUID()}`;
             const retryController = new AbortController();
             turnSignals.set(activeKey, { recordId: input.recordId, controller: retryController });
             const retryDependencies = { ...runtimeDependencies, signal: retryController.signal };
             run = await executeTurn(
-              buildPresenceCommand(refreshed.canonicalVersion, activeKey),
+              buildPresenceCommand(refreshed.canonicalVersion, activeKey, activeScope),
               retryDependencies,
             );
             if (run.state === "retryable") {
@@ -975,16 +1027,16 @@ export function createLocalRecordService(
           turnControl.recordInterjection(character.characterInstanceId);
           // 批次 T2 sync_turn：在场回合同样写 observations，提交后再触发萃取。
           dependencies.memorySync?.schedule({
-            workspaceId: input.runtimeScope.workspaceId,
-            worldId: input.runtimeScope.worldId,
-            worldlineId: input.runtimeScope.worldlineId,
+            workspaceId: activeScope.workspaceId,
+            worldId: activeScope.worldId,
+            worldlineId: activeScope.worldlineId,
             recordId: input.recordId,
           });
           // 关系落库（F8）：target 须精确匹配在场名册；写入失败只留日志。
           await recordPresenceRelationship({
             run,
             character,
-            runtimeScope: input.runtimeScope,
+            runtimeScope: activeScope,
             recordId: input.recordId,
           });
         } finally {
@@ -1569,6 +1621,7 @@ export function createLocalRecordService(
             playerText,
             runtimeScope: scope,
             principalId: scope.principalId,
+            currentTurnId: run.turnId,
             committed: {
               narration: run.candidate?.body.narration ?? null,
               characterResponses: run.candidate?.body.characterResponses ?? [],
@@ -1773,6 +1826,22 @@ export function createLocalRecordService(
         throw error;
       }
 
+      // A retry reuses the admitted execution context, not today's mutable
+      // scene/Goal/narrative snapshot. Keep Core's full-payload fingerprint:
+      // substitute only user command fields so altered content/actions still fail.
+      let replayCommand: LocalTurnRun["command"] | undefined;
+      if (authorization.replay) {
+        const existing = await dependencies.repository.findTurnByIdempotency(input.recordId, input.idempotencyKey);
+        if (!existing || existing.command.commandType !== "player.utterance"
+          || existing.command.actorId !== runtimeScope.playerActor.participantId
+          || existing.command.expectedRecordVersion !== authorization.expectedRecordVersion) {
+          throw new LocalRecordServiceError("IDEMPOTENCY_CONFLICT", "The idempotency key belongs to a different command.");
+        }
+        const payload = { ...existing.command.payload, text: input.content };
+        delete payload.actionSelection;
+        if (input.actionSelection) payload.actionSelection = input.actionSelection;
+        replayCommand = { ...existing.command, payload };
+      }
       if (input.actionSelection && !authorization.replay) {
         const available = await listAuthorizedAffordances(
           actionCatalog,
@@ -1833,7 +1902,7 @@ export function createLocalRecordService(
       };
         try {
           run = await executeTurn(
-            {
+            replayCommand ?? {
               commandType: "player.utterance",
               recordId: input.recordId,
               expectedRecordVersion: authorization.expectedRecordVersion,
@@ -1950,6 +2019,7 @@ export function createLocalRecordService(
               playerText: input.content,
               runtimeScope,
               principalId: input.principalId,
+              currentTurnId: run.turnId,
               committed: {
                 narration: run.candidate?.body.narration ?? null,
                 characterResponses: run.candidate?.body.characterResponses ?? [],
@@ -2611,10 +2681,21 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
           firstNight: {
             load: (recordId) => firstNightRuntime.store.find(recordId),
             schedule: firstNightRuntime.schedule,
+            // A3：hook 新鲜度由持久事件游标判定（first-night-store 只读）。
+            loadHookFreshness: (recordId: string, currentTurnId: string | null) =>
+              firstNightRuntime.store.resolveHookFreshness?.(recordId, currentTurnId)
+                ?? Promise.resolve(null),
           },
         }
       : {}),
-    runtimeScopeProvider: createPostgresRecordRuntimeScopeRepository(pool),
+    runtimeScopeProvider: createRecordGoalContextScopeRepository(pool, createPostgresRecordRuntimeScopeRepository(pool), {
+      resolveContentDefinition: async binding => {
+        const resolver = await createProjectionDefinitionResolver()
+          ?? (binding.worldVersion === LOCAL_WORLD_VERSION ? resolveBaseGoalDefinition : null);
+        if (!resolver) throw new RuntimeInvariantError("GOAL_CONTENT_UNAVAILABLE", "Goal content is unavailable.");
+        return resolver(binding);
+      },
+    }),
     // 场景建立图（Stage 3）：envelope 透出 latest ready 背景（0048 台账）。
     sceneImageStore: createPostgresSceneImageStore(pool),
     // 场景图自动模式（0049/0050）：账号级模式 + 幂等队列触发器。

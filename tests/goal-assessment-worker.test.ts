@@ -117,6 +117,22 @@ function repository(
   };
 }
 
+test('semantic continue is a validated active progress transition rather than rejected evidence', async () => {
+  const repo=repository(context(),claimedJob(semanticDefinition.goalKey));
+  const progress={summary:'The northern clue is verified',completedCriteria:[0]};
+  const report=await runGoalAssessmentOnce({repository:repo,resolveDefinition:async()=>semanticDefinition,
+    judge:{async assess(){return {decision:'continue',policyVersion:semanticDefinition.policyVersion,evidenceEventIds:['event-1'],
+      evidenceSnapshotHash:goalEvidenceSnapshotHash({definition:semanticDefinition,instance,events:[events[0]!],evidenceHead:head}),progress,outcome:null};}},
+    now:'2026-10-05T00:00:00.000Z'});
+  assert.deepEqual(report,{kind:'settled',status:'accepted'});
+  const entry=repo.settled[0] as {decision:{transition:{from:string;to:string;progress:unknown;outcome:unknown;revision:number}}};
+  assert.equal(entry.decision.transition.from,'active');
+  assert.equal(entry.decision.transition.to,'active');
+  assert.equal(entry.decision.transition.revision,4);
+  assert.deepEqual(entry.decision.transition.progress,progress);
+  assert.equal(entry.decision.transition.outcome,null);
+});
+
 test("deterministic Goal jobs evaluate committed evidence and settle an accepted transition", async () => {
   const repo = repository(context());
   const report = await runGoalAssessmentOnce({

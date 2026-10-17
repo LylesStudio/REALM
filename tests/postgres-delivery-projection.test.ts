@@ -241,6 +241,9 @@ test(
             weather: "",
             tension: "",
             objective: "",
+            // scene.title 已进入正式投影 DTO（创世 roundtrip 批）；
+            // 无动态知识权限时与其他场景字段同门禁置空。
+            title: "",
           },
         },
       );

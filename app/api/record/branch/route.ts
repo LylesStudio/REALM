@@ -7,7 +7,8 @@ import {
   type RecordBranchInput,
 } from "../../../../modules/application/library-service.ts";
 import { getSharedRuntimePool } from "../../world-scope.ts";
-import { resolveRequestPrincipal, unauthorizedResponse } from "../../auth-context.ts";
+import {RealmRuntimeSaveRepositoryError} from '../../../../database/postgres/realm-runtime-save-repository.ts';
+import { resolveRequestPrincipal, sessionProofFromRequest, unauthorizedResponse } from "../../auth-context.ts";
 
 export const runtime = "nodejs";
 
@@ -76,7 +77,7 @@ export async function POST(request: Request) {
   try {
     const service = createPostgresLibraryService(getSharedRuntimePool(connectionString));
     const result = await service.branchRecord(
-      { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId },
+      { workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId,sessionProof:sessionProofFromRequest(request)??undefined },
       {
         sourceRecordId,
         fork,
@@ -94,6 +95,10 @@ export async function POST(request: Request) {
       },
     );
   } catch (error) {
+    if(error instanceof RealmRuntimeSaveRepositoryError) {
+      const status=error.code==='WORLD_READ_ONLY'?403:error.code.startsWith('REALMWORLD_')?503:error.code==='RUNTIME_SAVE_INVALID'?422:409;
+      return Response.json({ok:false,error:{code:error.code,message:'无法安全复制当前记录状态，分支未创建。'}},{status});
+    }
     if (error instanceof LibraryServiceError) {
       const status = error.code === "RECORD_NOT_FOUND" || error.code === "WORLD_NOT_FOUND"
         ? 404

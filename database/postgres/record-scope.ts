@@ -9,6 +9,8 @@ import {
   type WorkspaceDatabase,
 } from "./workspace-transaction.ts";
 import { profileNoteTextAt } from "./character-growth-store.ts";
+import { decodeNarrativeState, emptyNarrativeState } from "../../modules/application/narrative-situation.ts";
+import { RuntimeInvariantError } from "../../modules/runtime/public.ts";
 import {
   worldBindingFromWorldIdentity,
 } from "../../modules/world-transfer/realm-save.ts";
@@ -103,6 +105,7 @@ export interface RuntimeActor {
 }
 
 interface RecordRow extends QueryResultRow {
+  narrative_source: { eventId: string; document: unknown } | null;
   world_id: string;
   world_status: string;
   world_version: string;
@@ -206,7 +209,25 @@ export function createPostgresRecordRuntimeScopeRepository(
                  )
                ) AS empty_retrospection,
                story.title AS story_title,
-               COALESCE(story.premise, '') AS premise
+               COALESCE(story.premise, '') AS premise,
+               (SELECT jsonb_build_object('eventId', situation_event.id, 'document',
+                   COALESCE(situation_event.payload->'__realmRuntimePayload', situation_event.payload)->'narrativeState')
+                FROM events AS situation_event
+                JOIN visibility_policies AS situation_policy
+                  ON situation_policy.workspace_id=situation_event.workspace_id
+                 AND situation_policy.world_id=situation_event.world_id
+                 AND situation_policy.worldline_id=situation_event.worldline_id
+                 AND situation_policy.record_id=situation_event.record_id
+                 AND situation_policy.id=situation_event.visibility_policy_id
+                WHERE situation_event.workspace_id=record.workspace_id AND situation_event.world_id=record.world_id
+                  AND situation_event.worldline_id=record.worldline_id AND situation_event.record_id=record.id
+                  AND situation_event.event_kind='narration.committed' AND situation_policy.policy_kind='public'
+                  AND COALESCE(situation_event.payload->'__realmRuntimePayload', situation_event.payload)->>'role'='narrator'
+                  AND COALESCE(situation_event.payload->'__realmRuntimePayload', situation_event.payload) ? 'narrativeState'
+                  AND situation_event.record_version<=COALESCE(rhead.record_version,0)
+                  AND (situation_event.world_tick,situation_event.world_ordinal)
+                    <= (COALESCE(rhead.last_world_tick,record.start_tick),COALESCE(rhead.last_world_ordinal,record.start_ordinal))
+                ORDER BY situation_event.record_ordinal DESC,situation_event.id DESC LIMIT 1) AS narrative_source
              FROM records AS record
              JOIN worlds AS world
                ON world.workspace_id = record.workspace_id
@@ -226,6 +247,15 @@ export function createPostgresRecordRuntimeScopeRepository(
           );
           const recordRow = record.rows[0];
           if (!recordRow) return null;
+          // Read the immutable source snapshot in the existing scope query: no
+          // extra transaction, cache probe, full-history scan or stale cache read.
+          const narrativeState = recordRow.narrative_source
+            ? decodeNarrativeState(recordRow.narrative_source.document) : emptyNarrativeState();
+          if (recordRow.narrative_source && (narrativeState.lastEventId !== recordRow.narrative_source.eventId
+            || narrativeState.scope?.workspaceId !== workspaceId || narrativeState.scope?.worldId !== recordRow.world_id
+            || narrativeState.scope?.worldlineId !== recordRow.worldline_id || narrativeState.scope?.recordId !== recordId)) {
+            throw new RuntimeInvariantError("NARRATIVE_SOURCE_INVALID", "The narrative source does not match this Record.");
+          }
           // SWM v2 验收修正②：canon/lore 的 effective cursor 用 Record head
           // （COALESCE(record_heads.last_world_tick, record.start_tick)），
           // 与 delivery projection/action-state/晶化一致；worldline 全局
@@ -421,6 +451,7 @@ export function createPostgresRecordRuntimeScopeRepository(
                 : scene.rows[0]?.objective ?? "",
               canon: "",
               worldLore: "",
+              narrativeState: JSON.stringify(narrativeState),
             },
             playerActor,
             viewerCharacterInstanceId:

@@ -1,6 +1,8 @@
 import { createGoalAssessmentWorkerRuntime } from "../modules/goals/assessment-worker-runtime.ts";
 import { createModelGoalJudge } from "../modules/goals/model-judge.ts";
+import { createModelGoalEvolutionPlanner } from "../modules/goals/model-evolution.ts";
 import { getModelSettingsService } from "../modules/application/model-settings-service.ts";
+import { safeWorkerErrorCode } from '../modules/application/durable-worker-host.ts';
 import {
   createRealmWorldSignatureVerifierFromTrustStoreFile,
   readRealmWorldTrustStoreFile,
@@ -9,7 +11,9 @@ import {
 
 /**
  * Production Goal assessment worker entrypoint. This process is separate from
- * the Web process and requires a versioned public-key trust-store document.
+ * the Web process. Record-authored and local base Goals require no package
+ * trust configuration. Packaged content requires an explicitly configured,
+ * versioned public-key trust store; there is no permissive signature fallback.
  * Semantic Goals are judged through the shared ModelGateway adapter
  * (modules/goals/model-judge.ts), which reads the existing local model
  * settings store lazily: deterministic jobs never touch model configuration,
@@ -19,6 +23,7 @@ import {
  *
  * Required environment:
  * - REALM_RUNTIME_DATABASE_URL: loopback realm_runtime connection
+ * Optional pair (both required when either is supplied):
  * - REALM_GOAL_WORKER_INSTALL_ROOT: installed RealmWorld root
  * - REALM_REALMWORLD_TRUST_STORE: path to the operator trust-store JSON
  *   (re-read and re-validated on every verification, so operator rotation or
@@ -33,25 +38,30 @@ import {
  *   per-call deadline/output cap)
  */
 
+async function main() {
 const connectionString = required("REALM_RUNTIME_DATABASE_URL");
-const installRoot = required("REALM_GOAL_WORKER_INSTALL_ROOT");
-const trustStorePath = required("REALM_REALMWORLD_TRUST_STORE");
+const installRoot = process.env.REALM_GOAL_WORKER_INSTALL_ROOT?.trim();
+const trustStorePath = process.env.REALM_REALMWORLD_TRUST_STORE?.trim();
+if (Boolean(installRoot) !== Boolean(trustStorePath)) throw new Error('Incomplete Goal content trust configuration.');
 // Initial configuration validation stays fail-fast: an unreadable or invalid
 // trust store aborts worker startup instead of degrading verification.
 // The operator-active engine base version is captured at startup (restart to
 // pick up base activate/switch/rollback, like any deploy-time compat change).
-const trustDocument = await readRealmWorldTrustStoreFile(trustStorePath);
-const engineBaseVersion = resolveEngineBaseActiveVersion(trustDocument);
-const verifySignature = createRealmWorldSignatureVerifierFromTrustStoreFile({
+const trustDocument = trustStorePath ? await readRealmWorldTrustStoreFile(trustStorePath) : undefined;
+const engineBaseVersion = trustDocument ? resolveEngineBaseActiveVersion(trustDocument) : undefined;
+const verifySignature = trustStorePath ? createRealmWorldSignatureVerifierFromTrustStoreFile({
   path: trustStorePath,
-});
+}) : undefined;
 
 // Lazy semantic Judge: the gateway is only loaded when a semantic job is
 // assessed, so missing model configuration keeps deterministic jobs running
 // and fails semantic jobs closed inside the worker's GOAL_JUDGE_FAILED path.
+const timeoutMs=positiveInteger(process.env.REALM_GOAL_JUDGE_TIMEOUT_MS,20_000);
+const leaseDurationMs=positiveInteger(process.env.REALM_GOAL_WORKER_LEASE_DURATION_MS,180_000);
+if (leaseDurationMs < timeoutMs*4+5_000) throw new Error('Goal lease must cover assessment, evolution and their bounded repairs.');
 const judge = createModelGoalJudge({
   getGateway: () => getModelSettingsService().gateway(),
-  timeoutMs: positiveInteger(process.env.REALM_GOAL_JUDGE_TIMEOUT_MS, 20_000),
+  timeoutMs,
   maxTokens: positiveInteger(process.env.REALM_GOAL_JUDGE_MAX_TOKENS, 800),
 });
 
@@ -61,8 +71,9 @@ const runtime = createGoalAssessmentWorkerRuntime({
   verifySignature,
   engineBaseVersion,
   judge,
+  evolutionPlanner: createModelGoalEvolutionPlanner({ getGateway: () => getModelSettingsService().gateway(), timeoutMs, maxTokens: 2048 }),
   workspaces: csv(process.env.REALM_GOAL_WORKER_WORKSPACES, "ws_demo"),
-  leaseDurationMs: positiveInteger(process.env.REALM_GOAL_WORKER_LEASE_DURATION_MS, 30_000),
+  leaseDurationMs,
   retryDelayMs: positiveInteger(process.env.REALM_GOAL_WORKER_RETRY_DELAY_MS, 1_000),
   idleMinMs: positiveInteger(process.env.REALM_GOAL_WORKER_IDLE_MIN_MS, 1_000),
   idleMaxMs: positiveInteger(process.env.REALM_GOAL_WORKER_IDLE_MAX_MS, 15_000),
@@ -75,6 +86,13 @@ try {
   await runtime.start();
 } finally {
   await runtime.stop();
+}
+}
+
+try { await main(); }
+catch (error) {
+  console.error(`[goal-worker] unavailable code=${safeWorkerErrorCode(error)}`);
+  process.exitCode=1;
 }
 
 function required(name) {

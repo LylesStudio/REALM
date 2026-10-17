@@ -23,6 +23,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LauncherError, launcherPgUrl, startRealm } from "./realm-launcher.mjs";
 import { createSceneImageWorkerHost } from "./scene-image-worker-host.mjs";
+import { createGoalAssessmentWorkerHost, GOAL_WORKER_ENV_KEYS } from './goal-assessment-worker-host.mjs';
 
 function emit(frame) {
   // 协议帧绝不包含 env/连接串；message 只传 launcher 的安全文案。
@@ -57,12 +58,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   let handle = null;
   let workerHost = null;
+  let goalWorkerHost = null;
   let stopped = false;
   const stop = async (reason) => {
     if (stopped || !handle) return;
     stopped = true;
     emit({ type: "stopping", reason });
     // 先停 worker 再停 app/PG：worker 使用 runtime DB，不能比 PG 后死。
+    if (goalWorkerHost) await goalWorkerHost.stop();
     if (workerHost) await workerHost.stop();
     await handle.stop();
     emit({ type: "stopped" });
@@ -111,6 +114,13 @@ async function main() {
       },
     });
     workerHost.start();
+    goalWorkerHost=createGoalAssessmentWorkerHost({
+      dataHome:handle.dataHome,
+      environment:{REALM_RUNTIME_DATABASE_URL:launcherPgUrl('realm_runtime',handle.pgPort),
+        ...Object.fromEntries(GOAL_WORKER_ENV_KEYS.filter(key=>typeof process.env[key]==='string').map(key=>[key,process.env[key]]))},
+      onState:({state,reason})=>emit({type:'worker',worker:'goal-assessment',state,...(reason?{reason}:{})}),
+    });
+    goalWorkerHost.start();
   } catch (error) {
     const message = error instanceof LauncherError
       ? error.message

@@ -169,8 +169,8 @@ test("retained items stay intact: PG migrations, runner, Core contract and porta
   const files = readdirSync(pgDir).filter((name) => name.endsWith(".sql")).sort();
   assert.deepEqual(
     files.map((name) => name.slice(0, 4)),
-    Array.from({ length: 64 }, (_, index) => String(index + 1).padStart(4, "0")),
-    "PG migrations 0001–0064 应连续齐全；0048–0050 负责场景图，0051 账户密码，0052 场景图队列 lease fencing、0053 membership capability、0054 world_version 身份、0055 Goal runtime、0056 runtime save/restore grants、0057 RealmWorld Record binding、0058 统一 durable job 队列、0059 World Command 跨 Record 台账、0060 Goal scope 与 terminal lifecycle、0061 Story Graph runtime、0062 Project/Finance foundation、0063 Genesis creation request ledger、0064 record-turn cancellation。",
+    Array.from({ length: 75 }, (_, index) => String(index + 1).padStart(4, "0")),
+    "PG migrations 0001–0075 应连续齐全；0048–0050 负责场景图，0051 账户密码，0052 场景图队列 lease fencing、0053 membership capability、0054 world_version 身份、0055 Goal runtime、0056 runtime save/restore grants、0057 RealmWorld Record binding、0058 统一 durable job 队列、0059 World Command 跨 Record 台账、0060 Goal scope 与 terminal lifecycle、0061 Story Graph runtime、0062 Project/Finance foundation、0063 Genesis creation request ledger、0064 record-turn cancellation。",
   );
   const runner = readFileSync(join(projectRoot, "scripts/postgres-migrate.mjs"), "utf8");
   assert.match(runner, /database\/postgres\/migrations/);

@@ -30,6 +30,13 @@ import { fileURLToPath } from "node:url";
 const launcherDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(launcherDir, "..");
 
+export const GOAL_WORKER_ENV_KEYS=Object.freeze([
+  'REALM_GOAL_WORKER_WORKSPACES','REALM_GOAL_WORKER_INSTALL_ROOT','REALM_REALMWORLD_TRUST_STORE',
+  'REALM_GOAL_WORKER_LEASE_DURATION_MS','REALM_GOAL_WORKER_RETRY_DELAY_MS',
+  'REALM_GOAL_WORKER_IDLE_MIN_MS','REALM_GOAL_WORKER_IDLE_MAX_MS',
+  'REALM_GOAL_JUDGE_TIMEOUT_MS','REALM_GOAL_JUDGE_MAX_TOKENS',
+]);
+
 /** 子进程可继承的非敏感父环境键（其余一律不透传）。 */
 const INHERITED_ENV_KEYS = [
   "PATH",
@@ -112,6 +119,11 @@ export function createSceneImageWorkerHost(options = {}) {
       childEnv.REALM_SCENE_IMAGE_WORKSPACES = environment.REALM_SCENE_IMAGE_WORKSPACES;
     }
     childEnv.REALM_DATA_HOME = dataHome;
+    if (options.workerKind === 'goal-assessment') {
+      for (const key of GOAL_WORKER_ENV_KEYS) {
+        if (typeof environment[key] === 'string' && environment[key] !== '') childEnv[key]=environment[key];
+      }
+    }
     return childEnv;
   };
 

@@ -80,7 +80,7 @@ test("G0 定案核对: lore 输入预算常量保持冻结值（80/600/2/1200）
 // ---------- G1 静态 contract（0041 入库前先红） ----------
 
 const MIGRATION_0041 = "database/postgres/migrations/0041_article_qualification_and_import_entries.sql";
-const DESIGN_DOC = "docs/development/ARTICLE-QUALIFICATION-MIGRATION.md";
+const DESIGN_DOC = "docs/architecture/ARTICLE-QUALIFICATION.md";
 
 test("G1: 0041 migration 文件存在且为下一个排序文件，无事务控制语句（D10）", () => {
   const sql = readProjectFile(MIGRATION_0041);

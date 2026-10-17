@@ -4,6 +4,7 @@ import {
   type WorldStyle,
 } from "../style/world-style.ts";
 import type { WorldBinding } from "../world-transfer/realm-save.ts";
+import { normalizeRecordGoalDrafts, type RecordGoalDraft } from '../goals/authoring-contract.ts';
 
 /**
  * 启笔铸界 · client-safe 契约（Client/Server 边界修复）。
@@ -50,6 +51,8 @@ export interface WorldGenesisDraft {
    * assessment jobs for). Absent/empty = legacy path, no behavior change.
    */
   goals?: readonly WorldGenesisGoalDeclaration[];
+  /** Editable authored directions; never content identities, instances, assessments or scene intent. */
+  recordGoals?: readonly RecordGoalDraft[];
   world: { name: string; era: string; summary: string };
   /** 初始运行内容语言；缺省时由当前账号的系统/界面语言补齐。 */
   language?: GenesisLanguage;
@@ -177,6 +180,9 @@ export function normalizeGenesisDraft(
   options: { allowUnnamed?: boolean } = {},
 ): WorldGenesisDraft | null {
   const source = isObject(value) ? value : {};
+  let recordGoals: readonly RecordGoalDraft[] = [];
+  try { if (source.recordGoals !== undefined) recordGoals = normalizeRecordGoalDrafts(source.recordGoals); }
+  catch { return null; }
   const world = isObject(source.world) ? source.world : {};
   const story = isObject(source.story) ? source.story : {};
   const record = isObject(source.record) ? source.record : {};
@@ -192,6 +198,7 @@ export function normalizeGenesisDraft(
 
   return {
     ...(language ? { language } : {}),
+    ...(recordGoals.length ? { recordGoals } : {}),
     world: {
       name,
       era: clamp(world.era, GENESIS_LIMITS.era),
@@ -257,6 +264,7 @@ export function genesisPromptInputWithinBudget(value: unknown): boolean {
 export function sanitizeUntrustedGenesisDraft(value: unknown): Partial<WorldGenesisDraft> {
   if (!isObject(value)) return {};
   const result: Partial<WorldGenesisDraft> = {};
+  if (value.recordGoals !== undefined) result.recordGoals = normalizeRecordGoalDrafts(value.recordGoals);
   const language = normalizeGenesisLanguage(value.language);
   if (language) result.language = language;
 
@@ -325,6 +333,7 @@ export function settledGenesisView(value: unknown): Record<string, unknown> | nu
     if (Array.isArray(value.companions)) draft.companions = clampCompanions(value.companions);
   }
   const view: Record<string, unknown> = {};
+  if (draft.recordGoals !== undefined) view.recordGoals = draft.recordGoals;
   if (draft.language) view.language = draft.language;
   if (draft.world) {
     const world: Record<string, string> = {};

@@ -37,7 +37,8 @@ function semanticDefinition(goalKey: string): GoalDefinition {
     policyVersion: "semantic-v1",
     mode: "semantic",
     visible: true,
-    rubric: { kind: "semantic", promptKey: "semantic-e2e" },
+    rubric: { kind: "semantic", promptKey: "semantic-e2e", criteria: {
+      objective:'Make the evidenced choice',successConditions:['The choice is formally committed'],failureConditions:[],settlementConditions:[] } },
     outcome: { result: "definition fallback outcome" },
   };
 }
@@ -509,11 +510,11 @@ test(
       "inserted",
     );
 
-    // The Judge decides the Goal is not yet satisfied: the worker settles a
+    // The Judge explicitly rejects the supplied evidence: the worker settles a
     // rejected decision (ledger evidence, no transition, no instance change).
     const gateway = fakeGateway(async () => ({
       content: JSON.stringify({
-        decision: "continue",
+        decision: "reject",
         evidenceEventIds: [evidenceEvent.eventId],
         progress: { verdict: "not yet satisfied" },
         outcome: null,
@@ -560,7 +561,7 @@ test(
     assert.equal(assessmentRow.assessment_job_id, jobId);
     assert.equal(assessmentRow.source, "judge");
     assert.equal(assessmentRow.status, "rejected");
-    assert.deepEqual(assessmentRow.result, { kind: "rejected", decision: "continue" });
+    assert.deepEqual(assessmentRow.result, { kind: "rejected", decision: "reject" });
     assert.equal(assessmentRow.source_event_id, sourceEventId);
     assert.deepEqual(assessmentRow.evidence_event_ids, [evidenceEvent.eventId]);
     assert.equal(Number(assessmentRow.evidence_head_version), headBefore.recordVersion);
@@ -642,6 +643,47 @@ test(
     assert.equal(assessmentCount.rows[0]?.n, 1);
   },
 );
+
+test('semantic provider recovery retries the same durable job with backoff, no synthetic fact and one final transition',
+  {skip:!adminConnectionString || !runtimeConnectionString ? skipReason:false,timeout:120_000},async t=>{
+  const ownerPool=new pg.Pool({connectionString:adminConnectionString!,max:2});
+  const runtimePool=new pg.Pool({connectionString:runtimeConnectionString!,max:2});
+  const goalInstanceId=`goal_recovery_${randomUUID()}`;
+  const jobId=`job_recovery_${randomUUID()}`;
+  const definition=semanticDefinition(goalInstanceId);
+  t.after(async()=>{await cleanup(ownerPool,[goalInstanceId]);await runtimePool.end();await ownerPool.end();});
+  await insertGoalInstance(ownerPool,goalInstanceId,definition.goalKey);
+  const committed=await readCommittedEvents(ownerPool);
+  const source=committed[committed.length-1]!.eventId;
+  const headBefore=await readRecordHead(ownerPool);
+  const queue=createPostgresGoalAssessmentJobQueue({pool:runtimePool,workspaceId:POSTGRES_DEMO_IDS.workspace,
+    leaseOwner:`recover-${randomUUID()}`,retryJudgeFailures:true,retryDelayMs:1000});
+  await queue.enqueue(enqueueInput(goalInstanceId,jobId,source));
+  let available=false;
+  const gateway=fakeGateway(async()=>{
+    if(!available) throw new ModelProviderError('MODEL_REQUEST_FAILED','synthetic fixture outage');
+    return {content:JSON.stringify({decision:'complete',evidenceEventIds:[committed[0]!.eventId],progress:{summary:'Confirmed'},outcome:null})};
+  });
+  const judge=createModelGoalJudge({getGateway:async()=>gateway});
+  const before=now();
+  const cycle=(at:string)=>runGoalAssessmentWorkerCycle({slots:[{workspaceId:POSTGRES_DEMO_IDS.workspace,repository:queue}],resolveDefinition:async()=>definition,judge,now:at});
+  assert.deepEqual((await cycle(before)).get(POSTGRES_DEMO_IDS.workspace),{kind:'failed',code:'GOAL_JUDGE_FAILED'});
+  const pending=(await ownerPool.query(`SELECT state,completed_at,last_error_code,lease_owner,available_at FROM goal_assessment_jobs WHERE id=$1`,[jobId])).rows[0];
+  assert.equal(pending.state,'retryable');
+  assert.equal(pending.completed_at,null);
+  assert.equal(pending.lease_owner,null);
+  assert.equal(pending.last_error_code,'GOAL_JUDGE_FAILED');
+  assert.ok(new Date(pending.available_at).getTime()>Date.parse(before));
+  assert.deepEqual(await readRecordHead(ownerPool),headBefore);
+  assert.equal((await cycle(before)).get(POSTGRES_DEMO_IDS.workspace)?.kind,'idle');
+  available=true;
+  const later=new Date(new Date(pending.available_at).getTime()+1).toISOString();
+  assert.deepEqual((await cycle(later)).get(POSTGRES_DEMO_IDS.workspace),{kind:'settled',status:'accepted'});
+  const row=(await ownerPool.query(`SELECT state,attempt_count,last_error_code FROM goal_assessment_jobs WHERE id=$1`,[jobId])).rows[0];
+  assert.deepEqual(row,{state:'completed',attempt_count:2,last_error_code:null});
+  assert.equal((await ownerPool.query(`SELECT state FROM goal_instances WHERE id=$1`,[goalInstanceId])).rows[0].state,'completed');
+  assert.equal((await ownerPool.query(`SELECT count(*)::int AS n FROM goal_assessments WHERE goal_instance_id=$1`,[goalInstanceId])).rows[0].n,1);
+});
 
 test(
   "semantic Goal e2e: provider failure fails closed with GOAL_JUDGE_FAILED and writes no Goal fact",

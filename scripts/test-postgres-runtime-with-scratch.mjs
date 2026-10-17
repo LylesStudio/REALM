@@ -34,6 +34,7 @@ const DEFAULT_TEST_FILES = [
   "tests/postgres-realmworld-version.test.ts",
   "tests/postgres-realmworld-restore-trust.test.ts",
   "tests/postgres-realm-runtime-save-full.test.ts",
+  "tests/postgres-realm-runtime-domain-save.test.ts",
   "tests/postgres-realm-runtime-save-memory.test.ts",
   "tests/postgres-realm-runtime-save-async.test.ts",
   "tests/postgres-library-service.test.ts",
@@ -93,6 +94,10 @@ const DEFAULT_TEST_FILES = [
   "tests/postgres-goal-runtime.test.ts",
   "tests/postgres-goal-semantic-worker-e2e.test.ts",
   "tests/postgres-goal-scope-runtime.test.ts",
+  "tests/postgres-record-goal-authoring.test.ts",
+  "tests/postgres-record-goal-commands.test.ts",
+  "tests/postgres-genesis-record-goals.test.ts",
+  "tests/postgres-narrative-situation.test.ts",
   "tests/postgres-story-graph.test.ts",
   "tests/postgres-project-finance-schema.test.ts",
   "tests/postgres-project-finance-read.test.ts",
@@ -213,6 +218,7 @@ try {
       REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, "realm_dev"),
       REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, "realm_dev"),
       REALM_SESSION_SECRET: sessionSecretToken,
+      REALM_SCRATCH_POSTGRES_CONTAINER: cluster.name,
     },
   );
 } catch (error) {

@@ -32,7 +32,8 @@ const semanticDefinition: GoalDefinition = {
   policyVersion: "semantic-v1",
   mode: "semantic",
   visible: true,
-  rubric: { kind: "semantic", promptKey: "choice" },
+  rubric: { kind: "semantic", promptKey: "choice", criteria: {
+    objective:'Choose a route',successConditions:['A route is chosen in committed evidence'],failureConditions:[],settlementConditions:[] } },
   outcome: { reward: "resolution" },
 };
 
@@ -564,4 +565,44 @@ test("the production worker entrypoint wires the model judge lazily through exis
   assert.doesNotMatch(script, /\bfetch\s*\(/);
   assert.doesNotMatch(script, /REALM_GOAL_JUDGE_(ENDPOINT|URL|API_KEY)/);
   assert.doesNotMatch(script, /OPENAI_API_KEY|ANTHROPIC_API_KEY/);
+});
+
+test('Record-authored criteria reach the Judge as bounded data, never system instructions', async () => {
+  const { createRecordGoalDefinition } = await import('../modules/goals/record-authoring.ts');
+  const authored = createRecordGoalDefinition({ scope: { workspaceId:job.workspaceId,worldId:job.worldId,
+    worldlineId:job.worldlineId,recordId:job.recordId }, goalId:'letter',activationHead:{recordVersion:0,ordinal:0},
+    draft:{title:'Deliver the original letter',description:'Preserve the original seal.',
+      successConditions:['The named recipient receives the sealed original'],failureConditions:['The original is destroyed'],
+      settlementConditions:['The recipient is confirmed dead'],changePolicy:'fixed',visible:true} });
+  const gateway = fakeGateway(async () => ({content:JSON.stringify(validModelOutput())}));
+  await createModelGoalJudge({getGateway:async()=>gateway}).assess({job:{...job,goalKey:authored.goalKey,goalInstanceId:authored.goalInstanceId},
+    definition:authored,context:{...context,instance:{...instance,goalInstanceId:authored.goalInstanceId}}});
+  const request = gateway.requests[0]!;
+  const user = request.messages.filter(m=>m.role==='user').map(m=>m.content).join('\n');
+  const system = request.messages.filter(m=>m.role==='system').map(m=>m.content).join('\n');
+  for(const condition of [authored.draft.title,authored.draft.description,...authored.draft.successConditions,
+    ...authored.draft.failureConditions,...authored.draft.settlementConditions]) {
+    assert.ok(user.includes(condition),`missing criterion: ${condition}`);
+    assert.ok(!system.includes(condition));
+  }
+  assert.match(system,/Goal.*(?:untrusted|never instructions)/i);
+});
+
+test('semantic package criteria are rendered as standards instead of only a symbolic prompt key', async () => {
+  const definition = {...semanticDefinition,rubric:{kind:'semantic',promptKey:'package.letter',criteria:{
+    objective:'Get the original sealed letter to its addressee',successConditions:['The addressee receives the original'],
+    failureConditions:['The letter is destroyed'],settlementConditions:[]}}} as GoalDefinition;
+  const gateway = fakeGateway(async()=>({content:JSON.stringify(validModelOutput())}));
+  await createModelGoalJudge({getGateway:async()=>gateway}).assess({job,definition,context});
+  const user = gateway.requests[0]!.messages.find(m=>m.role==='user')!.content;
+  assert.ok(user.includes('The addressee receives the original'));
+  assert.ok(user.includes('The letter is destroyed'));
+});
+
+test('an unresolved symbolic semantic rubric fails closed before contacting the provider', async () => {
+  const gateway=fakeGateway(async()=>({content:JSON.stringify(validModelOutput())}));
+  await assert.rejects(createModelGoalJudge({getGateway:async()=>gateway}).assess({job,context,
+    definition:{...semanticDefinition,rubric:{kind:'semantic',promptKey:'not-a-readable-standard'}}}),
+    (error:unknown)=>error instanceof GoalJudgeError && error.code==='GOAL_JUDGE_DEFINITION_UNSUPPORTED');
+  assert.equal(gateway.requests.length,0);
 });

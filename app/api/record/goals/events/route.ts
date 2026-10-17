@@ -7,7 +7,8 @@
 import {
   createGoalProjectionStream,
 } from "../../../../../modules/goals/projection-stream.ts";
-import { projectGoal } from "../../../../../modules/goals/projection.ts";
+import { loadRecordGoalProjection } from "../../../../../modules/application/record-goal-projection.ts";
+import { RuntimeInvariantError } from "../../../../../modules/runtime/public.ts";
 import {
   createPostgresGoalProjectionRepository,
   createPostgresRecordRuntimeScopeRepository,
@@ -17,7 +18,7 @@ import { listenRecordCommitted } from "../../../../../database/postgres/record-e
 import { LOCAL_RECORD_SCOPE } from "../../../../../modules/application/local-record-service.ts";
 import { LOCAL_WORLD_VERSION } from "../../../../../modules/world-transfer/realm-save.ts";
 import { resolveBaseGoalDefinition } from "../../../../../modules/world-transfer/base-content.ts";
-import { getSharedRuntimePool } from "../../../world-scope.ts";
+import { getSharedRuntimePool, resolveMembershipRole } from "../../../world-scope.ts";
 import {
   createProjectionDefinitionResolver,
 } from "../route.ts";
@@ -67,30 +68,29 @@ export async function GET(request: Request): Promise<Response> {
       recordId,
     });
     if (!scope) return jsonError("NOT_FOUND", "Record not found.", 404);
+    if (!await resolveMembershipRole(pool, { workspaceId: scope.workspaceId, worldId: scope.worldId, principalId })) {
+      return jsonError("NOT_FOUND", "Record not found.", 404);
+    }
     const repository = createPostgresGoalProjectionRepository(pool);
     const installedResolver = await createProjectionDefinitionResolver();
     const load = async () => {
-      const projection = await repository.load({
-        workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
-        recordId,
+      // A stream is not a permanent authorization grant: recheck before every publication.
+      const currentPrincipalId = resolveRequestPrincipal(request, LOCAL_RECORD_SCOPE.principalId);
+      if (!currentPrincipalId) throw new RuntimeInvariantError("UNAUTHENTICATED", "Authentication is required.");
+      const currentScope = await createPostgresRecordRuntimeScopeRepository(pool).resolve({
+        ...LOCAL_RECORD_SCOPE, principalId: currentPrincipalId, recordId,
       });
-      const resolver = installedResolver
-        ?? (projection.worldVersion === LOCAL_WORLD_VERSION ? resolveBaseGoalDefinition : null);
-      if (projection.instances.length > 0 && !resolver) {
-        throw new Error("GOAL_CONTENT_UNAVAILABLE");
+      if (!currentScope) throw new RuntimeInvariantError("NOT_FOUND", "Record not found.");
+      if (!await resolveMembershipRole(pool, { workspaceId: currentScope.workspaceId, worldId: currentScope.worldId, principalId: currentPrincipalId })) {
+        throw new RuntimeInvariantError("NOT_FOUND", "Record not found.");
       }
-      const goals = [];
-      for (const instance of projection.instances) {
-        const definition = await resolver?.({
-          worldId: projection.worldId,
-          worldVersion: projection.worldVersion,
-          goalKey: instance.goalKey,
-        });
-        if (!definition) throw new Error("GOAL_DEFINITION_UNAVAILABLE");
-        const projected = projectGoal({ definition, instance });
-        if (projected) goals.push(projected);
-      }
-      return { headOrdinal: projection.headOrdinal, goals };
+      return loadRecordGoalProjection(pool, { scope: currentScope,
+        resolveContentDefinition: async (binding) => {
+          const resolver = installedResolver ?? (binding.worldVersion === LOCAL_WORLD_VERSION ? resolveBaseGoalDefinition : null);
+          if (!resolver) throw new RuntimeInvariantError("GOAL_CONTENT_UNAVAILABLE", "Goal content is unavailable.");
+          return resolver(binding);
+        },
+      });
     };
     // LISTEN is established before the initial load so a committed transition
     // cannot fall between the first snapshot and the wakeup subscription.
@@ -122,6 +122,12 @@ export async function GET(request: Request): Promise<Response> {
     });
   } catch (error) {
     if (wakeup) await wakeup.close().catch(() => undefined);
+    if (error instanceof RuntimeInvariantError && ["UNAUTHENTICATED", "NOT_FOUND"].includes(error.code)) {
+      return jsonError(error.code, error.code === "NOT_FOUND" ? "Record not found." : "Authentication is required.", error.code === "NOT_FOUND" ? 404 : 401);
+    }
+    if (error instanceof RuntimeInvariantError && ["GOAL_CONTENT_UNAVAILABLE", "GOAL_DEFINITION_UNAVAILABLE", "GOAL_DEFINITION_INVALID"].includes(error.code)) {
+      return jsonError(error.code, "Goal definition is unavailable.", 503);
+    }
     if (error instanceof GoalProjectionRepositoryError) {
       return jsonError(error.code, "Goal projection could not be read.", 500);
     }

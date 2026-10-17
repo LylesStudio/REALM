@@ -1,0 +1,24 @@
+/* Shared authoring surface; colors follow the paper/night theme. */
+.record-goal-fields { display:grid; gap:12px; border:0; min-width:0; margin:10px 0; padding:0; }
+.record-goal-fields label { display:grid; gap:6px; min-width:0; font-size:13px; }
+.record-goal-fields input:not([type=checkbox]),.record-goal-fields textarea,.record-goal-fields select,.record-goal-reason { width:100%; min-width:0; border:1px solid var(--line); background:var(--field-bg); color:var(--field-text); border-radius:4px; padding:8px; font:inherit; }
+.record-goal-fields textarea { resize:vertical; }
+.record-goal-fields small,.goal-note { color:var(--ink-soft); font-size:12px; line-height:1.6; }
+.goal-conditions { display:grid; gap:6px; min-width:0; font-size:13px; }
+.goal-condition-row { display:flex; gap:6px; align-items:flex-start; min-width:0; }
+.goal-condition-row textarea { flex:1; }
+.goal-condition-row button { flex:none; }
+.record-goal-fields .goal-visibility { display:flex; align-items:center; gap:8px; }
+.goal-draft-card,.record-goal-card { min-width:0; padding:12px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.goal-draft-card summary { cursor:pointer; font-size:14px; }
+.genesis-goals { min-width:0; border-top:1px solid var(--line); padding-top:14px; }
+.goal-error { color:var(--danger); font-size:12px; line-height:1.6; }
+.goal-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.record-goals-panel button,.genesis-goals button { border:1px solid var(--line); border-radius:4px; padding:6px 10px; background:var(--surface); color:var(--ink); cursor:pointer; font-size:12px; }
+.record-goals-panel button:disabled,.genesis-goals button:disabled { opacity:.5; cursor:default; }
+.record-goal-card h3 { font-size:14px; margin:6px 0; }
+.record-goal-card p { font-size:13px; line-height:1.7; white-space:pre-wrap; }
+.goal-meta { display:flex; flex-wrap:wrap; gap:6px 12px; font-size:11px; color:var(--ink-soft); }
+.goal-history { margin-top:14px; font-size:13px; }
+.goal-status { font-size:12px; line-height:1.65; color:var(--moss); }
+.goal-create-form { margin-top:16px; border-top:1px solid var(--line); padding-top:10px; }

@@ -23,9 +23,12 @@ import type { JsonValue } from "../runtime/public.ts";
 import { RuntimeInvariantError } from "../runtime/public.ts";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
+import { createRecordGoalDefinitionResolver } from "../application/record-goal-definition.ts";
+import { LOCAL_WORLD_VERSION } from '../world-transfer/realm-save.ts';
+import type { GoalEvolutionPlanner } from './model-evolution.ts';
 
 const ADVISORY_LOCK_NAME = "realm_goal_assessment_worker";
-const DEFAULT_LEASE_DURATION_MS = 30_000;
+const DEFAULT_LEASE_DURATION_MS = 180_000;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const DEFAULT_IDLE_MIN_MS = 1_000;
 const DEFAULT_IDLE_MAX_MS = 15_000;
@@ -39,6 +42,7 @@ export async function runGoalAssessmentWorkerCycle(input: {
   slots: readonly GoalAssessmentWorkerCycleSlot[];
   resolveDefinition: Parameters<typeof runGoalAssessmentOnce>[0]["resolveDefinition"];
   judge?: GoalJudge;
+  evolutionPlanner?: GoalEvolutionPlanner;
   now: string;
 }): Promise<ReadonlyMap<string, GoalAssessmentRunReport>> {
   const reports = new Map<string, GoalAssessmentRunReport>();
@@ -48,6 +52,7 @@ export async function runGoalAssessmentWorkerCycle(input: {
         repository: slot.repository,
         resolveDefinition: input.resolveDefinition,
         judge: input.judge,
+        evolutionPlanner: input.evolutionPlanner,
         now: input.now,
       }));
     } catch (error) {
@@ -66,10 +71,11 @@ export async function runGoalAssessmentWorkerCycle(input: {
  */
 export function createGoalAssessmentWorkerRuntime(options: {
   connectionString: string;
-  installRoot: string;
-  verifySignature: RealmWorldSignatureVerifier;
+  installRoot?: string;
+  verifySignature?: RealmWorldSignatureVerifier;
   workspaces: readonly string[];
   judge?: GoalJudge;
+  evolutionPlanner?: GoalEvolutionPlanner;
   baseResolver?: (job: RealmWorldDefinitionResolutionJob) => GoalDefinition | null | Promise<GoalDefinition | null>;
   /** operator 活动 base 内容版本（包兼容闸）；缺省引擎当前版本。 */
   engineBaseVersion?: string;
@@ -81,8 +87,9 @@ export function createGoalAssessmentWorkerRuntime(options: {
   clock?: () => string;
 }): { start(): Promise<void>; stop(): Promise<void> } {
   const connectionString = requiredText(options.connectionString, "GOAL_WORKER_DATABASE_URL_INVALID");
-  const installRoot = requiredText(options.installRoot, "GOAL_WORKER_INSTALL_ROOT_INVALID");
-  if (typeof options.verifySignature !== "function") {
+  const installRoot = options.installRoot === undefined ? undefined : requiredText(options.installRoot, "GOAL_WORKER_INSTALL_ROOT_INVALID");
+  if ((installRoot !== undefined && typeof options.verifySignature !== "function") ||
+    (options.verifySignature !== undefined && (typeof options.verifySignature !== 'function' || installRoot === undefined))) {
     throw new RuntimeInvariantError(
       "GOAL_WORKER_SIGNATURE_VERIFIER_INVALID",
       "Goal worker requires a RealmWorld signature verifier.",
@@ -122,12 +129,15 @@ export function createGoalAssessmentWorkerRuntime(options: {
   const pool = createLocalPostgresPool(connectionString, { max: 8 });
   pool.on("error", () => {});
   const leaseOwner = `goal-worker:${process.pid}:${randomUUID()}`;
-  const definitionResolver = createInstalledRealmWorldDefinitionResolver({
-    installRoot,
-    verifySignature: options.verifySignature,
-    baseResolver: options.baseResolver ?? resolveBaseGoalDefinition,
-    engineBaseVersion: options.engineBaseVersion,
-  });
+  const baseResolver=options.baseResolver ?? resolveBaseGoalDefinition;
+  const contentResolver = installRoot && options.verifySignature
+    ? createInstalledRealmWorldDefinitionResolver({installRoot,verifySignature:options.verifySignature,baseResolver,
+      engineBaseVersion:options.engineBaseVersion})
+    : async (job: RealmWorldDefinitionResolutionJob): Promise<GoalDefinition | null> => {
+      if (job.worldVersion === LOCAL_WORLD_VERSION) return baseResolver(job);
+      throw new RuntimeInvariantError('GOAL_WORKER_CONTENT_UNAVAILABLE','Packaged Goal content requires an explicitly trusted installation.');
+    };
+  const definitionResolver = createRecordGoalDefinitionResolver(pool, { resolveContentDefinition: contentResolver });
   const slots = workspaces.map((workspaceId) => ({
     workspaceId,
     repository: createPostgresGoalAssessmentJobQueue({
@@ -136,6 +146,7 @@ export function createGoalAssessmentWorkerRuntime(options: {
       leaseOwner: `${leaseOwner}:${workspaceId}`,
       leaseDurationMs,
       retryDelayMs,
+      retryJudgeFailures:true,
     }),
   }));
 
@@ -145,6 +156,7 @@ export function createGoalAssessmentWorkerRuntime(options: {
         slots,
         resolveDefinition: definitionResolver,
         judge: options.judge,
+        evolutionPlanner: options.evolutionPlanner,
         now: clock(),
       });
       let didWork = false;
@@ -210,6 +222,7 @@ export function createGoalAssessmentWorkerRuntime(options: {
             "Goal worker requires the Goal runtime schema.",
           );
         }
+        log('ready');
       },
       runCycle,
       async close() {

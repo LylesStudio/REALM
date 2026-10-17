@@ -50,6 +50,8 @@ import {
   listAuthorizedAffordances,
 } from "./local-record-read-model.ts";
 import { type CharacterProfileUpdate } from "./character-profile.ts";
+import { decodeNarrativeState, emptyNarrativeState, planNarrativeConsequence,
+  type RecordNarrativeState, type NarrativeConsequenceProposal } from "./narrative-situation.ts";
 
 /** 进行中回合的本地取消信号登记（recordId 作用域，取消须同源）。 */
 export type ActiveTurnSignal = { recordId: string; controller: AbortController };
@@ -96,6 +98,9 @@ export type FormalEventPayload = {
   recipientId?: string | null;
   /** 旁白附带的下一步对话提案，随 narration.committed 事件持久化。 */
   suggestions?: readonly string[];
+  /** Engine-bound state and accepted proposal; never accepted from a browser. */
+  narrativeState?: RecordNarrativeState;
+  narrativeConsequence?: NarrativeConsequenceProposal;
   /** 玩家明确自述后，当前 Record 角色简介的动态更新。 */
   profileUpdate?: CharacterProfileUpdate;
   actionTransaction?: ActionTransaction;
@@ -234,6 +239,7 @@ export function createLocalTurnDependencies(
           });
           return {
             ...planned,
+            narrativeMode: "passive",
             narratorEnabled: true,
             actionBudgetPerCharacter: 1,
             activatedCharacters: planned.activatedCharacters.length > 0
@@ -476,6 +482,29 @@ export function createLocalTurnDependencies(
         }
         const playerEventId = `${context.turnId}:player`;
         const narrationEventId = `${context.turnId}:narration`;
+        const consequence = context.candidate.body.narration?.narrativeConsequence;
+        let narrativeState: RecordNarrativeState | null = null;
+        if (consequence) {
+          if (context.plan.body.visibility.kind !== "public") {
+            throw new FatalTurnError("NARRATIVE_AUTHORITY_REQUIRED", "Private narration cannot publish public world state.");
+          }
+          const previous = scope.brief.narrativeState
+            ? decodeNarrativeState(JSON.parse(scope.brief.narrativeState)) : emptyNarrativeState();
+          const head = await repository.loadRecordHead(scope.recordId);
+          if (!head || head.version !== context.command.expectedRecordVersion) {
+            throw new FatalTurnError("NARRATIVE_WRITE_CONFLICT", "The Record changed before consequence release.");
+          }
+          narrativeState = planNarrativeConsequence({
+            scope, previous, expectedRevision: previous.revision, sourceEventId: narrationEventId,
+            // Eventless Records use the same zero cursor as their initial head;
+            // there is no negative formal-event ordinal to authorize as evidence.
+            observedHead: { recordVersion: head.version, ordinal: Math.max(0, head.nextOrdinal - 1) },
+            sourceRole: "narrator", turnKind: "player", timeAdvanceAuthorized: false,
+            committedEventIds: [...new Set(previous.situations.flatMap(item =>
+              [item.originEventId, item.lastEventId, ...item.basisEventIds]))],
+            proposal: consequence,
+          });
+        }
         const playerSegments = fallbackCompositeSemanticSegments(
           context.command.payload.text,
           "action",
@@ -528,6 +557,7 @@ export function createLocalTurnDependencies(
                     participantId: null,
                     content: context.candidate.body.narration.content,
                     segments: context.candidate.body.narration.segments,
+                    ...(narrativeState ? { narrativeState, narrativeConsequence: consequence! } : {}),
                     ...(context.candidate.body.narration.suggestions?.length
                       ? { suggestions: context.candidate.body.narration.suggestions }
                       : {}),

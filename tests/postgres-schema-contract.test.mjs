@@ -71,6 +71,13 @@ const migrationPaths = [
   "../database/postgres/migrations/0066_committed_fact_commands.sql",
   "../database/postgres/migrations/0067_member_relationship_revisions.sql",
   "../database/postgres/migrations/0068_inventory_grant_command.sql",
+  "../database/postgres/migrations/0069_record_goal_authoring.sql",
+  "../database/postgres/migrations/0070_record_goal_authoring_capability.sql",
+  "../database/postgres/migrations/0071_record_narrative_state.sql",
+  "../database/postgres/migrations/0072_record_goal_evolution_capability.sql",
+  "../database/postgres/migrations/0073_record_goal_genesis_capability.sql",
+  "../database/postgres/migrations/0074_record_goal_restore_capability.sql",
+  "../database/postgres/migrations/0075_record_goal_branch_capability.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
@@ -166,6 +173,9 @@ const scopedTables = [
   "committed_fact_commands",
   "performance_assessments",
   "member_relationship_revisions",
+  "record_goal_definitions",
+  "record_goal_commands", "record_goal_restore_admissions",
+  "record_narrative_state",
 ];
 
 function canonical(value) {
@@ -233,6 +243,9 @@ test("all workspace-scoped tables in the canonical migration chain are listed", 
 
 // Workspace containment is inherited through the declared composite parent FK.
 const COMPOSITE_SCOPE_ANCHORS = new Map([
+  ["record_goal_definitions", "world_id, worldline_id, record_id) references records (workspace_id, world_id, worldline_id, id)"],
+  ["record_goal_commands", "world_id, worldline_id, record_id, goal_instance_id) references goal_instances (workspace_id, world_id, worldline_id, record_id, id)"],
+  ["record_goal_restore_admissions", "world_id, worldline_id, record_id) references records (workspace_id, world_id, worldline_id, id)"],
   ["realm_import_job_events", "job_id) references realm_import_jobs (workspace_id, id)"],
   ["realm_import_bootstrap", "job_id) references realm_import_jobs (workspace_id, id)"],
   ["realm_import_content_log", "job_id) references realm_import_jobs (workspace_id, id)"],
@@ -354,7 +367,11 @@ test("forced row-level security denies unscoped workspace access", () => {
       "committed_fact_commands",
       "performance_assessments",
       "member_relationship_revisions",
+      "record_goal_definitions",
+      "record_goal_commands", "record_goal_restore_admissions",
+      "record_narrative_state",
     ].includes(tableName)) {
+      // Explicit policies are checked below, not inferred from a shared relation list.
       assert.match(
         canonicalSql,
         new RegExp(`alter table ${tableName} force row level security`),

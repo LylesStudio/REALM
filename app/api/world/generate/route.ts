@@ -22,6 +22,7 @@ import {
   unauthorizedResponse,
 } from "../../auth-context.ts";
 
+import { RecordGoalDraftError } from '../../../../modules/goals/authoring-contract.ts';
 export const runtime = "nodejs";
 
 const MAX_PROMPT_LENGTH = 2_000;
@@ -88,6 +89,7 @@ export async function POST(request: Request) {
 
     return genesisError(400, "INVALID_COMMAND", "Provide either prompt or draft.");
   } catch (error) {
+    if (error instanceof RecordGoalDraftError) return genesisError(400,'INVALID_COMMAND','Record Goal draft is invalid.');
     if (error instanceof LibraryServiceError && error.code === "GENESIS_REQUEST_CONFLICT") {
       return genesisError(
         409,

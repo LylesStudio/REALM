@@ -869,11 +869,11 @@ test("export-matrix fences: runtime table diff / text[] list / scope sets", asyn
   // Genesis/Record Turn 两张 durable 台账表进入 schema；后两者明确不进入 realm-pack。
   const planned: string[] = [];
   const nonExportable = new Set(["genesis_creation_requests", "turn_cancel_requests"]);
-  assert.equal(actual.size, 90, `schema 实有表应为 90（88 个可导出表 + 2 张 durable 台账表），实际 ${actual.size}`);
+  assert.equal(actual.size, 94, `schema 实有表应为 94（92 个矩阵表 + 2 张 durable 台账表），实际 ${actual.size}`);
   const exportableActual = new Set([...actual].filter((table) => !nonExportable.has(table)));
-  assert.equal(exportableActual.size, 88, `可导出实有表应为 88，实际 ${exportableActual.size}`);
+  assert.equal(exportableActual.size, 92, `矩阵范围实有表应为 92，实际 ${exportableActual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 88, `矩阵应为 88 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 92, `矩阵应为 92 行，实际 ${matrixTables.size}`);
   for (const table of [...exportableActual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }

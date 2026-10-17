@@ -13,6 +13,7 @@ import {
   createLocalRecordService,
   createMemoryWriteTokenRegistry,
 } from "../modules/application/local-record-service.ts";
+import { demoRecordRuntimeScope } from "../modules/application/local-record-read-model.ts";
 import {
   createCommandFingerprint,
   createInMemoryRuntimeRepository,
@@ -43,7 +44,7 @@ type PresenceMarker = {
   characterInstanceId: string;
   triggerKind: "environment" | "peer" | "hook";
 };
-type CommandPayload = { text: string; visibility: TurnVisibilityPlan };
+type CommandPayload = { text: string; visibility: TurnVisibilityPlan; runtimeScope?: ReturnType<typeof demoRecordRuntimeScope> };
 type EventPayload = {
   schemaVersion: 1;
   role: "player" | "character" | "narrator" | "system";
@@ -179,6 +180,12 @@ function createFixture(options: {
   orchestrator?: M2TurnOrchestrator;
   turnControl?: ReturnType<typeof createTurnControl>;
   presenceAssessor?: PresenceAssessor;
+  /** A1：真实 scope provider——recentPublicEvents 从已提交事件动态派生。 */
+  dynamicScope?: boolean;
+  transformScope?: (
+    scope: ReturnType<typeof demoRecordRuntimeScope>,
+    repository: Repository,
+  ) => Promise<ReturnType<typeof demoRecordRuntimeScope>>;
   visibilityAssessor?: {
     assess(input: { playerText: string }): Promise<{
       visibility: TurnVisibilityPlan;
@@ -258,6 +265,34 @@ function createFixture(options: {
       : {}),
     ...(options.visibilityAssessor
       ? { visibilityAssessor: options.visibilityAssessor }
+      : {}),
+    ...(options.dynamicScope
+      ? {
+        runtimeScopeProvider: {
+          async resolve(scope: { recordId: string }) {
+            if (scope.recordId !== LOCAL_RECORD_SCOPE.recordId) return null;
+            const committed = await repository.listCommittedEvents(
+              LOCAL_RECORD_SCOPE.recordId,
+            );
+            const resolved = {
+              ...demoRecordRuntimeScope(),
+              recentPublicEvents: committed.map((event) => event.payload.content),
+              recentPublicDialogue: committed.map((event) => ({
+                speaker: event.payload.speaker,
+                speakerParticipantId: event.payload.participantId,
+                recipientId: null,
+                text: event.payload.content,
+              })),
+            };
+            return options.transformScope
+              ? options.transformScope(resolved, repository)
+              : resolved;
+          },
+          async resolveViewerCharacterInstanceId() {
+            return "char_inst_player";
+          },
+        },
+      }
       : {}),
   });
   return { repository, service };
@@ -800,3 +835,102 @@ function demoCharacters() {
     ? T[]
     : never;
 }
+
+test("A1：presence 回合的实际 command payload 携带提交后 fresh scope（含本回合新公开旁白/玩家事件）", async () => {
+  const gate = createGateSpy();
+  const { repository, service } = createFixture({
+    presenceAssessor: gate.assessor,
+    dynamicScope: true,
+  });
+
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  const committed = await service.submitMessage({
+    recordId: LOCAL_RECORD_SCOPE.recordId,
+    content: "我把密函举到灯下。",
+    idempotencyKey: "a1-fresh-scope",
+    writeToken: initial.writeToken,
+  });
+  assert.equal(committed.disposition, "committed");
+
+  const spoken = await waitForEvent(
+    repository,
+    (payload) => payload.presence !== undefined,
+  );
+  assert.equal(spoken, true);
+
+  // 定位真实 presence 回合的 command checkpoint（不是旁证 helper）。
+  const events = await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
+  const presenceEvent = events.find((event) => event.payload.presence !== undefined)!;
+  const presenceTurnId = presenceEvent.eventId.replace(/:presence:\d+$/, "");
+  const presenceTurn = await repository.loadTurn(presenceTurnId);
+  assert.ok(presenceTurn);
+  const scope = (presenceTurn.command.payload as Record<string, unknown>)
+    .runtimeScope as { recentPublicEvents?: readonly string[] } | undefined;
+  assert.ok(scope, "presence command 必须携带 runtimeScope");
+  // fresh scope：本回合刚提交的玩家事件必须已进入 scope 的公开事件摘要；
+  // 旧行为复用回合开始前的 stale scope（recentPublicEvents 为空）。
+  assert.ok(
+    scope!.recentPublicEvents?.some((content) => content.includes("我把密函举到灯下。")),
+    "presence command 的 runtimeScope 必须包含本回合新提交的公开事件",
+  );
+  const dialogue = (scope as { recentPublicDialogue?: { text: string }[] }).recentPublicDialogue;
+  assert.ok(dialogue?.some((line) => line.text.includes("我把密函举到灯下。")));
+});
+
+test("A1: a commit racing scope resolution cannot pair an old scope with a new head", async () => {
+  let raced = false;
+  const gate = createGateSpy();
+  const { repository, service } = createFixture({
+    presenceAssessor: gate.assessor,
+    dynamicScope: true,
+    async transformScope(scope, repository) {
+      const head = await repository.loadRecordHead(LOCAL_RECORD_SCOPE.recordId);
+      if (!raced && head?.version === 2) {
+        raced = true;
+        await commitSystemCorrection(repository, 2);
+      }
+      return scope;
+    },
+  });
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  await service.submitMessage({
+    recordId: LOCAL_RECORD_SCOPE.recordId,
+    content: "我站在灯下观察。",
+    idempotencyKey: "scope-resolution-race",
+    writeToken: initial.writeToken,
+  });
+  assert.equal(await waitForEvent(repository, (payload) => payload.presence !== undefined), true);
+  assert.equal(raced, true);
+  const events = await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
+  const event = events.find((event) => event.payload.presence !== undefined)!;
+  const run = await repository.loadTurn(event.eventId.replace(/:presence:\d+$/, ""));
+  const scope = (run!.command.payload as Record<string, unknown>).runtimeScope as {
+    recentPublicEvents: string[];
+  };
+  assert.ok(scope.recentPublicEvents.some((text) => text.includes("场景定格")),
+    "the scope must be rebuilt when its head changes while resolving it");
+});
+
+test("A1: a refreshed scope with the wrong principal is rejected before presence assessment", async () => {
+  const gate = createGateSpy();
+  const { repository, service } = createFixture({
+    presenceAssessor: gate.assessor,
+    dynamicScope: true,
+    async transformScope(scope) {
+      return scope.recentPublicEvents.length
+        ? { ...scope, principalId: "principal_outside" }
+        : scope;
+    },
+  });
+  const initial = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  await service.submitMessage({
+    recordId: LOCAL_RECORD_SCOPE.recordId,
+    content: "我检查灯罩。",
+    idempotencyKey: "wrong-presence-principal",
+    writeToken: initial.writeToken,
+  });
+  await settle();
+  assert.equal(gate.calls.length, 0, "a foreign scope must not reach the gate");
+  const events = await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
+  assert.equal(events.some((event) => event.payload.presence !== undefined), false);
+});

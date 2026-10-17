@@ -306,6 +306,12 @@ test(
     assert.equal(saveArchive.manifest.mode, "base");
     assert.equal(saveArchive.manifest.world, null);
     assert.ok(saveArchive.record.events.length >= 3, "opening + one player turn persisted");
+    assert.ok(saveArchive.domain && saveArchive.domain.characterAssets.length > 0,
+      "new saves preserve the base characters' inventory");
+    for (const asset of saveArchive.domain.characterAssets) {
+      assert.ok(Object.hasOwn(asset, "assetKey"),
+        "portable saves carry a stable asset key, not only the source World's database id");
+    }
 
     // ===== 4. 安装签名 RealmWorld 包并 instantiate =====
     await installSignedRealmWorldFixture({
@@ -348,11 +354,52 @@ test(
       [WS, FIXTURE_WORLD],
     )).rows;
 
+    // New saves bind the target's own definition by stable content key.
+    const sourceAsset = saveArchive.domain.characterAssets[0]!;
+    assert.equal(typeof sourceAsset.assetKey, "string");
+    const targetAssets = await ownerPool.query<{ id: string }>(
+      `SELECT id FROM asset_definitions
+       WHERE workspace_id = $1 AND world_id = $2 AND asset_key = $3`,
+      [WS, FIXTURE_WORLD, sourceAsset.assetKey],
+    );
+    assert.equal(targetAssets.rowCount, 1);
+    assert.notEqual(targetAssets.rows[0]!.id, sourceAsset.assetDefinitionId);
+    const absentKey = `${sourceAsset.assetKey}.temporarily-absent`;
+    await ownerPool.query(
+      `UPDATE asset_definitions SET asset_key = $3 WHERE workspace_id = $1 AND id = $2`,
+      [WS, targetAssets.rows[0]!.id, absentKey],
+    );
+    try {
+      const missingDefinition = await restore("bli-missing-asset-definition");
+      assert.equal(missingDefinition.status, 422);
+      assert.equal((await missingDefinition.json()).error?.code, "RESTORE_INVALID_TARGET");
+      assert.equal((await restoredRowsFor()).length, 0,
+        "missing target asset rolls back all restored topology");
+    } finally {
+      await ownerPool.query(
+        `UPDATE asset_definitions SET asset_key = $3 WHERE workspace_id = $1 AND id = $2`,
+        [WS, targetAssets.rows[0]!.id, sourceAsset.assetKey],
+      );
+    }
+
     // ===== 5. 升级路径：兼容 → restore 成功且绑定升级为目标世界版本 =====
     const upgraded = await restore("bli-upgrade-ok");
-    assert.equal(upgraded.status, 201, JSON.stringify(await upgraded.clone().json()));
+    assert.equal(upgraded.status, 201, JSON.stringify({
+      response: await upgraded.clone().json(),
+      savedEffectKeys: saveArchive.characterEffects?.effects.map((effect) => effect.effectKey),
+      savedAssetDefinitionIds: saveArchive.domain?.characterAssets.map((asset) => asset.assetDefinitionId),
+    }));
     const upgradedBody = await upgraded.json() as { recordId: string; replayed: boolean };
     assert.equal(upgradedBody.replayed, false);
+    const restoredAssets = await ownerPool.query<{ asset_definition_id: string; quantity: string }>(
+      `SELECT asset_definition_id, quantity::text FROM character_assets
+       WHERE workspace_id = $1 AND world_id = $2 AND record_id = $3`,
+      [WS, FIXTURE_WORLD, upgradedBody.recordId],
+    );
+    assert.equal(restoredAssets.rowCount, saveArchive.domain.characterAssets.length);
+    assert.ok(restoredAssets.rows.every((asset) => asset.asset_definition_id === targetAssets.rows[0]!.id));
+    assert.deepEqual(restoredAssets.rows.map((asset) => Number(asset.quantity)).sort(),
+      saveArchive.domain.characterAssets.map((asset) => asset.quantity).sort());
     const upgradedRow = await ownerPool.query<{ world_id: string; world_version: string }>(
       `SELECT world_id, world_version FROM records WHERE workspace_id = $1 AND id = $2`,
       [WS, upgradedBody.recordId],

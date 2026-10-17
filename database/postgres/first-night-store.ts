@@ -69,6 +69,19 @@ export interface FirstNightStore {
     pack: FirstNightPack,
     state: "ready" | "degraded",
   ): Promise<boolean>;
+  /**
+   * Record Goal A 批（A3）：opening hook 的触发新鲜度（只读）。
+   * 以持久事件游标判定：最新 hook 事件（payload.metadata.hook=true）之后
+   * 若已有玩家回合事件（utterance.committed 且 payload.role=player，
+   * 包括当前玩家回合），hook 已被应答 → fresh=false
+   * （留作背景素材，不作本轮触发）；无 hook 事件身份可考（旧数据）同样
+   * 不作新鲜触发。无状态行/无 hook 内容返回 null。
+   * 可选方法：旧 fake/内存实现缺省不影响 runner 契约。
+   */
+  resolveHookFreshness?(
+    recordId: string,
+    currentTurnId: string | null,
+  ): Promise<{ content: string; fresh: boolean } | null>;
 }
 
 function isState(value: unknown): value is FirstNightState {
@@ -337,7 +350,65 @@ export function createPostgresFirstNightStore(
     });
   }
 
-  return { find, claimAttempt, commitPack };
+  async function resolveHookFreshness(
+    recordId: string,
+  ): Promise<{ content: string; fresh: boolean } | null> {
+    return withWorkspaceTransaction(
+      database,
+      workspaceId,
+      async (client) => {
+        const marker = await client.query<{ state: string; hook_content: string }>(
+          `SELECT state, hook_content
+           FROM record_first_nights
+           WHERE workspace_id = $1 AND record_id = $2`,
+          [workspaceId, recordId],
+        );
+        const row = marker.rows[0];
+        const content = row?.hook_content?.trim() ?? "";
+        if (!row || row.state === "pending" || !content) return null;
+        // 最新 hook 事件身份（payload.metadata.hook=true）。
+        const hookEvent = await client.query<{
+          id: string;
+          world_tick: string | number;
+          world_ordinal: string | number;
+        }>(
+          `SELECT id, world_tick, world_ordinal
+           FROM events
+           WHERE workspace_id = $1 AND record_id = $2
+             AND payload->'metadata'->>'hook' = 'true'
+           ORDER BY world_tick DESC, world_ordinal DESC
+           LIMIT 1`,
+          [workspaceId, recordId],
+        );
+        const hook = hookEvent.rows[0];
+        if (!hook) {
+          // 旧数据：hook 事件身份不可考 → 只留背景，不作新鲜触发。
+          return { content, fresh: false };
+        }
+        // 当前玩家回合也算正式应答。否则第一轮已解决的 hook 会被立即复活。
+        const answered = await client.query<{ exists: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+             FROM events
+             WHERE workspace_id = $1 AND record_id = $2
+               AND event_kind = 'utterance.committed'
+               AND payload->>'role' = 'player'
+               AND (world_tick, world_ordinal) > ($3, $4)
+           ) AS exists`,
+          [
+            workspaceId,
+            recordId,
+            Number(hook.world_tick),
+            Number(hook.world_ordinal),
+          ],
+        );
+        return { content, fresh: answered.rows[0]?.exists !== true };
+      },
+      { readOnly: true },
+    );
+  }
+
+  return { find, claimAttempt, commitPack, resolveHookFreshness };
 }
 
 interface FirstNightSegment {

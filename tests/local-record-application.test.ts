@@ -23,6 +23,7 @@ import type {
   M2TurnValidation,
   TurnVisibilityPlan,
 } from "../modules/orchestration/public.ts";
+import { createLocalM2TurnOrchestrator } from "../modules/orchestration/public.ts";
 import type {
   ActionAffordanceCatalog,
   ActionTransaction,
@@ -54,10 +55,10 @@ type Repository = RuntimeRepository<
   OutboxPayload
 >;
 
-function createFixture(actionCatalog?: ActionAffordanceCatalog) {
+function createFixture(actionCatalog?: ActionAffordanceCatalog, freshNarrative=false) {
   const repository: Repository = createInMemoryRuntimeRepository({
     recordHeads: [
-      { recordId: LOCAL_RECORD_SCOPE.recordId, version: 1, nextOrdinal: 2 },
+      { recordId: LOCAL_RECORD_SCOPE.recordId, version: freshNarrative?0:1, nextOrdinal: freshNarrative?0:2 },
     ],
   });
   let tokenSequence = 0;
@@ -69,10 +70,10 @@ function createFixture(actionCatalog?: ActionAffordanceCatalog) {
     const deliveryEvents = runtimeEvents.filter(
       (event) => event.kind !== "action.transaction.committed",
     );
-    const events: ProjectionEvent[] = [openingEvent()].concat(
+    const events: ProjectionEvent[] = (freshNarrative?[]:[openingEvent()]).concat(
       deliveryEvents.map((event, index) => ({
         id: event.eventId,
-        ordinal: index + 2,
+        ordinal: index + (freshNarrative?0:2),
         type:
           event.kind === "narration.committed" ? "narration" : "utterance",
         speaker: event.payload.speaker,
@@ -122,9 +123,29 @@ function createFixture(actionCatalog?: ActionAffordanceCatalog) {
     clock: () => new Date("2026-08-13T02:00:00.000Z"),
     idFactory: () => `local-${++idSequence}`,
     actionCatalog,
+    ...(freshNarrative?{orchestratorFactory:()=>createLocalM2TurnOrchestrator({characters:[],narrator:{async narrate(){
+      const content='The doorway is open.';
+      return {speaker:'Narrator',participantId:null,characterInstanceId:null,content,
+        segments:[{id:'fresh-environment',kind:'environment' as const,content,speechMode:'none' as const}],
+        narrativeConsequence:{changes:[{situationId:null,status:'active' as const,fact:content,obstacle:null,
+          unknowns:[],exitConditions:[],basisEventIds:[],playerActions:[]}],elapsedMinutes:0}};
+    }}})}:{}),
   });
   return { repository, service };
 }
+
+test('the first turn of an eventless Record can commit a supported narrative consequence',async()=>{
+  const {repository,service}=createFixture(undefined,true);
+  const initial=await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  const command={recordId:LOCAL_RECORD_SCOPE.recordId,content:'I inspect the doorway.',idempotencyKey:'fresh-narrative',writeToken:initial.writeToken};
+  assert.equal((await service.submitMessage(command)).disposition,'committed');
+  const events=await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId);
+  const narration=events.find(event=>event.kind==='narration.committed');assert.ok(narration);
+  const state=(narration.payload as unknown as {narrativeState:{revision:number;situations:{fact:string}[]}}).narrativeState;
+  assert.equal(state.revision,1);assert.equal(state.situations[0]?.fact,'The doorway is open.');
+  assert.equal((await service.submitMessage(command)).disposition,'duplicate');
+  assert.equal((await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId)).length,events.length);
+});
 
 test("an expired affordance fails closed without consuming the write authorization", async () => {
   let calls = 0;

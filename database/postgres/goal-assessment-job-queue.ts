@@ -1,4 +1,5 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { isDeepStrictEqual } from "node:util";
 import {
   gateRecordActive,
   gateWorldWrite,
@@ -14,6 +15,9 @@ import type {
 } from "../../modules/goals/assessment-worker.ts";
 import type { GoalEvent, GoalScopeKind, GoalState } from "../../modules/goals/public.ts";
 import type { JsonValue } from "../../modules/runtime/public.ts";
+import { planRecordGoalReplacement, planRecordGoalSuccessor, type RecordGoalEvolutionPlan } from "../../modules/goals/record-authoring.ts";
+import { loadRecordAuthoredGoalDefinition } from "./record-goal-authoring-repository.ts";
+import { loadGoalScopeCommittedEvents } from "./goal-scope-evidence.ts";
 
 export interface GoalAssessmentEnqueueInput {
   jobId: string;
@@ -34,6 +38,8 @@ export interface PostgresGoalAssessmentJobQueueOptions {
   leaseOwner: string;
   leaseDurationMs?: number;
   retryDelayMs?: number;
+  /** Production hosts keep provider outages recoverable; invalid verdicts remain fail-closed. */
+  retryJudgeFailures?: boolean;
 }
 
 export interface PostgresGoalAssessmentJobQueue
@@ -83,6 +89,7 @@ interface SettleInstanceRow extends QueryResultRow {
   id: string;
   state: string;
   revision: string | number;
+  progress: unknown;
 }
 
 interface HeadRow extends QueryResultRow {
@@ -266,7 +273,7 @@ export function createPostgresGoalAssessmentJobQueue(
       });
     },
 
-    async loadContext(job) {
+    async loadContext(job, definition) {
       return withWorkspaceTransaction(options.pool, workspaceId, async (client) => {
         await assertLease(client, job, Date.now());
         const instanceResult = await client.query<GoalInstanceRow>(
@@ -297,13 +304,16 @@ export function createPostgresGoalAssessmentJobQueue(
           );
         }
         const eventsResult = await client.query<EventRow>(
-          `SELECT id, record_id, record_version, record_ordinal,
-                  event_kind, payload
-           FROM events
-           WHERE workspace_id = $1 AND world_id = $2
-             AND worldline_id = $3 AND record_id = $4
-           ORDER BY record_ordinal, id`,
-          [workspaceId, job.worldId, job.worldlineId, job.recordId],
+          `SELECT event.id, event.record_id, event.record_version, event.record_ordinal,
+                  event.event_kind, event.payload
+           FROM events event JOIN visibility_policies policy
+             ON policy.workspace_id=event.workspace_id AND policy.world_id=event.world_id
+             AND policy.worldline_id=event.worldline_id AND policy.record_id=event.record_id AND policy.id=event.visibility_policy_id
+           WHERE event.workspace_id = $1 AND event.world_id = $2
+             AND event.worldline_id = $3 AND event.record_id = $4
+             AND ($5::boolean OR policy.policy_kind='public')
+           ORDER BY event.record_ordinal, event.id`,
+          [workspaceId, job.worldId, job.worldlineId, job.recordId, definition === undefined || definition.visible === false],
         );
         const events = eventsResult.rows.map(toGoalEvent);
         const headRow = headResult.rows[0]!;
@@ -386,7 +396,7 @@ export function createPostgresGoalAssessmentJobQueue(
           [workspaceId, input.job.worldId, input.job.worldlineId, input.job.recordId],
         );
         const instanceResult = await client.query<SettleInstanceRow>(
-          `SELECT id, state, revision
+          `SELECT id, state, revision, progress
            FROM goal_instances
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
              AND record_id = $4 AND id = $5
@@ -447,6 +457,41 @@ export function createPostgresGoalAssessmentJobQueue(
           await requeueForConflict(client, input.job, input.now, "GOAL_INSTANCE_CHANGED", retryDelayMs);
           return "retryable";
         }
+        let canonicalEvolution: RecordGoalEvolutionPlan | undefined;
+        if (input.decision.evolution) {
+          const proposed = input.decision.evolution;
+          const previous = await loadRecordAuthoredGoalDefinition(client, input.job, {
+            definitionId: proposed.definition.supersedesDefinitionId ?? "", goalKey: input.job.goalKey,
+            policyVersion: input.decision.policyVersion,
+          });
+          const terminal = input.decision.transition.to !== "active";
+          const canonical = (terminal ? planRecordGoalSuccessor : planRecordGoalReplacement)({ previous, scope: input.job,
+            instance: { goalInstanceId: instance.id, recordId: input.job.recordId, state: input.decision.transition.to,
+              revision: terminal ? currentRevision + 1 : currentRevision, resolutionKind: terminal ? "natural" : undefined,
+              progress: terminal ? input.decision.transition.progress : jsonObject(instance.progress, "GOAL_PROGRESS_INVALID"),
+              outcome: terminal ? input.decision.transition.outcome : null },
+            expectedDefinitionVersion: previous.definitionVersion, expectedInstanceRevision: terminal ? currentRevision + 1 : currentRevision,
+            nextDraft: proposed.definition.draft, reason: proposed.definition.changeReason ?? "",
+            evidenceEventIds: proposed.definition.basisEventIds, events: await loadGoalScopeCommittedEvents(client, input.job),
+            observedHead: terminal ? { recordVersion: currentHead.recordVersion + 1, ordinal: currentHead.ordinal + 1 } : currentHead });
+          if (!isDeepStrictEqual(canonical, proposed)
+            || !canonical.definition.basisEventIds.includes(input.job.sourceEventId)) {
+            throw new GoalRuntimeRepositoryError("GOAL_EVOLUTION_INVALID", "Goal evolution does not match its committed predecessor.");
+          }
+          canonicalEvolution = canonical;
+        }
+        if (canonicalEvolution?.previousTransition) {
+          await client.query(`SELECT record_goal_evolve($1,$2,$3,$4,$5::jsonb,$6)`,
+            [workspaceId,input.job.jobId,input.job.leaseOwner,input.job.attemptCount,JSON.stringify(canonicalEvolution.definition),currentRevision]);
+          await insertAssessment(client,input.job,input.decision);
+          await updateJobState(client,input.job,"completed",input.now,null,null);
+          return "applied";
+        }
+        if (input.decision.transition.to === 'active' && isDeepStrictEqual(instance.progress,input.decision.transition.progress)) {
+          await insertAssessment(client,input.job,input.decision);
+          await updateJobState(client,input.job,'completed',input.now,null,null);
+          return 'applied';
+        }
         const previousEvent = await client.query<EventContextRow>(
           `SELECT scene_id, visibility_policy_id, calendar_id, display_time,
                   world_tick, world_ordinal
@@ -464,6 +509,7 @@ export function createPostgresGoalAssessmentJobQueue(
           );
         }
         const previous = previousEvent.rows[0]!;
+        const publicationPolicyId = await goalPublicationPolicy(client, input.job, input.decision.definitionVisible, previous.visibility_policy_id);
         const worldline = worldlineResult.rows[0]!;
         const worldTick = safeInteger(worldline.head_tick, "GOAL_WORLD_CURSOR_INVALID");
         const worldOrdinal = safeInteger(worldline.head_ordinal, "GOAL_WORLD_CURSOR_INVALID") + 1;
@@ -507,7 +553,7 @@ export function createPostgresGoalAssessmentJobQueue(
                 policyVersion: input.decision.transition.policyVersion,
               },
             }),
-            previous.visibility_policy_id,
+            publicationPolicyId,
             worldTick,
             worldOrdinal,
             previous.calendar_id,
@@ -545,7 +591,7 @@ export function createPostgresGoalAssessmentJobQueue(
           `UPDATE goal_instances
            SET state = $10, revision = $6, progress = $7::jsonb,
                outcome = $8::jsonb, updated_at = $9::timestamptz,
-               completed_at = $9::timestamptz
+               completed_at = CASE WHEN $10='active' THEN NULL ELSE $9::timestamptz END
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
              AND record_id = $4 AND id = $5`,
           [
@@ -556,12 +602,16 @@ export function createPostgresGoalAssessmentJobQueue(
             input.job.goalInstanceId,
             input.decision.transition.revision,
             json(input.decision.transition.progress),
-            json(input.decision.transition.outcome),
+            input.decision.transition.outcome === null ? null : json(input.decision.transition.outcome),
             committedAt,
             input.decision.transition.to,
           ],
         );
         await insertAssessment(client, input.job, input.decision);
+        if (canonicalEvolution) {
+          await client.query(`SELECT record_goal_evolve($1,$2,$3,$4,$5::jsonb,$6)`,
+            [workspaceId,input.job.jobId,input.job.leaseOwner,input.job.attemptCount,JSON.stringify(canonicalEvolution.definition),currentRevision+1]);
+        }
         const completion = withRecordCommittedNotify(
           {
             update: `UPDATE goal_assessment_jobs
@@ -577,7 +627,7 @@ export function createPostgresGoalAssessmentJobQueue(
           {
             workspaceId,
             recordId: input.job.recordId,
-            nextOrdinal: nextOrdinal + 1,
+            nextOrdinal: nextOrdinal + 1 + (canonicalEvolution ? 1 : 0),
           },
         );
         await client.query(completion.text, completion.values);
@@ -594,6 +644,11 @@ export function createPostgresGoalAssessmentJobQueue(
             "GOAL_STALE_LEASE",
             "The Goal assessment lease is no longer current.",
           );
+        }
+        if (options.retryJudgeFailures === true && ['GOAL_JUDGE_FAILED','GOAL_EVOLUTION_FAILED'].includes(input.code)) {
+          const delay=Math.min(300_000,Math.max(1_000,retryDelayMs)*2 ** Math.min(input.job.attemptCount,9));
+          await requeueForConflict(client,input.job,input.now,input.code,delay);
+          return;
         }
         const result = await client.query(
           `UPDATE goal_assessment_jobs
@@ -614,6 +669,31 @@ export function createPostgresGoalAssessmentJobQueue(
       });
     },
   };
+}
+
+/** Publish by the immutable Goal definition, never by an unrelated last event. */
+async function goalPublicationPolicy(client: PoolClient, job: ClaimedGoalAssessmentJob, visible: boolean | undefined, fallback: string): Promise<string> {
+  if (visible === undefined) return fallback;
+  const native = await client.query<{ visible: boolean }>(`SELECT (definition.definition#>>'{draft,visible}')::boolean AS visible
+    FROM goal_instances instance JOIN record_goal_definitions definition
+      ON definition.workspace_id=instance.workspace_id AND definition.world_id=instance.world_id
+      AND definition.worldline_id=instance.worldline_id AND definition.record_id=instance.record_id
+      AND definition.id=instance.definition_id AND definition.goal_key=instance.goal_key AND definition.policy_version=instance.policy_version
+    WHERE instance.workspace_id=$1 AND instance.world_id=$2 AND instance.worldline_id=$3 AND instance.record_id=$4 AND instance.id=$5
+      AND instance.definition_source='record'`, [job.workspaceId,job.worldId,job.worldlineId,job.recordId,job.goalInstanceId]);
+  if (native.rows[0] && native.rows[0].visible !== visible) {
+    throw new GoalRuntimeRepositoryError('GOAL_VISIBILITY_MISMATCH','Goal publication does not match its immutable definition.');
+  }
+  const kind = visible ? 'public' : 'dm_only';
+  const existing = await client.query<{id:string}>(`SELECT id FROM visibility_policies
+    WHERE workspace_id=$1 AND world_id=$2 AND worldline_id=$3 AND record_id=$4 AND policy_kind=$5
+    ORDER BY policy_version,id LIMIT 1`, [job.workspaceId,job.worldId,job.worldlineId,job.recordId,kind]);
+  if (existing.rows[0]) return existing.rows[0].id;
+  if (visible) throw new GoalRuntimeRepositoryError('GOAL_CONTEXT_UNAVAILABLE','Public Goal publication requires a public policy.');
+  const id = `goal-policy:${job.jobId}:${job.attemptCount}`;
+  await client.query(`INSERT INTO visibility_policies(workspace_id,world_id,worldline_id,record_id,id,policy_key,policy_kind)
+    VALUES($1,$2,$3,$4,$5,$5,'dm_only')`,[job.workspaceId,job.worldId,job.worldlineId,job.recordId,id]);
+  return id;
 }
 
 function assertScope(input: GoalAssessmentEnqueueInput, workspaceId: string): void {

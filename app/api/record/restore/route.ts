@@ -13,7 +13,7 @@ import {
   type RealmWorldSignatureVerifier,
 } from "../../../../modules/world-transfer/realmworld-loader.ts";
 import { LOCAL_RECORD_SCOPE } from "../../../../modules/application/local-record-service.ts";
-import { resolveRequestPrincipal, unauthorizedResponse } from "../../auth-context.ts";
+import { resolveRequestPrincipal, sessionProofFromRequest, unauthorizedResponse } from "../../auth-context.ts";
 import { getSharedRuntimePool } from "../../world-scope.ts";
 import { readRealmWorldVerifier } from "../../realmworld/env.ts";
 
@@ -167,6 +167,7 @@ export async function POST(request: Request) {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId,
       archive,
+      sessionProof:sessionProofFromRequest(request)??undefined,
       targetWorldId,
       idempotencyKey,
     });

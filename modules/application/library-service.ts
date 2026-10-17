@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import {createPostgresRealmRuntimeSaveReader,createPostgresRealmRuntimeSaveRestorer} from '../../database/postgres/realm-runtime-save-repository.ts';
+import {buildRealmRuntimeSaveArchive,parseRealmRuntimeSaveArchive} from '../world-transfer/realm-runtime-save.ts';
+import {validateRecordBranchWorldBinding} from './record-branch-world-binding.ts';
+import { normalizeRecordGoalDrafts } from '../goals/authoring-contract.ts';
+import { materializeGenesisRecordGoals } from '../../database/postgres/genesis-record-goals.ts';
 import type { PoolClient, QueryResultRow } from "pg";
 import {
   withWorkspaceTransaction,
@@ -16,6 +21,7 @@ import {
 } from "./base-rule-definitions.ts";
 import {
   composeDeterministicOpening,
+  firstNightGoalDirections,
   type FirstNightContext,
 } from "./first-night.ts";
 import { genesisDraftFromResolvedContent } from "./preset-worlds.ts";
@@ -676,7 +682,8 @@ export function createPostgresLibraryService(
       const pool = OWNER_POOL_COMMAND_KINDS.has(command.kind)
         ? writeDatabase
         : database;
-      return withWorkspaceTransaction(
+      const transaction=command.kind==='branch'?withRecordBranchSnapshotTransaction:withWorkspaceTransaction;
+      return transaction(
         pool,
         scope.workspaceId,
         async (client) => {
@@ -1114,11 +1121,16 @@ export function createPostgresLibraryService(
             customCharacters.rows,
           );
         },
+
       );
     },
 
     async createGenesis(scope, draft, options) {
       const creationRequestId = options?.creationRequestId?.trim() ?? "";
+      const recordGoals = normalizeRecordGoalDrafts(draft.recordGoals ?? []);
+      if (recordGoals.length && (!creationRequestId || genesisBindingFromDraft(draft).kind !== 'base')) {
+        throw new LibraryServiceError('INVALID_COMMAND','Authored genesis Goals require an identified native creation request.');
+      }
       if (creationRequestId && !GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) {
         throw new LibraryServiceError("INVALID_COMMAND", "Creation request id is invalid.");
       }
@@ -1131,7 +1143,7 @@ export function createPostgresLibraryService(
               client,
               scope,
               creationRequestId,
-              genesisDraftFingerprint(draft),
+              genesisDraftFingerprint({ ...draft, recordGoals }),
             )
             : null;
           if (claimed?.kind === "replay") {
@@ -1374,7 +1386,11 @@ export function createPostgresLibraryService(
               objective: draft.scene.objective,
             },
             opening: draft.opening,
+            ...firstNightGoalDirections(recordGoals),
           };
+          if (recordGoals.length) await materializeGenesisRecordGoals(client, { scope: {
+            workspaceId: scope.workspaceId, worldId, worldlineId, recordId }, sessionProof: scope.sessionProof ?? '',
+            creationRequestId, drafts: recordGoals });
           const openingEventId = await insertOpeningEvent(
             client,
             scope,
@@ -1389,14 +1405,14 @@ export function createPostgresLibraryService(
           // 运行态；定义/rubric 留在 RealmWorld 内容层），并对同一事务内
           // 真实落库的 opening 事件 enqueue durable assessment job。
           // 旧 base/genesis 路径无 goals——零行为变化、零写入。
-          if (declaredGoals.length > 0) {
+          if (declaredGoals.length > 0 || recordGoals.length > 0) {
             const goalScope = {
               workspaceId: scope.workspaceId,
               worldId,
               worldlineId,
               recordId,
             };
-            await materializeGoalInstances(client, goalScope, declaredGoals);
+            if (declaredGoals.length) await materializeGoalInstances(client, goalScope, declaredGoals);
             await reconcileGoalAssessmentJobsForCommittedEvents(client, {
               ...goalScope,
               eventIds: [openingEventId],
@@ -1563,10 +1579,11 @@ export function createPostgresLibraryService(
       );
     },
     async branchRecord(scope, input) {
-      return withWorkspaceTransaction(
+      return withRecordBranchSnapshotTransaction(
         writeDatabase,
         scope.workspaceId,
         async (client) => createRecordBranchInTransaction(client, scope, input),
+
       );
     },
   };
@@ -1880,6 +1897,20 @@ function compareBranchCursor(
  * policy_version/completed_at 逐字节保留），绝不克隆
  * goal_assessment_jobs / goal_assessments；identity/约束冲突即整体回滚。
  */
+async function withRecordBranchSnapshotTransaction<T>(database:WorkspaceDatabase,workspaceId:string,work:(client:PoolClient)=>Promise<T>):Promise<T> {
+  for(let attempt=0;;attempt++) {
+    try {return await withWorkspaceTransaction(database,workspaceId,work,{isolationLevel:'repeatable read'});}
+    catch(error) {
+      const failure=error as {code?:string;constraint?:string};
+      // A queued source lock does not refresh a repeatable-read snapshot. Restart
+      // the entire SQL-only transaction, not just the conflicting INSERT.
+      const retry=failure?.code==='40001'||failure?.code==='40P01'||(failure?.code==='23505'
+        && ['records_pkey','record_goal_restore_admissions_pkey'].includes(failure.constraint??''));
+      if(!retry||attempt>=2)throw error;
+    }
+  }
+}
+
 async function createRecordBranchInTransaction(
   client: PoolClient,
   scope: LibraryScope,
@@ -2002,6 +2033,10 @@ async function createRecordBranchInTransaction(
     scope.workspaceId,
     sourceRecordId,
   );
+  const narrative=await client.query<{present:boolean}>(`SELECT EXISTS(SELECT 1 FROM events WHERE workspace_id=$1 AND record_id=$2
+    AND event_kind='narration.committed' AND (jsonb_typeof(payload#>'{__realmRuntimePayload,narrativeState}')='object'
+      OR jsonb_typeof(payload->'narrativeState')='object')) AS present`,[scope.workspaceId,sourceRecordId]);
+  const snapshotBranch=branchGoalSources.some(goal=>goal.definitionSource==='record')||narrative.rows[0]?.present===true;
   const start = {
     tick: Math.max(0, Number(sourceRow.start_tick) || 0),
     ordinal: Math.max(0, Number(sourceRow.start_ordinal) || 0),
@@ -2129,11 +2164,26 @@ async function createRecordBranchInTransaction(
   // 源 Record 无 Goal 时旧路径语义逐字节不变（③b 仅一次安全空读）。
   // 注意顺序：本门禁在 ⑥ 幂等重放早返回之后——同键重放仍按既有契约返回
   // 首次拓扑，不因源 head 之后推进而把合法重放误判为历史分叉。
-  if (branchGoalSources.length > 0 && compareBranchCursor(fork, head) !== 0) {
+  if ((branchGoalSources.length > 0||snapshotBranch) && compareBranchCursor(fork, head) !== 0) {
     throw new LibraryServiceError(
       "BRANCH_GOAL_STATE_UNAVAILABLE",
-      "Records with Goal runtime state can only be branched at the current head.",
+      branchGoalSources.length?'Records with Goal runtime state can only be branched at the current head.':'Records with narrative runtime state can only be branched at the current head.',
     );
+  }
+
+  if(snapshotBranch) {
+    // Preserve the immutable event/evidence history in a fresh scope. A lossy
+    // goal-only copy cannot satisfy definition, assessment or situation binding.
+    await assertWorldOwner(client,scope,worldId);
+    const loaded=await createPostgresRealmRuntimeSaveReader(client).load({workspaceId:scope.workspaceId,recordId:sourceRecordId,principalId:scope.principalId});
+    if(!loaded)throw new LibraryServiceError('RECORD_NOT_FOUND','Record not found.');
+    const archive=parseRealmRuntimeSaveArchive(buildRealmRuntimeSaveArchive(loaded));
+    const restored=await createPostgresRealmRuntimeSaveRestorer(client,{validateWorldBinding:validateRecordBranchWorldBinding}).restore({
+      workspaceId:scope.workspaceId,principalId:scope.principalId,sessionProof:scope.sessionProof,archive,targetWorldId:worldId,idempotencyKey:idempotencyKey||randomUUID(),
+      recordTitle:normalizeBranchText(input.recordTitle,`分支：${sourceRow.record_title}`),storyTitle:normalizeBranchText(input.storyTitle,`分支：${sourceRow.story_title}`),
+      branch:{sourceRecordId,sourceWorldlineId:sourceRow.worldline_id,fork,label:normalizeBranchText(input.label,`分支：${sourceRow.record_title}`),premise:sourceRow.story_premise},
+    });
+    return {worldId,worldlineId:restored.worldlineId,storyId:restored.storyId,recordId:restored.recordId,fork,replayed:restored.replayed};
   }
 
   // ⑦ 覆盖 fork 点的场景快照（最近一个 start<=fork 的 scene）。

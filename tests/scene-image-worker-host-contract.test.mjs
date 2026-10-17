@@ -57,7 +57,7 @@ test("B. setup-web：ready 后启动 worker；finally 停 worker", () => {
 });
 
 test("C. 三平台后台模板：同一入口、用户级可选、无凭据", () => {
-  const systemd = read("scripts/systemd/realm-scene-image-worker.service");
+  const systemd = read("installer/linux/realm-scene-image-worker.service");
   assert.match(systemd, /ExecStart=.*launcher\/scene-image-worker-host\.mjs/);
   assert.doesNotMatch(systemd, /postgresql:\/\/|password|api[-_]?key/i);
 

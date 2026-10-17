@@ -85,6 +85,11 @@ test("Goal worker cycle drives the durable assessment worker once per workspace"
   assert.equal(repository.settled.length, 1);
 });
 
+test('native Record worker construction requires no RealmWorld installation or signing trust', async () => {
+  const runtime=createGoalAssessmentWorkerRuntime({connectionString:'postgresql://127.0.0.1/realm_runtime',workspaces:['workspace-1']});
+  await runtime.stop();
+});
+
 test("Goal worker runtime rejects unsafe configuration before opening a pool", () => {
   assert.throws(
     () => createGoalAssessmentWorkerRuntime({

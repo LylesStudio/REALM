@@ -1,6 +1,6 @@
 # 界核 / REALM GUI 交互测试
 
-对应测试设计见 [`docs/development/GUI-TEST-PLAN.md`](../../docs/development/GUI-TEST-PLAN.md)。当前仓库有基础 A–J 旅程以及 N–Z 扩展交互；文件清单以 `tests/gui/*.spec.ts` 为准，执行范围必须看本次 runner 的真实结果，不能用枚举数量代替通过证据。
+对应测试设计见 `docs/development/GUI-TEST-PLAN.md`。当前仓库有基础 A–J 旅程以及 N–Z 扩展交互；文件清单以 `tests/gui/*.spec.ts` 为准，执行范围必须看本次 runner 的真实结果，不能用枚举数量代替通过证据。
 
 ## 运行前提
 

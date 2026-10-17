@@ -16,6 +16,7 @@ import {
   RuntimeInvariantError,
 } from "../runtime/public.ts";
 import type { PresenceTurnContext } from "./presence.ts";
+import type { NarrativeConsequenceProposal } from "../application/narrative-situation.ts";
 
 export type ActivatedCharacter = ActionActor;
 
@@ -48,6 +49,8 @@ export type M2TurnPlan = {
    * CharacterRunner.react）；普通回合与插话回合无此字段。
    */
   presence?: PresenceTurnContext;
+  /** Core-owned mode, never inferred from model text. */
+  narrativeMode?: "player" | "passive";
 };
 
 export type SemanticOutputDraft = {
@@ -64,6 +67,8 @@ export type SemanticOutputDraft = {
   recipientId?: string | null;
   /** 旁白附带的下一步对话提案（仅 narrator 输出使用；fail-closed 可为空）。 */
   suggestions?: readonly string[];
+  /** Bounded, uncommitted world consequence; Core alone binds scope, head and event identity. */
+  narrativeConsequence?: NarrativeConsequenceProposal;
   /**
    * 批次 T3：在场反应附带的关系变化（仅 presence react 使用；
    * fail-closed 规整，无效即缺省）。落库前由应用层校验 target 名册匹配。
@@ -288,6 +293,7 @@ export interface DMController {
 
 export interface Narrator {
   narrate(input: {
+    allowWorldConsequences?: boolean;
     playerText: string;
     actionTransactions: readonly ActionTransaction[];
     activatedCharacters: readonly ActivatedCharacter[];
@@ -311,9 +317,34 @@ export interface CharacterRunner {
     actionTransactions: readonly ActionTransaction[];
     /** 批次 T3：presence 回合的在场上下文；缺省为普通回合反应。 */
     presence?: PresenceTurnContext;
+    /**
+     * Record Goal A 批（A2）：同回合 Narrator 已裁定、尚未提交的旁白
+     * （经 sameTurnNarrationForCharacter 按角色可见性过滤）。它是本轮
+     * 待提交结果而非 committed 历史；实现方必须如实标注，不得注入 system
+     * 或伪装成已提交事件。
+     */
+    sameTurnNarration?: SemanticOutputDraft | null;
     /** Batch 2D：本地取消信号（可选，向后兼容）。 */
     signal?: AbortSignal;
   }): Promise<SemanticOutputDraft>;
+}
+
+/**
+ * Record Goal A 批（A2）：同轮裁定旁白的按角色可见性过滤。
+ * public 回合所有被激活角色可见；restricted 回合仅 audience 内角色可见；
+ * 无旁白恒 null。只负责可见性分发，不改写内容。
+ */
+export function sameTurnNarrationForCharacter(
+  plan: Pick<M2TurnPlan, "visibility">,
+  narration: SemanticOutputDraft | null,
+  character: ActivatedCharacter,
+): SemanticOutputDraft | null {
+  if (!narration) return null;
+  const visibility = plan.visibility;
+  if (!visibility || visibility.kind === "public") return narration;
+  return visibility.audienceCharacterInstanceIds.includes(character.characterInstanceId)
+    ? narration
+    : null;
 }
 
 export interface DraftProgress {
@@ -423,6 +454,7 @@ export function createLocalM2TurnOrchestrator(options: {
               playerText: input.playerText,
               actionTransactions,
               activatedCharacters: input.plan.activatedCharacters,
+              allowWorldConsequences: input.plan.narrativeMode !== "passive" && !input.plan.presence && input.plan.visibility.kind === "public",
               ...(input.signal ? { signal: input.signal } : {}),
             })
           : null;
@@ -444,6 +476,9 @@ export function createLocalM2TurnOrchestrator(options: {
           playerText: input.playerText,
           character,
           actionTransactions,
+          // Record Goal A 批（A2）：同轮 Narrator 裁定（尚未提交）显式传入，
+          // 按角色可见性过滤；与已提交历史明确区分由 runner 的呈现负责。
+          sameTurnNarration: sameTurnNarrationForCharacter(input.plan, narration, character),
           ...(input.plan.presence ? { presence: input.plan.presence } : {}),
           ...(input.signal ? { signal: input.signal } : {}),
         });

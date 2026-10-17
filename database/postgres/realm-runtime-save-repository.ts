@@ -19,10 +19,19 @@ import {
   type RealmRuntimeSaveSelfPlayV1,
   type RealmRuntimeSaveTopologyV1,
 } from "../../modules/world-transfer/realm-runtime-save.ts";
+import type { RealmRuntimeSaveDomainV1 } from "../../modules/world-transfer/realm-runtime-domain-save.ts";
+import {
+  storyNodeInstanceIdFor,
+  storyUnlockIdempotencyKeyFor,
+  storyUnlockLedgerIdFor,
+} from "../../modules/story-graph/public.ts";
 import {
   LOCAL_WORLD_VERSION,
 } from "../../modules/world-transfer/realm-save.ts";
 import type { JsonValue } from "../../modules/runtime/public.ts";
+import {decodeRecordGoalDefinition,rebaseRecordGoalDefinitions,type RecordGoalDefinitionVersion} from '../../modules/goals/record-authoring.ts';
+import {rebaseNarrativeState} from '../../modules/application/narrative-situation.ts';
+import {rebuildRecordNarrativeState} from './narrative-situation-repository.ts';
 import {
   withWorkspaceTransaction,
   type WorkspaceDatabase,
@@ -60,12 +69,15 @@ export interface RealmRuntimeSaveReader {
   load(input: {
     workspaceId: string;
     recordId: string;
+    /** HTTP downloads contain private backup data; verify owner in the read transaction. */
+    principalId?: string;
   }): Promise<RealmRuntimeSaveArchive | null>;
 }
 
 export interface RealmRuntimeSaveRestoreInput {
   workspaceId: string;
   principalId: string;
+  sessionProof?: string;
   archive: RealmRuntimeSaveArchive;
   /** Required for base saves; world-bound saves must match manifest.world.worldId. */
   targetWorldId?: string;
@@ -73,6 +85,8 @@ export interface RealmRuntimeSaveRestoreInput {
   idempotencyKey: string;
   recordTitle?: string;
   storyTitle?: string;
+  /** Server-only current-head snapshot branch; never accepted by the restore HTTP route. */
+  branch?: {sourceRecordId:string;sourceWorldlineId:string;fork:{tick:number;ordinal:number};label:string;premise:string};
 }
 
 export interface RealmRuntimeSaveRestoreResult {
@@ -93,6 +107,14 @@ export interface RealmRuntimeSaveRestoreResult {
   importedOutboxMessageCount: number;
   importedFirstNightCount: number;
   importedSelfPlaySessionCount: number;
+  importedDomainProjectCount: number;
+  importedDomainLedgerEntryCount: number;
+  importedDomainStoryNodeCount: number;
+  importedDomainUnlockCount: number;
+  importedDomainFactCommandCount: number;
+  importedDomainAssessmentCount: number;
+  importedDomainRelationshipRevisionCount: number;
+  importedDomainAssetCount: number;
   warnings: readonly ["WORLD_VERSION_MISMATCH"] | readonly [];
   replayed: boolean;
 }
@@ -143,6 +165,7 @@ interface RecordRow extends QueryResultRow {
   world_id: string;
   worldline_id: string;
   record_id: string;
+  story_id: string;
   world_version: string;
   record_version: string | number;
   next_record_ordinal: string | number;
@@ -173,6 +196,13 @@ interface GoalInstanceRow extends QueryResultRow {
   progress: unknown;
   outcome: unknown;
   policy_version: string;
+  definition_source: 'content' | 'record';
+  definition_id: string | null;
+  resolution_kind: 'natural' | 'withdrawn' | 'superseded';
+  evidence_start_version: string | number;
+  evidence_start_ordinal: string | number;
+  attempt: number;
+  supersedes_instance_id: string | null;
 }
 
 interface GoalAssessmentRow extends QueryResultRow {
@@ -371,6 +401,163 @@ interface SelfPlaySessionRow extends QueryResultRow {
   last_error: string | null;
 }
 
+interface DomainProjectRow extends QueryResultRow {
+  id: string;
+  kind: "production" | "campaign" | "operation" | "initiative";
+  status: "planned" | "active" | "completed" | "cancelled" | "archived";
+  stage: "planning" | "funding" | "production" | "scheduled" | "delivery" | "closed";
+  title: string;
+  currency: "JPY";
+  deadline: string | null;
+  version: string | number;
+}
+
+interface DomainMilestoneRow extends QueryResultRow {
+  id: string;
+  project_id: string;
+  sequence: string | number;
+  title: string;
+  status: "planned" | "active" | "completed" | "cancelled";
+  due_on: string | null;
+  completion_record_id: string | null;
+  completion_event_id: string | null;
+}
+
+interface DomainProjectStoryLinkRow extends QueryResultRow {
+  id: string;
+  project_id: string;
+  story_id: string;
+  link_kind: "primary" | "related";
+}
+
+interface DomainBudgetRow extends QueryResultRow {
+  id: string;
+  project_id: string;
+  category: string;
+  amount_minor: string | number;
+  currency: "JPY";
+  version: string | number;
+}
+
+interface DomainAccountRow extends QueryResultRow {
+  id: string;
+  currency: "JPY";
+  status: "active" | "closed";
+  opening_balance_minor: string | number;
+}
+
+interface DomainLedgerRow extends QueryResultRow {
+  id: string;
+  account_id: string;
+  kind: "income" | "expense" | "adjustment";
+  direction: "income" | "expense";
+  amount_minor: string | number;
+  currency: "JPY";
+  category: string;
+  memo: string;
+  project_id: string | null;
+  source_record_id: string | null;
+  source_event_id: string | null;
+  occurred_at: Date | string;
+  idempotency_key: string;
+}
+
+interface DomainFinanceGroupRow extends QueryResultRow {
+  id: string;
+  idempotency_key: string;
+  request_fingerprint: string;
+  state: "committed" | "rejected";
+  result_manifest: unknown;
+  rejection_code: string | null;
+  policy_version: string;
+  source_record_id: string | null;
+}
+
+interface DomainObligationRow extends QueryResultRow {
+  id: string;
+  project_id: string | null;
+  kind: "loan" | "presale" | "revenue_share";
+  status: "open" | "settled" | "cancelled";
+  principal_minor: string | number;
+  outstanding_minor: string | number;
+  share_bps: string | number | null;
+  undelivered_count: string | number;
+  due_on: string | null;
+  version: string | number;
+}
+
+interface DomainSettlementRow extends QueryResultRow {
+  id: string;
+  obligation_id: string;
+  ledger_entry_id: string | null;
+  kind: "repayment" | "draw" | "share";
+  amount_minor: string | number;
+}
+
+interface DomainStoryNodeRow extends QueryResultRow {
+  id: string;
+  node_key: string;
+  state: "locked" | "active" | "completed" | "failed";
+  revision: string | number;
+  record_id: string | null;
+  definition_hash: string;
+  unlock_evidence_event_ids: string[];
+  unlock_evidence: unknown;
+}
+
+interface DomainUnlockRow extends QueryResultRow {
+  id: string;
+  story_node_instance_id: string;
+  node_key: string;
+  transition: "unlocked" | "rolled_back";
+  idempotency_key: string;
+  record_id: string | null;
+  evidence_event_ids: string[];
+  evidence_hash: string;
+  evidence: unknown;
+}
+
+interface DomainFactCommandRow extends QueryResultRow {
+  id: string;
+  idempotency_key: string;
+  request_fingerprint: string;
+  kind: "inventory_adjusted" | "inventory_granted" | "relationship_revised" | "performance_assessed";
+  result_manifest: unknown;
+}
+
+interface DomainAssessmentRow extends QueryResultRow {
+  id: string;
+  record_id: string;
+  policy_version: string;
+  score: string | number;
+  evidence_event_ids: string[];
+  evidence_snapshot_hash: string;
+  command_id: string;
+}
+
+interface DomainRelationshipRow extends QueryResultRow {
+  id: string;
+  subject_entity_key: string;
+  object_entity_key: string;
+  relation_kind: string;
+  revision_ordinal: string | number;
+  source_event_id: string;
+  source_record_id: string;
+  occurred_tick: string | number;
+  occurred_ordinal: string | number;
+  command_id: string;
+}
+
+interface DomainAssetRow extends QueryResultRow {
+  record_id: string;
+  character_instance_id: string;
+  asset_definition_id: string;
+  asset_key: string;
+  quantity: string | number;
+  revision: string | number;
+  metadata: unknown;
+}
+
 function saveTimestamp(value: Date | string): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -439,6 +626,7 @@ function mapEvent(row: EventRow): RealmRuntimeSaveEventV1 {
 function mapGoals(
   instances: readonly GoalInstanceRow[],
   assessments: readonly GoalAssessmentRow[],
+  definitions: readonly {definition:unknown}[],
 ): RealmRuntimeSaveGoalsV1 {
   return {
     format: "realm-runtime-goals",
@@ -451,7 +639,13 @@ function mapGoals(
       progress: jsonObject(row.progress),
       outcome: row.outcome === null ? null : jsonObject(row.outcome),
       policyVersion: row.policy_version,
+      ...(row.definition_source === 'record' ? {
+        definitionSource: 'record',definitionId:row.definition_id,resolutionKind:row.resolution_kind,
+        evidenceStartVersion:Number(row.evidence_start_version),evidenceStartOrdinal:Number(row.evidence_start_ordinal),
+        attempt:row.attempt,supersedesInstanceId:row.supersedes_instance_id,
+      } : {}),
     }) as JsonValue),
+    ...(definitions.length ? {definitions:definitions.map(row=>jsonObject(row.definition) as JsonValue)} : {}),
     assessments: assessments.map((row) => ({
       id: row.id,
       goalInstanceId: row.goal_instance_id,
@@ -791,17 +985,370 @@ function mapSelfPlay(rows: readonly SelfPlaySessionRow[]): RealmRuntimeSaveSelfP
   };
 }
 
+interface DomainRows {
+  projects: readonly DomainProjectRow[];
+  milestones: readonly DomainMilestoneRow[];
+  projectStoryLinks: readonly DomainProjectStoryLinkRow[];
+  budgetAllocations: readonly DomainBudgetRow[];
+  financeAccounts: readonly DomainAccountRow[];
+  ledgerEntries: readonly DomainLedgerRow[];
+  financeCommandGroups: readonly DomainFinanceGroupRow[];
+  obligations: readonly DomainObligationRow[];
+  obligationSettlements: readonly DomainSettlementRow[];
+  storyNodes: readonly DomainStoryNodeRow[];
+  storyUnlockLedger: readonly DomainUnlockRow[];
+  committedFactCommands: readonly DomainFactCommandRow[];
+  performanceAssessments: readonly DomainAssessmentRow[];
+  memberRelationshipRevisions: readonly DomainRelationshipRow[];
+  characterAssets: readonly DomainAssetRow[];
+}
+
+function mapDomain(
+  source: { worldId: string; worldlineId: string; storyId: string; recordId: string },
+  rows: DomainRows,
+): RealmRuntimeSaveDomainV1 {
+  return {
+    format: "realm-runtime-domain",
+    schemaVersion: 1,
+    source,
+    projects: rows.projects.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      stage: row.stage,
+      title: row.title,
+      currency: row.currency,
+      deadline: row.deadline,
+      version: Number(row.version),
+    })),
+    milestones: rows.milestones.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      sequence: Number(row.sequence),
+      title: row.title,
+      status: row.status,
+      dueOn: row.due_on,
+      completionRecordId: row.completion_record_id,
+      completionEventId: row.completion_event_id,
+    })),
+    projectStoryLinks: rows.projectStoryLinks.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      storyId: row.story_id,
+      linkKind: row.link_kind,
+    })),
+    budgetAllocations: rows.budgetAllocations.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      category: row.category,
+      amountMinor: Number(row.amount_minor),
+      currency: row.currency,
+      version: Number(row.version),
+    })),
+    financeAccounts: rows.financeAccounts.map((row) => ({
+      id: row.id,
+      currency: row.currency,
+      status: row.status,
+      openingBalanceMinor: Number(row.opening_balance_minor),
+    })),
+    ledgerEntries: rows.ledgerEntries.map((row) => ({
+      id: row.id,
+      accountId: row.account_id,
+      kind: row.kind,
+      direction: row.direction,
+      amountMinor: Number(row.amount_minor),
+      currency: row.currency,
+      category: row.category,
+      memo: row.memo,
+      projectId: row.project_id,
+      sourceRecordId: row.source_record_id,
+      sourceEventId: row.source_event_id,
+      occurredAt: saveTimestamp(row.occurred_at),
+      idempotencyKey: row.idempotency_key,
+    })),
+    financeCommandGroups: rows.financeCommandGroups.map((row) => ({
+      id: row.id,
+      idempotencyKey: row.idempotency_key,
+      requestFingerprint: row.request_fingerprint,
+      state: row.state,
+      resultManifest: jsonObject(row.result_manifest),
+      rejectionCode: row.rejection_code,
+      policyVersion: row.policy_version,
+      sourceRecordId: row.source_record_id,
+    })),
+    obligations: rows.obligations.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      kind: row.kind,
+      status: row.status,
+      principalMinor: Number(row.principal_minor),
+      outstandingMinor: Number(row.outstanding_minor),
+      shareBps: row.share_bps === null ? null : Number(row.share_bps),
+      undeliveredCount: Number(row.undelivered_count),
+      dueOn: row.due_on,
+      version: Number(row.version),
+    })),
+    obligationSettlements: rows.obligationSettlements.map((row) => ({
+      id: row.id,
+      obligationId: row.obligation_id,
+      ledgerEntryId: row.ledger_entry_id,
+      kind: row.kind,
+      amountMinor: Number(row.amount_minor),
+    })),
+    storyNodes: rows.storyNodes.map((row) => ({
+      id: row.id,
+      nodeKey: row.node_key,
+      state: row.state,
+      revision: Number(row.revision),
+      recordId: row.record_id,
+      definitionHash: row.definition_hash,
+      unlockEvidenceEventIds: [...row.unlock_evidence_event_ids],
+      unlockEvidence: jsonObject(row.unlock_evidence),
+    })),
+    storyUnlockLedger: rows.storyUnlockLedger.map((row) => ({
+      id: row.id,
+      storyNodeInstanceId: row.story_node_instance_id,
+      nodeKey: row.node_key,
+      transition: row.transition,
+      idempotencyKey: row.idempotency_key,
+      recordId: row.record_id,
+      evidenceEventIds: [...row.evidence_event_ids],
+      evidenceHash: row.evidence_hash,
+      evidence: jsonObject(row.evidence),
+    })),
+    committedFactCommands: rows.committedFactCommands.map((row) => ({
+      id: row.id,
+      idempotencyKey: row.idempotency_key,
+      requestFingerprint: row.request_fingerprint,
+      kind: row.kind,
+      resultManifest: jsonObject(row.result_manifest),
+    })),
+    performanceAssessments: rows.performanceAssessments.map((row) => ({
+      id: row.id,
+      recordId: row.record_id,
+      policyVersion: row.policy_version,
+      score: Number(row.score),
+      evidenceEventIds: [...row.evidence_event_ids],
+      evidenceSnapshotHash: row.evidence_snapshot_hash,
+      commandId: row.command_id,
+    })),
+    memberRelationshipRevisions: rows.memberRelationshipRevisions.map((row) => ({
+      id: row.id,
+      subjectEntityKey: row.subject_entity_key,
+      objectEntityKey: row.object_entity_key,
+      relationKind: row.relation_kind,
+      revisionOrdinal: Number(row.revision_ordinal),
+      sourceEventId: row.source_event_id,
+      sourceRecordId: row.source_record_id,
+      occurredTick: Number(row.occurred_tick),
+      occurredOrdinal: Number(row.occurred_ordinal),
+      commandId: row.command_id,
+    })),
+    characterAssets: rows.characterAssets.map((row) => ({
+      recordId: row.record_id,
+      characterInstanceId: row.character_instance_id,
+      assetDefinitionId: row.asset_definition_id,
+      assetKey: row.asset_key,
+      quantity: Number(row.quantity),
+      revision: Number(row.revision),
+      metadata: jsonObject(row.metadata),
+    })),
+  };
+}
+
+async function loadDomainSnapshot(
+  client: Parameters<Parameters<typeof withWorkspaceTransaction>[2]>[0],
+  source: { workspaceId: string; worldId: string; worldlineId: string; storyId: string; recordId: string },
+): Promise<RealmRuntimeSaveDomainV1> {
+  const linkResult = await client.query<DomainProjectStoryLinkRow>(
+    `SELECT id, project_id, story_id, link_kind
+     FROM project_story_links
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND story_id = $4
+     ORDER BY id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.storyId],
+  );
+  const projectIds = [...new Set(linkResult.rows.map((row) => row.project_id))];
+  const projects = await client.query<DomainProjectRow>(
+    `SELECT id, kind, status, stage, title, currency, deadline::text, version
+     FROM projects
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND id = ANY($4::text[])
+     ORDER BY id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const milestones = await client.query<DomainMilestoneRow>(
+    `SELECT id, project_id, sequence, title, status, due_on::text,
+            completion_record_id, completion_event_id
+     FROM project_milestones
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND project_id = ANY($4::text[])
+     ORDER BY project_id ASC, sequence ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const allProjectLinks = await client.query<DomainProjectStoryLinkRow>(
+    `SELECT id, project_id, story_id, link_kind
+     FROM project_story_links
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND project_id = ANY($4::text[])
+     ORDER BY project_id ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const budgetAllocations = await client.query<DomainBudgetRow>(
+    `SELECT id, project_id, category, amount_minor, currency, version
+     FROM budget_allocations
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND project_id = ANY($4::text[])
+     ORDER BY project_id ASC, category ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const financeAccounts = await client.query<DomainAccountRow>(
+    `SELECT id, currency, status, opening_balance_minor
+     FROM finance_accounts
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+     ORDER BY id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId],
+  );
+  const ledgerEntries = await client.query<DomainLedgerRow>(
+    `SELECT id, account_id, kind, direction, amount_minor, currency, category, memo,
+            project_id, source_record_id, source_event_id, occurred_at, idempotency_key
+     FROM ledger_entries
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+     ORDER BY occurred_at ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId],
+  );
+  const financeCommandGroups = await client.query<DomainFinanceGroupRow>(
+    `SELECT id, idempotency_key, request_fingerprint, state, result_manifest,
+            rejection_code, policy_version, source_record_id
+     FROM project_finance_command_groups
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+     ORDER BY created_at ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId],
+  );
+  const obligations = await client.query<DomainObligationRow>(
+    `SELECT id, project_id, kind, status, principal_minor, outstanding_minor,
+            share_bps, undelivered_count, due_on::text, version
+     FROM obligations
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND (project_id IS NULL OR project_id = ANY($4::text[]))
+     ORDER BY id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const obligationSettlements = await client.query<DomainSettlementRow>(
+    `SELECT settlement.id, settlement.obligation_id, settlement.ledger_entry_id,
+            settlement.kind, settlement.amount_minor
+     FROM obligation_settlements AS settlement
+     JOIN obligations AS obligation
+       ON obligation.workspace_id = settlement.workspace_id
+      AND obligation.world_id = settlement.world_id
+      AND obligation.worldline_id = settlement.worldline_id
+      AND obligation.id = settlement.obligation_id
+     WHERE settlement.workspace_id = $1 AND settlement.world_id = $2
+       AND settlement.worldline_id = $3
+       AND (obligation.project_id IS NULL OR obligation.project_id = ANY($4::text[]))
+     ORDER BY settlement.created_at ASC, settlement.id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, projectIds],
+  );
+  const storyNodes = await client.query<DomainStoryNodeRow>(
+    `SELECT id, node_key, state, revision, record_id, definition_hash,
+            unlock_evidence_event_ids, unlock_evidence
+     FROM story_node_instances
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND story_id = $4
+     ORDER BY node_key ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.storyId],
+  );
+  const storyUnlockLedger = await client.query<DomainUnlockRow>(
+    `SELECT id, story_node_instance_id, node_key, transition, idempotency_key,
+            record_id, evidence_event_ids, evidence_hash, evidence
+     FROM story_unlock_ledger
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND story_id = $4
+     ORDER BY created_at ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.storyId],
+  );
+  const committedFactCommands = await client.query<DomainFactCommandRow>(
+    `SELECT id, idempotency_key, request_fingerprint, kind, result_manifest
+     FROM committed_fact_commands
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+     ORDER BY created_at ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId],
+  );
+  const performanceAssessments = await client.query<DomainAssessmentRow>(
+    `SELECT id, record_id, policy_version, score, evidence_event_ids,
+            evidence_snapshot_hash, command_id
+     FROM performance_assessments
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND record_id = $4
+     ORDER BY created_at ASC, id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.recordId],
+  );
+  const memberRelationshipRevisions = await client.query<DomainRelationshipRow>(
+    `SELECT id, subject_entity_key, object_entity_key, relation_kind,
+            revision_ordinal, source_event_id, source_record_id,
+            occurred_tick, occurred_ordinal, command_id
+     FROM member_relationship_revisions
+     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
+       AND source_record_id = $4
+     ORDER BY subject_entity_key ASC, object_entity_key ASC,
+              relation_kind ASC, revision_ordinal ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.recordId],
+  );
+  const characterAssets = await client.query<DomainAssetRow>(
+    `SELECT asset.record_id, asset.character_instance_id, asset.asset_definition_id,
+            definition.asset_key, asset.quantity, asset.revision, asset.metadata
+     FROM character_assets AS asset
+     JOIN asset_definitions AS definition
+       ON definition.workspace_id = asset.workspace_id
+      AND definition.world_id = asset.world_id
+      AND definition.id = asset.asset_definition_id
+     WHERE asset.workspace_id = $1 AND asset.world_id = $2
+       AND asset.worldline_id = $3 AND asset.record_id = $4
+     ORDER BY asset.character_instance_id ASC, asset.asset_definition_id ASC`,
+    [source.workspaceId, source.worldId, source.worldlineId, source.recordId],
+  );
+  return mapDomain(
+    {
+      worldId: source.worldId,
+      worldlineId: source.worldlineId,
+      storyId: source.storyId,
+      recordId: source.recordId,
+    },
+    {
+      projects: projects.rows,
+      milestones: milestones.rows,
+      projectStoryLinks: allProjectLinks.rows,
+      budgetAllocations: budgetAllocations.rows,
+      financeAccounts: financeAccounts.rows,
+      ledgerEntries: ledgerEntries.rows,
+      financeCommandGroups: financeCommandGroups.rows,
+      obligations: obligations.rows,
+      obligationSettlements: obligationSettlements.rows,
+      storyNodes: storyNodes.rows,
+      storyUnlockLedger: storyUnlockLedger.rows,
+      committedFactCommands: committedFactCommands.rows,
+      performanceAssessments: performanceAssessments.rows,
+      memberRelationshipRevisions: memberRelationshipRevisions.rows,
+      characterAssets: characterAssets.rows,
+    },
+  );
+}
+
+/** A pg client has one active query; stop issuing SQL immediately on failure. */
+async function readInOrder<const T extends readonly unknown[]>(tasks:{readonly [K in keyof T]:()=>Promise<T[K]>}):Promise<T> {
+  const results:unknown[]=[];
+  for(const task of tasks)results.push(await task());
+  return results as unknown as T;
+}
+
 export function createPostgresRealmRuntimeSaveReader(
   database: WorkspaceDatabase,
 ): RealmRuntimeSaveReader {
   return {
-    async load({ workspaceId, recordId }) {
+    async load({ workspaceId, recordId, principalId }) {
       return withWorkspaceTransaction(database, workspaceId, async (client) => {
         const recordResult = await client.query<RecordRow>(
           `SELECT
              record.world_id,
              record.worldline_id,
              record.id AS record_id,
+             record.story_id,
              record.world_version,
              head.record_version,
              head.next_record_ordinal
@@ -825,6 +1372,12 @@ export function createPostgresRealmRuntimeSaveReader(
           );
         }
 
+        if(principalId!==undefined) {
+          const authority=await client.query<{role:string}>(`SELECT role FROM player_world_memberships
+            WHERE workspace_id=$1 AND world_id=$2 AND principal_id=$3`,[workspaceId,recordRow.world_id,principalId]);
+          if(!authority.rows[0])throw new RealmRuntimeSaveRepositoryError('RECORD_NOT_FOUND','Record not found.');
+          if(authority.rows[0].role!=='owner')throw new RealmRuntimeSaveRepositoryError('WORLD_READ_ONLY','Private runtime backups require world ownership.');
+        }
         const eventResult = await client.query<EventRow>(
           `SELECT id, record_version, record_ordinal, event_kind, payload,
                   content, speaker_name, actor_participant_id, scene_id,
@@ -850,15 +1403,17 @@ export function createPostgresRealmRuntimeSaveReader(
           outboxResult,
           firstNightResult,
           selfPlayResult,
-        ] = await Promise.all([
-          client.query<GoalInstanceRow>(
-            `SELECT id, goal_key, state, revision, progress, outcome, policy_version
+        ] = await readInOrder([
+          ()=>client.query<GoalInstanceRow>(
+            `SELECT id, goal_key, state, revision, progress, outcome, policy_version,
+                    definition_source,definition_id,resolution_kind,evidence_start_version,evidence_start_ordinal,
+                    attempt,supersedes_instance_id
              FROM goal_instances
              WHERE workspace_id = $1 AND record_id = $2
              ORDER BY id ASC`,
             [workspaceId, recordId],
           ),
-          client.query<GoalAssessmentRow>(
+          ()=>client.query<GoalAssessmentRow>(
             `SELECT id, goal_instance_id, source_event_id, source, status, result,
                     evidence_event_ids, evidence_head_version, evidence_head_ordinal,
                     evidence_snapshot_hash, policy_version
@@ -867,7 +1422,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY created_at ASC, id ASC`,
             [workspaceId, recordId],
           ),
-          client.query<ParticipantTopologyRow>(
+          ()=>client.query<ParticipantTopologyRow>(
             `SELECT
                participant.id AS participant_id,
                participant.participant_kind,
@@ -922,7 +1477,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY participant.speaking_order ASC, participant.id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<SceneTopologyRow>(
+          ()=>client.query<SceneTopologyRow>(
             `SELECT id AS scene_id, title, status, location, objective,
                     tension, weather, display_time,
                     start_tick, start_ordinal, end_tick, end_ordinal
@@ -934,7 +1489,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY start_tick ASC, start_ordinal ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<VisibilityPolicyTopologyRow>(
+          ()=>client.query<VisibilityPolicyTopologyRow>(
             `SELECT id AS policy_id, policy_key, policy_version, policy_kind,
                     scene_id, restricted_domain_id, private_character_instance_id,
                     audience_character_instance_ids
@@ -946,7 +1501,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY policy_key ASC, policy_version ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<ActionReceiptRow>(
+          ()=>client.query<ActionReceiptRow>(
             `SELECT id, transaction_id, call_fingerprint,
                     actor_character_instance_id, source_event_id, receipt,
                     world_tick, world_ordinal, recorded_at
@@ -958,7 +1513,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY world_tick ASC, world_ordinal ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<CharacterEffectRow>(
+          ()=>client.query<CharacterEffectRow>(
             `SELECT
                effect.id,
                effect.character_instance_id,
@@ -984,7 +1539,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY effect.applied_tick ASC, effect.applied_ordinal ASC, effect.id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<ObservationRow>(
+          ()=>client.query<ObservationRow>(
             `SELECT id, observer_character_instance_id, source_event_id,
                     dedupe_key, observation_kind, content, fidelity,
                     occurred_tick, occurred_ordinal,
@@ -1001,7 +1556,7 @@ export function createPostgresRealmRuntimeSaveReader(
           // Memory 运行态以 Worldline 为作用域；source record/observation
           // 引用必须落在被存档 Record 内（跨 Record 引用由契约 fail-closed
           // 拒绝），因此 reader 只导出本 Record 自源或无源的结论/关系。
-          client.query<MemoryConclusionRow>(
+          ()=>client.query<MemoryConclusionRow>(
             `SELECT id, observer_continuity_id, observed_entity_key,
                     source_record_id, source_observation_id, supersedes_memory_id,
                     operation, memory_kind, content, keywords,
@@ -1017,7 +1572,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY occurred_tick ASC, occurred_ordinal ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<MemorySnapshotRow>(
+          ()=>client.query<MemorySnapshotRow>(
             `SELECT id, observer_continuity_id, snapshot_kind, content, item_ids,
                     cursor_tick, cursor_ordinal, cache_epoch, token_count
              FROM memory_snapshots
@@ -1027,7 +1582,7 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY cursor_tick ASC, cursor_ordinal ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id],
           ),
-          client.query<RelationshipStateRow>(
+          ()=>client.query<RelationshipStateRow>(
             `SELECT observer_continuity_id, target_entity_key, relation_kind,
                     content, fidelity, source_record_id, source_observation_id,
                     occurred_tick, occurred_ordinal,
@@ -1041,7 +1596,7 @@ export function createPostgresRealmRuntimeSaveReader(
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
           // Outbox 只导出非终态消息；delivered 已送达，绝不进入存档。
-          client.query<OutboxRow>(
+          ()=>client.query<OutboxRow>(
             `SELECT id, dedupe_key, topic, payload, state, attempt_count,
                     available_at, event_id, lease_owner, lease_expires_at,
                     last_error_code, last_error_message, last_error_at
@@ -1054,13 +1609,13 @@ export function createPostgresRealmRuntimeSaveReader(
              ORDER BY created_at ASC, id ASC`,
             [workspaceId, recordRow.world_id, recordRow.worldline_id, recordId],
           ),
-          client.query<FirstNightRow>(
+          ()=>client.query<FirstNightRow>(
             `SELECT state, attempts, hook_content, suggestions, context
              FROM record_first_nights
              WHERE workspace_id = $1 AND record_id = $2 AND world_id = $3`,
             [workspaceId, recordId, recordRow.world_id],
           ),
-          client.query<SelfPlaySessionRow>(
+          ()=>client.query<SelfPlaySessionRow>(
             `SELECT id, state, beat_budget, beats_completed, requested_by, last_error
              FROM record_self_play_sessions
              WHERE workspace_id = $1 AND record_id = $2 AND world_id = $3
@@ -1083,7 +1638,9 @@ export function createPostgresRealmRuntimeSaveReader(
           },
           events: eventResult.rows.map(mapEvent),
         };
-        const goals = mapGoals(instanceResult.rows, assessmentResult.rows);
+        const definitions = await client.query<{definition:unknown}>(`SELECT definition FROM record_goal_definitions
+          WHERE workspace_id=$1 AND record_id=$2 ORDER BY goal_id,definition_version`,[workspaceId,recordId]);
+        const goals = mapGoals(instanceResult.rows, assessmentResult.rows,definitions.rows);
         const topology = mapTopology(
           topologyResult.rows,
           sceneResult.rows,
@@ -1100,6 +1657,13 @@ export function createPostgresRealmRuntimeSaveReader(
         const outbox = mapOutbox(outboxResult.rows);
         const firstNight = mapFirstNight(firstNightResult.rows);
         const selfPlay = mapSelfPlay(selfPlayResult.rows);
+        const domain = await loadDomainSnapshot(client, {
+          workspaceId,
+          worldId: recordRow.world_id,
+          worldlineId: recordRow.worldline_id,
+          storyId: recordRow.story_id,
+          recordId: recordRow.record_id,
+        });
         // Phase 4D：存档记录 Record 的实际 binding（records.world_version），
         // 不取 worlds 创建身份——切换过的 Record 存档必须保真。
         const worldRef = worldRefFromVersion(recordRow.world_id, recordRow.world_version);
@@ -1122,6 +1686,7 @@ export function createPostgresRealmRuntimeSaveReader(
           outbox,
           firstNight,
           selfPlay,
+          domain,
         });
         return {
           manifest,
@@ -1135,8 +1700,9 @@ export function createPostgresRealmRuntimeSaveReader(
           outbox,
           firstNight,
           selfPlay,
+          domain,
         };
-      }, { readOnly: true });
+      }, { readOnly: true, isolationLevel:'repeatable read' });
     },
   };
 }
@@ -1155,7 +1721,7 @@ async function isArchivedRecord(
 
 export async function buildRealmRuntimeSaveBytes(
   reader: RealmRuntimeSaveReader,
-  input: { workspaceId: string; recordId: string },
+  input: { workspaceId: string; recordId: string; principalId?: string },
 ): Promise<Uint8Array | null> {
   const archive = await reader.load(input);
   return archive ? buildRealmRuntimeSaveArchive(archive) : null;
@@ -1584,8 +2150,397 @@ function rewriteEvidenceReferences(value: JsonValue, eventIds: ReadonlyMap<strin
   return rewritten;
 }
 
+function rewriteGoalReferences(value:JsonValue,identities:ReadonlyMap<string,string>):JsonValue {
+  if(Array.isArray(value))return value.map(item=>rewriteGoalReferences(item,identities));
+  if(!value || typeof value!=='object')return value;
+  const keys=new Set(['goalInstanceId','supersedesInstanceId','successorInstanceId','definitionId','supersedesDefinitionId','successorDefinitionId','policyVersion']);
+  return Object.fromEntries(Object.entries(value).map(([key,child])=>[key,
+    keys.has(key)&&typeof child==='string'?identities.get(child)??child:rewriteGoalReferences(child,identities)])) as JsonValue;
+}
+
+type DomainProject = RealmRuntimeSaveDomainV1["projects"][number];
+type DomainMilestone = RealmRuntimeSaveDomainV1["milestones"][number];
+type DomainLink = RealmRuntimeSaveDomainV1["projectStoryLinks"][number];
+type DomainBudget = RealmRuntimeSaveDomainV1["budgetAllocations"][number];
+type DomainAccount = RealmRuntimeSaveDomainV1["financeAccounts"][number];
+type DomainLedger = RealmRuntimeSaveDomainV1["ledgerEntries"][number];
+type DomainFinanceGroup = RealmRuntimeSaveDomainV1["financeCommandGroups"][number];
+type DomainObligation = RealmRuntimeSaveDomainV1["obligations"][number];
+type DomainSettlement = RealmRuntimeSaveDomainV1["obligationSettlements"][number];
+type DomainNode = RealmRuntimeSaveDomainV1["storyNodes"][number];
+type DomainUnlock = RealmRuntimeSaveDomainV1["storyUnlockLedger"][number];
+type DomainFact = RealmRuntimeSaveDomainV1["committedFactCommands"][number];
+type DomainAssessment = RealmRuntimeSaveDomainV1["performanceAssessments"][number];
+type DomainRelationship = RealmRuntimeSaveDomainV1["memberRelationshipRevisions"][number];
+type DomainAsset = RealmRuntimeSaveDomainV1["characterAssets"][number];
+
+type RestoredWithId<T> = Omit<T, "id"> & { sourceId: string; targetId: string };
+
+interface NormalizedRestoreDomain {
+  projects: readonly RestoredWithId<DomainProject>[];
+  milestones: readonly (Omit<DomainMilestone, "id" | "projectId" | "completionRecordId" | "completionEventId"> & {
+    sourceId: string;
+    targetId: string;
+    targetProjectId: string;
+    targetCompletionRecordId: string | null;
+    targetCompletionEventId: string | null;
+  })[];
+  projectStoryLinks: readonly (Omit<DomainLink, "id" | "projectId" | "storyId"> & {
+    sourceId: string;
+    targetId: string;
+    targetProjectId: string;
+    targetStoryId: string;
+  })[];
+  budgetAllocations: readonly (Omit<DomainBudget, "id" | "projectId"> & {
+    sourceId: string;
+    targetId: string;
+    targetProjectId: string;
+  })[];
+  financeAccounts: readonly RestoredWithId<DomainAccount>[];
+  ledgerEntries: readonly (Omit<DomainLedger, "id" | "accountId" | "projectId" | "sourceRecordId" | "sourceEventId"> & {
+    sourceId: string;
+    targetId: string;
+    targetAccountId: string;
+    targetProjectId: string | null;
+    targetSourceRecordId: string | null;
+    targetSourceEventId: string | null;
+  })[];
+  financeCommandGroups: readonly (Omit<DomainFinanceGroup, "id" | "sourceRecordId" | "resultManifest"> & {
+    sourceId: string;
+    targetId: string;
+    targetSourceRecordId: string | null;
+    resultManifest: Readonly<Record<string, JsonValue>>;
+  })[];
+  obligations: readonly (Omit<DomainObligation, "id" | "projectId"> & {
+    sourceId: string;
+    targetId: string;
+    targetProjectId: string | null;
+  })[];
+  obligationSettlements: readonly (Omit<DomainSettlement, "id" | "obligationId" | "ledgerEntryId"> & {
+    sourceId: string;
+    targetId: string;
+    targetObligationId: string;
+    targetLedgerEntryId: string | null;
+  })[];
+  storyNodes: readonly (Omit<DomainNode, "id" | "recordId" | "unlockEvidenceEventIds" | "unlockEvidence"> & {
+    sourceId: string;
+    targetId: string;
+    targetRecordId: string | null;
+    unlockEvidenceEventIds: readonly string[];
+    unlockEvidence: Readonly<Record<string, JsonValue>>;
+  })[];
+  storyUnlockLedger: readonly (Omit<DomainUnlock, "id" | "storyNodeInstanceId" | "idempotencyKey" | "recordId" | "evidenceEventIds" | "evidence"> & {
+    sourceId: string;
+    targetId: string;
+    targetStoryNodeInstanceId: string;
+    idempotencyKey: string;
+    targetRecordId: string | null;
+    evidenceEventIds: readonly string[];
+    evidence: Readonly<Record<string, JsonValue>>;
+  })[];
+  committedFactCommands: readonly (Omit<DomainFact, "id" | "resultManifest"> & {
+    sourceId: string;
+    targetId: string;
+    resultManifest: Readonly<Record<string, JsonValue>>;
+  })[];
+  performanceAssessments: readonly (Omit<DomainAssessment, "id" | "recordId" | "evidenceEventIds" | "commandId"> & {
+    sourceId: string;
+    targetId: string;
+    targetRecordId: string;
+    evidenceEventIds: readonly string[];
+    targetCommandId: string;
+  })[];
+  memberRelationshipRevisions: readonly (Omit<DomainRelationship, "id" | "sourceEventId" | "sourceRecordId" | "commandId"> & {
+    sourceId: string;
+    targetId: string;
+    targetSourceEventId: string;
+    targetSourceRecordId: string;
+    targetCommandId: string;
+  })[];
+  characterAssets: readonly (Omit<DomainAsset, "recordId" | "characterInstanceId"> & {
+    targetRecordId: string;
+    targetCharacterInstanceId: string;
+  })[];
+}
+
+function remapRequired(
+  map: ReadonlyMap<string, string>,
+  value: string,
+  field: string,
+): string {
+  const target = map.get(value);
+  if (!target) throw restoreFailure(`Runtime domain ${field} references an unknown identity.`);
+  return target;
+}
+
+function remapRecord(
+  value: string | null,
+  sourceRecordId: string,
+  targetRecordId: string,
+  field: string,
+): string | null {
+  if (value === null) return null;
+  if (value !== sourceRecordId) throw restoreFailure(`Runtime domain ${field} references another Record.`);
+  return targetRecordId;
+}
+
+function remapEvent(
+  value: string | null,
+  sourceToTargetEventId: ReadonlyMap<string, string>,
+  field: string,
+): string | null {
+  if (value === null) return null;
+  return remapRequired(sourceToTargetEventId, value, field);
+}
+
+function remapEventArray(
+  values: readonly string[],
+  sourceToTargetEventId: ReadonlyMap<string, string>,
+  field: string,
+): readonly string[] {
+  return values.map((value) => remapRequired(sourceToTargetEventId, value, field));
+}
+
+function rewriteDomainReferences(
+  value: JsonValue,
+  references: ReadonlyMap<string, string>,
+): JsonValue {
+  if (typeof value === "string") return references.get(value) ?? value;
+  if (Array.isArray(value)) return value.map((item) => rewriteDomainReferences(item, references));
+  if (typeof value !== "object" || value === null) return value;
+  const result: Record<string, JsonValue> = {};
+  for (const [key, child] of Object.entries(value)) {
+    result[key] = rewriteDomainReferences(child, references);
+  }
+  return result;
+}
+
+function normalizeRestoreDomain(
+  archive: RealmRuntimeSaveArchive,
+  token: string,
+  targetWorldId: string,
+  targetWorldlineId: string,
+  targetStoryId: string,
+  targetRecordId: string,
+  sourceToTargetEventId: ReadonlyMap<string, string>,
+  topology: NormalizedRestoreTopology,
+): NormalizedRestoreDomain | null {
+  const domain = archive.domain;
+  if (!domain) return null;
+  if (
+    domain.source.worldId !== archive.record.scope.worldId
+    || domain.source.worldlineId !== archive.record.scope.worldlineId
+    || domain.source.recordId !== archive.record.scope.recordId
+  ) {
+    throw restoreFailure("Runtime domain scope does not match the saved Record.");
+  }
+  if (domain.source.storyId.trim() === "") throw restoreFailure("Runtime domain Story identity is missing.");
+
+  const projectIds = new Map<string, string>();
+  const projects = domain.projects.map((project, index) => {
+    if (projectIds.has(project.id)) throw restoreFailure("Runtime domain project ids are duplicated.");
+    const targetId = `project_restore_${token}_${index}`;
+    projectIds.set(project.id, targetId);
+    return { ...project, sourceId: project.id, targetId };
+  });
+  const accountIds = new Map<string, string>();
+  const financeAccounts = domain.financeAccounts.map((account, index) => {
+    if (accountIds.has(account.id)) throw restoreFailure("Runtime domain finance account ids are duplicated.");
+    const targetId = `finance_account_restore_${token}_${index}`;
+    accountIds.set(account.id, targetId);
+    return { ...account, sourceId: account.id, targetId };
+  });
+  const referenceMap = new Map<string, string>([
+    ...projectIds,
+    ...accountIds,
+    ...sourceToTargetEventId,
+  ]);
+  referenceMap.set(archive.record.scope.recordId, targetRecordId);
+  topology.characterInstanceIds.forEach((value, key) => referenceMap.set(key, value));
+  const milestoneIds = new Map<string, string>();
+  const milestones = domain.milestones.map((milestone, index) => {
+    if (milestoneIds.has(milestone.id)) throw restoreFailure("Runtime domain milestone ids are duplicated.");
+    const targetId = `milestone_restore_${token}_${index}`;
+    milestoneIds.set(milestone.id, targetId);
+    referenceMap.set(milestone.id, targetId);
+    return {
+      ...milestone,
+      sourceId: milestone.id,
+      targetId,
+      targetProjectId: remapRequired(projectIds, milestone.projectId, "milestone.projectId"),
+      targetCompletionRecordId: remapRecord(
+        milestone.completionRecordId,
+        archive.record.scope.recordId,
+        targetRecordId,
+        "milestone.completionRecordId",
+      ),
+      targetCompletionEventId: remapEvent(milestone.completionEventId, sourceToTargetEventId, "milestone.completionEventId"),
+    };
+  });
+  const projectStoryLinks = domain.projectStoryLinks.map((link, index) => ({
+    ...link,
+    sourceId: link.id,
+    targetId: `project_story_link_restore_${token}_${index}`,
+    targetProjectId: remapRequired(projectIds, link.projectId, "projectStoryLink.projectId"),
+    targetStoryId: link.storyId === domain.source.storyId ? targetStoryId : (() => {
+      throw restoreFailure("Runtime domain project link references another Story.");
+    })(),
+  }));
+  const budgetAllocations = domain.budgetAllocations.map((budget, index) => ({
+    ...budget,
+    sourceId: budget.id,
+    targetId: `budget_restore_${token}_${index}`,
+    targetProjectId: remapRequired(projectIds, budget.projectId, "budget.projectId"),
+  }));
+  const ledgerIds = new Map<string, string>();
+  const ledgerEntries = domain.ledgerEntries.map((entry, index) => {
+    if (ledgerIds.has(entry.id)) throw restoreFailure("Runtime domain ledger ids are duplicated.");
+    const targetId = `ledger_restore_${token}_${index}`;
+    ledgerIds.set(entry.id, targetId);
+    return {
+      ...entry,
+      sourceId: entry.id,
+      targetId,
+      targetAccountId: remapRequired(accountIds, entry.accountId, "ledger.accountId"),
+      targetProjectId: entry.projectId === null ? null : remapRequired(projectIds, entry.projectId, "ledger.projectId"),
+      targetSourceRecordId: remapRecord(entry.sourceRecordId, archive.record.scope.recordId, targetRecordId, "ledger.sourceRecordId"),
+      targetSourceEventId: remapEvent(entry.sourceEventId, sourceToTargetEventId, "ledger.sourceEventId"),
+    };
+  });
+  ledgerIds.forEach((value, key) => referenceMap.set(key, value));
+  const financeGroupIds = new Map<string, string>();
+  const financeCommandGroups = domain.financeCommandGroups.map((group, index) => {
+    if (financeGroupIds.has(group.id)) throw restoreFailure("Runtime domain finance command ids are duplicated.");
+    const targetId = `finance_command_group_restore_${token}_${index}`;
+    financeGroupIds.set(group.id, targetId);
+    return {
+      ...group,
+      sourceId: group.id,
+      targetId,
+      targetSourceRecordId: remapRecord(group.sourceRecordId, archive.record.scope.recordId, targetRecordId, "financeCommandGroup.sourceRecordId"),
+      resultManifest: rewriteDomainReferences(group.resultManifest, referenceMap) as Readonly<Record<string, JsonValue>>,
+    };
+  });
+  const obligationIds = new Map<string, string>();
+  const obligations = domain.obligations.map((obligation, index) => {
+    if (obligationIds.has(obligation.id)) throw restoreFailure("Runtime domain obligation ids are duplicated.");
+    const targetId = `obligation_restore_${token}_${index}`;
+    obligationIds.set(obligation.id, targetId);
+    referenceMap.set(obligation.id, targetId);
+    return {
+      ...obligation,
+      sourceId: obligation.id,
+      targetId,
+      targetProjectId: obligation.projectId === null ? null : remapRequired(projectIds, obligation.projectId, "obligation.projectId"),
+    };
+  });
+  const obligationSettlements = domain.obligationSettlements.map((settlement, index) => ({
+    ...settlement,
+    sourceId: settlement.id,
+    targetId: `obligation_settlement_restore_${token}_${index}`,
+    targetObligationId: remapRequired(obligationIds, settlement.obligationId, "obligationSettlement.obligationId"),
+    targetLedgerEntryId: settlement.ledgerEntryId === null ? null : remapRequired(ledgerIds, settlement.ledgerEntryId, "obligationSettlement.ledgerEntryId"),
+  }));
+  const nodeIds = new Map<string, string>();
+  const storyNodes = domain.storyNodes.map((node) => {
+    const targetId = storyNodeInstanceIdFor({
+      workspaceId: archive.manifest.scope.workspaceId,
+      worldId: targetWorldId,
+      worldlineId: targetWorldlineId,
+      storyId: targetStoryId,
+    }, node.nodeKey);
+    if (nodeIds.has(node.id) || [...nodeIds.values()].includes(targetId)) throw restoreFailure("Runtime domain Story node ids are duplicated.");
+    nodeIds.set(node.id, targetId);
+    referenceMap.set(node.id, targetId);
+    return {
+      ...node,
+      sourceId: node.id,
+      targetId,
+      targetRecordId: remapRecord(node.recordId, archive.record.scope.recordId, targetRecordId, "storyNode.recordId"),
+      unlockEvidenceEventIds: remapEventArray(node.unlockEvidenceEventIds, sourceToTargetEventId, "storyNode.unlockEvidenceEventIds"),
+      unlockEvidence: rewriteDomainReferences(node.unlockEvidence, referenceMap) as Readonly<Record<string, JsonValue>>,
+    };
+  });
+  const unlockIds = new Map<string, string>();
+  const storyUnlockLedger = domain.storyUnlockLedger.map((ledger) => {
+    const targetNodeId = remapRequired(nodeIds, ledger.storyNodeInstanceId, "storyUnlockLedger.storyNodeInstanceId");
+    const targetId = storyUnlockLedgerIdFor(targetNodeId, ledger.transition, ledger.evidenceHash);
+    const idempotencyKey = storyUnlockIdempotencyKeyFor(targetNodeId, ledger.transition, ledger.evidenceHash);
+    if (unlockIds.has(ledger.id) || [...unlockIds.values()].includes(targetId)) throw restoreFailure("Runtime domain Story unlock ids are duplicated.");
+    unlockIds.set(ledger.id, targetId);
+    referenceMap.set(ledger.id, targetId);
+    return {
+      ...ledger,
+      sourceId: ledger.id,
+      targetId,
+      targetStoryNodeInstanceId: targetNodeId,
+      idempotencyKey,
+      targetRecordId: remapRecord(ledger.recordId, archive.record.scope.recordId, targetRecordId, "storyUnlockLedger.recordId"),
+      evidenceEventIds: remapEventArray(ledger.evidenceEventIds, sourceToTargetEventId, "storyUnlockLedger.evidenceEventIds"),
+      evidence: rewriteDomainReferences(ledger.evidence, referenceMap) as Readonly<Record<string, JsonValue>>,
+    };
+  });
+  const factIds = new Map<string, string>();
+  const committedFactCommands = domain.committedFactCommands.map((command, index) => {
+    if (factIds.has(command.id)) throw restoreFailure("Runtime domain fact command ids are duplicated.");
+    const targetId = `fact_command_restore_${token}_${index}`;
+    factIds.set(command.id, targetId);
+    return { ...command, sourceId: command.id, targetId, resultManifest: command.resultManifest };
+  });
+  factIds.forEach((value, key) => referenceMap.set(key, value));
+  const rewrittenFacts = committedFactCommands.map((command) => ({
+    ...command,
+    resultManifest: rewriteDomainReferences(command.resultManifest, referenceMap) as Readonly<Record<string, JsonValue>>,
+  }));
+  const assessmentIds = new Map<string, string>();
+  const performanceAssessments = domain.performanceAssessments.map((assessment, index) => {
+    if (assessmentIds.has(assessment.id)) throw restoreFailure("Runtime domain assessment ids are duplicated.");
+    const targetId = `performance_assessment_restore_${token}_${index}`;
+    assessmentIds.set(assessment.id, targetId);
+    return {
+      ...assessment,
+      sourceId: assessment.id,
+      targetId,
+      targetRecordId: remapRecord(assessment.recordId, archive.record.scope.recordId, targetRecordId, "performanceAssessment.recordId")!,
+      evidenceEventIds: remapEventArray(assessment.evidenceEventIds, sourceToTargetEventId, "performanceAssessment.evidenceEventIds"),
+      targetCommandId: remapRequired(factIds, assessment.commandId, "performanceAssessment.commandId"),
+    };
+  });
+  const memberRelationshipRevisions = domain.memberRelationshipRevisions.map((revision, index) => ({
+    ...revision,
+    sourceId: revision.id,
+    targetId: `member_relationship_revision_restore_${token}_${index}`,
+    targetSourceEventId: remapRequired(sourceToTargetEventId, revision.sourceEventId, "memberRelationshipRevision.sourceEventId"),
+    targetSourceRecordId: remapRecord(revision.sourceRecordId, archive.record.scope.recordId, targetRecordId, "memberRelationshipRevision.sourceRecordId")!,
+    targetCommandId: remapRequired(factIds, revision.commandId, "memberRelationshipRevision.commandId"),
+  }));
+  const characterAssets = domain.characterAssets.map((asset) => ({
+    ...asset,
+    targetRecordId: remapRecord(asset.recordId, archive.record.scope.recordId, targetRecordId, "characterAsset.recordId")!,
+    targetCharacterInstanceId: remapRequired(topology.characterInstanceIds, asset.characterInstanceId, "characterAsset.characterInstanceId"),
+  }));
+  return {
+    projects,
+    milestones,
+    projectStoryLinks,
+    budgetAllocations,
+    financeAccounts,
+    ledgerEntries,
+    financeCommandGroups,
+    obligations,
+    obligationSettlements,
+    storyNodes,
+    storyUnlockLedger,
+    committedFactCommands: rewrittenFacts,
+    performanceAssessments,
+    memberRelationshipRevisions,
+    characterAssets,
+  };
+}
+
 interface RestoredGoalInstance {
   sourceId: string;
+  sourcePolicyVersion: string;
   targetId: string;
   goalKey: string;
   state: string;
@@ -1593,15 +2548,24 @@ interface RestoredGoalInstance {
   progress: Readonly<Record<string, JsonValue>>;
   outcome: Readonly<Record<string, JsonValue>> | null;
   policyVersion: string;
+  definitionSource: 'content'|'record';
+  definitionId: string|null;
+  resolutionKind: string;
+  evidenceStartVersion: number;
+  evidenceStartOrdinal: number;
+  attempt: number;
+  supersedesInstanceId: string|null;
+  definitionVersion: number;
 }
 
 function normalizeGoalInstances(
   archive: RealmRuntimeSaveArchive,
   token: string,
+  definitions:readonly RecordGoalDefinitionVersion[],
 ): RestoredGoalInstance[] {
   const ids = new Set<string>();
   const goalKeys = new Set<string>();
-  return archive.goals.instances.map((raw, index) => {
+  const rows=archive.goals.instances.map((raw, index) => {
     const row = restoreObject(raw, `goals.instances[${index}]`);
     const sourceId = restoreString(row, "id", { nonEmpty: true });
     const goalKey = restoreString(row, "goalKey", { nonEmpty: true });
@@ -1613,9 +2577,12 @@ function normalizeGoalInstances(
     ids.add(sourceId);
     goalKeys.add(goalKey);
     const outcomeValue = row.outcome;
+    const definition=row.definitionSource==='record'?definitions.find(item=>item.goalKey===goalKey):null;
+    if(row.definitionSource==='record' && !definition) throw restoreFailure('The native Goal definition binding is missing.');
     return {
       sourceId,
-      targetId: `goal_restore_${token}_${index}`,
+      sourcePolicyVersion:policyVersion,
+      targetId: definition?.goalInstanceId ?? `goal_restore_${token}_${index}`,
       goalKey,
       state,
       revision: restoreInteger(row, "revision", 0),
@@ -1623,9 +2590,30 @@ function normalizeGoalInstances(
       outcome: outcomeValue === null || outcomeValue === undefined
         ? null
         : restoreObject(outcomeValue, `goals.instances[${index}].outcome`),
-      policyVersion,
+      policyVersion:definition?.policyVersion ?? policyVersion,
+      definitionSource:definition?'record' as const:'content' as const,
+      definitionId:definition?.definitionId ?? null,
+      resolutionKind:definition?restoreString(row,'resolutionKind'):'natural',
+      evidenceStartVersion:definition?.activationHead.recordVersion ?? 0,
+      evidenceStartOrdinal:definition?.activationHead.ordinal ?? 0,
+      attempt:definition?restoreInteger(row,'attempt',1):1,
+      supersedesInstanceId:null as string|null,
+      definitionVersion:definition?.definitionVersion ?? 0,
     };
   });
+  const bySource=new Map(rows.map(row=>[row.sourceId,row]));
+  const sourceDefinitions=(archive.goals.definitions??[]).map(decodeRecordGoalDefinition);
+  for(const [index,raw] of archive.goals.instances.entries()) {
+    const row=restoreObject(raw,`goals.instances[${index}]`);const target=rows[index];
+    if(target.definitionSource!=='record') continue;
+    const sourceDefinition=sourceDefinitions.find(item=>item.goalKey===target.goalKey)!;
+    const previousDefinition=sourceDefinitions.find(item=>item.definitionId===sourceDefinition.supersedesDefinitionId);
+    const previousId=row.supersedesInstanceId;
+    if((previousDefinition?.goalInstanceId ?? null)!==(previousId ?? null)) throw restoreFailure('The native Goal predecessor binding is invalid.');
+    target.supersedesInstanceId=previousId===null||previousId===undefined?null:bySource.get(previousId as string)?.targetId??null;
+    if(previousId && !target.supersedesInstanceId) throw restoreFailure('The native Goal predecessor is outside the saved history.');
+  }
+  return rows;
 }
 
 function normalizeAssessmentRows(
@@ -1646,14 +2634,15 @@ function normalizeAssessmentRows(
   evidenceSnapshotHash: string;
   policyVersion: string;
 }[] {
-  const goalBySource = new Map(goals.map((goal) => [goal.sourceId, goal.targetId]));
+  const goalBySource = new Map(goals.map((goal) => [goal.sourceId, goal]));
   return archive.goals.assessments.map((raw, index) => {
     const row = restoreObject(raw, `goals.assessments[${index}]`);
     const sourceGoalId = restoreString(row, "goalInstanceId", { nonEmpty: true });
     const sourceEventId = restoreString(row, "sourceEventId", { nonEmpty: true });
     const source = restoreString(row, "source", { nonEmpty: true });
     const status = restoreString(row, "status", { nonEmpty: true });
-    const mappedGoalId = goalBySource.get(sourceGoalId);
+    const boundGoal=goalBySource.get(sourceGoalId);
+    const mappedGoalId = boundGoal?.targetId;
     const mappedSourceEventId = eventIds.get(sourceEventId);
     if (
       !mappedGoalId
@@ -1681,6 +2670,9 @@ function normalizeAssessmentRows(
     if (RESTORE_HASH.test(evidenceSnapshotHash) === false) {
       throw restoreFailure("Runtime Goal assessment evidence hash is invalid.");
     }
+    const sourcePolicyVersion=restoreString(row,'policyVersion',{nonEmpty:true});
+    if(boundGoal!.definitionSource==='record'&&sourcePolicyVersion!==boundGoal!.sourcePolicyVersion)
+      throw restoreFailure('Native assessment policy does not match its immutable saved Goal.');
     return {
       id: `assessment_restore_${token}_${index}`,
       goalInstanceId: mappedGoalId,
@@ -1692,7 +2684,7 @@ function normalizeAssessmentRows(
       evidenceHeadVersion,
       evidenceHeadOrdinal,
       evidenceSnapshotHash,
-      policyVersion: restoreString(row, "policyVersion", { nonEmpty: true }),
+      policyVersion: boundGoal!.definitionSource==='record'?boundGoal!.policyVersion:sourcePolicyVersion,
     };
   });
 }
@@ -2235,7 +3227,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
       // 写入（含幂等重放短路）之前 fail-closed。版本在事务外预读、事务内
       // FOR KEY SHARE 复核，漂移即 RESTORE_CONFLICT。
       let upgradeTargetBinding: RealmRuntimeSaveWorldBinding | null = null;
-      if (input.archive.manifest.mode === "base") {
+      if (input.archive.manifest.mode === "base" && !input.branch) {
         // 预读在独立只读 workspace 事务内执行（RLS GUC 作用域要求）。
         const preWorld = await withWorkspaceTransaction(
           database,
@@ -2273,17 +3265,29 @@ export function createPostgresRealmRuntimeSaveRestorer(
           }
         }
       }
-      const token = restoreIdempotencyToken(input, targetWorldId);
-      const targetRecordId = `record_restore_${token}`;
-      const targetWorldlineId = `worldline_restore_${token}`;
-      const targetStoryId = `story_restore_${token}`;
+      const token = input.branch?createHash('sha256').update(`${input.workspaceId}:${input.branch.sourceRecordId}:${input.idempotencyKey}`).digest('hex').slice(0,18):restoreIdempotencyToken(input, targetWorldId);
+      const namespace=input.branch?'branch':'restore';
+      const targetRecordId = `record_${namespace}_${token}`;
+      const targetWorldlineId = `worldline_${namespace}_${token}`;
+      const targetStoryId = `story_${namespace}_${token}`;
+      if(input.branch && (input.branch.sourceRecordId!==input.archive.record.scope.recordId || input.branch.sourceWorldlineId!==input.archive.record.scope.worldlineId
+        || targetWorldId!==input.archive.record.scope.worldId))throw restoreFailure('Branch snapshot source scope is invalid.');
       const targetNarratorParticipantId = `participant_restore_${token}`;
       const events = normalizeRestoreEvents(input.archive);
       const topology = normalizeRestoreTopology(input.archive, token, events);
       const sourceToTargetEventId = new Map(
         events.map((event, index) => [event.eventId, `restore_event_${token}_${index}`]),
       );
-      const goals = normalizeGoalInstances(input.archive, token);
+      const definitions=rebaseRecordGoalDefinitions({definitions:input.archive.goals.definitions??[],
+        scope:{workspaceId:input.workspaceId,worldId:targetWorldId,worldlineId:targetWorldlineId,recordId:targetRecordId},eventIds:sourceToTargetEventId});
+      const goals = normalizeGoalInstances(input.archive, token,definitions);
+      const targetScope={workspaceId:input.workspaceId,worldId:targetWorldId,worldlineId:targetWorldlineId,recordId:targetRecordId};
+      const sourceScope={workspaceId:input.archive.manifest.scope.workspaceId,...input.archive.record.scope};
+      const goalReferences=new Map(goals.map(goal=>[goal.sourceId,goal.targetId]));
+      for(const raw of input.archive.goals.definitions??[]) {
+        const source=decodeRecordGoalDefinition(raw);const target=definitions.find(item=>item.goalKey===source.goalKey)!;
+        goalReferences.set(source.definitionId,target.definitionId);goalReferences.set(source.policyVersion,target.policyVersion);
+      }
       const assessments = normalizeAssessmentRows(
         input.archive,
         goals,
@@ -2329,6 +3333,16 @@ export function createPostgresRealmRuntimeSaveRestorer(
       const outboxMessages = normalizeRestoreOutbox(input.archive, sourceToTargetEventId, token);
       const firstNight = normalizeRestoreFirstNight(input.archive);
       const selfPlaySessions = normalizeRestoreSelfPlay(input.archive, token);
+      const domain = normalizeRestoreDomain(
+        input.archive,
+        token,
+        targetWorldId,
+        targetWorldlineId,
+        targetStoryId,
+        targetRecordId,
+        sourceToTargetEventId,
+        topology,
+      );
       const warnings: readonly ["WORLD_VERSION_MISMATCH"] | readonly [] = [];
 
       return withWorkspaceTransaction(database, input.workspaceId, async (client) => {
@@ -2359,7 +3373,9 @@ export function createPostgresRealmRuntimeSaveRestorer(
         if (role !== "owner" && role !== "player") {
           throw new RealmRuntimeSaveRepositoryError("WORLD_NOT_FOUND", "World not found.");
         }
-        if (input.archive.manifest.mode === "base" && world.world_version !== LOCAL_WORLD_VERSION) {
+        if((definitions.length||input.branch) && role!=='owner')throw new RealmRuntimeSaveRepositoryError('WORLD_READ_ONLY','Native Goal restoration requires world ownership.');
+        if((definitions.length||input.branch) && !input.sessionProof) throw restoreFailure('A verified owner restore proof is required for native Goals.');
+        if (input.archive.manifest.mode === "base" && world.world_version !== LOCAL_WORLD_VERSION && !input.branch) {
           // 升级路径：仅当事务外预读的 binding 与本事务锁定读一致才允许；
           // 版本漂移 fail-closed（RESTORE_CONFLICT），绝不绑定未验证版本。
           if (
@@ -2401,7 +3417,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
           if (row.world_id !== targetWorldId || row.worldline_id !== targetWorldlineId || row.story_id !== targetStoryId) {
             throw new RealmRuntimeSaveRepositoryError("RESTORE_ID_COLLISION", "Restore identity collides with another Record.");
           }
-          if (row.story_premise !== `realm-save:${input.archive.manifest.snapshot.runtimeHash}`) {
+          if (row.story_premise !== (input.branch?.premise??`realm-save:${input.archive.manifest.snapshot.runtimeHash}`)) {
             throw new RealmRuntimeSaveRepositoryError(
               "RESTORE_CONFLICT",
               "The restore idempotency key is already bound to another archive.",
@@ -2425,6 +3441,14 @@ export function createPostgresRealmRuntimeSaveRestorer(
             importedOutboxMessageCount: outboxMessages.length,
             importedFirstNightCount: firstNight ? 1 : 0,
             importedSelfPlaySessionCount: selfPlaySessions.length,
+            importedDomainProjectCount: domain?.projects.length ?? 0,
+            importedDomainLedgerEntryCount: domain?.ledgerEntries.length ?? 0,
+            importedDomainStoryNodeCount: domain?.storyNodes.length ?? 0,
+            importedDomainUnlockCount: domain?.storyUnlockLedger.length ?? 0,
+            importedDomainFactCommandCount: domain?.committedFactCommands.length ?? 0,
+            importedDomainAssessmentCount: domain?.performanceAssessments.length ?? 0,
+            importedDomainRelationshipRevisionCount: domain?.memberRelationshipRevisions.length ?? 0,
+            importedDomainAssetCount: domain?.characterAssets.length ?? 0,
             warnings: effectiveWarnings,
             replayed: true,
           };
@@ -2459,18 +3483,26 @@ export function createPostgresRealmRuntimeSaveRestorer(
         if (events.length > 0 && recordVersion <= 0) {
           throw restoreFailure("Runtime Record head version is invalid for a non-empty save.");
         }
+        if(definitions.length||input.branch) {
+          const admitted=input.branch?await client.query<{actor:string}>(`SELECT record_goal_branch_prepare($1,$2,$3,$4,$5,$6) AS actor`,
+            [input.workspaceId,input.sessionProof,input.branch.sourceRecordId,token,input.archive.manifest.snapshot.runtimeHash,recordVersion])
+            :await client.query<{actor:string}>(`SELECT record_goal_restore_prepare($1,$2,$3,$4,$5,$6) AS actor`,
+              [input.workspaceId,input.sessionProof,targetWorldId,targetWorldlineId,targetRecordId,input.archive.manifest.snapshot.runtimeHash]);
+          if(admitted.rows[0]?.actor!==input.principalId) throw restoreFailure('The native Goal restore actor does not match the proof.');
+        }
         await client.query(
           `INSERT INTO worldlines (
              workspace_id, world_id, id, label, status,
              parent_worldline_id, fork_tick, fork_ordinal, head_tick, head_ordinal
-           ) VALUES ($1, $2, $3, $4, 'active', NULL, NULL, NULL, $5, $6)`,
+           ) VALUES ($1, $2, $3, $4, 'active', $7, $8, $9, $5, $6)`,
           [
             input.workspaceId,
             targetWorldId,
             targetWorldlineId,
-            restoreTitle(undefined, "Restored runtime save"),
+            restoreTitle(input.branch?.label, "Restored runtime save"),
             cursor?.tick ?? 0,
             cursor?.ordinal ?? 0,
+            input.branch?.sourceWorldlineId??null,input.branch?.fork.tick??null,input.branch?.fork.ordinal??null,
           ],
         );
         await client.query(
@@ -2484,7 +3516,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
             targetWorldlineId,
             targetStoryId,
             restoreTitle(input.storyTitle, "Restored story"),
-            `realm-save:${input.archive.manifest.snapshot.runtimeHash}`,
+            input.branch?.premise??`realm-save:${input.archive.manifest.snapshot.runtimeHash}`,
           ],
         );
         // Phase 4D：恢复出的 Record 绑定=存档 manifest 记录的制作版本
@@ -2499,7 +3531,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
              workspace_id, world_id, worldline_id, story_id, id, title,
              status, start_tick, start_ordinal, timeline_kind, linked_record_id,
              world_version
-           ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 'primary', NULL, $7)`,
+           ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $8, $9, $10, $11, $7)`,
           [
             input.workspaceId,
             targetWorldId,
@@ -2508,6 +3540,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
             targetRecordId,
             restoreTitle(input.recordTitle, "Restored Record"),
             restoredWorldVersion,
+            input.branch?.fork.tick??0,input.branch?.fork.ordinal??0,input.branch?'branch':'primary',input.branch?.sourceRecordId??null,
           ],
         );
         const targetInstanceBySource = topology.characterInstanceIds;
@@ -2692,7 +3725,18 @@ export function createPostgresRealmRuntimeSaveRestorer(
           if (!targetSceneId || !targetVisibilityPolicyId) {
             throw restoreFailure("Runtime event topology mapping is incomplete.");
           }
-          const payload = rewriteEvidenceReferences(event.eventPayload, sourceToTargetEventId);
+          const rewritten = rewriteGoalReferences(rewriteEvidenceReferences(event.eventPayload, sourceToTargetEventId),goalReferences);
+          const payload=restoreObject(rewritten,'event.payload');
+          const body=restoreObject(payload.__realmRuntimePayload??payload,'event.runtimePayload');
+          let storedPayload:JsonValue=payload;
+          if(body.narrativeState!==undefined) {
+            if(event.kind!=='narration.committed'||body.role!=='narrator')throw restoreFailure('Narrative restore authority is invalid.');
+            const original=restoreObject(event.eventPayload,'event.original');
+            const originalBody=restoreObject(original.__realmRuntimePayload??original,'event.originalRuntimePayload');
+            const state=rebaseNarrativeState({state:originalBody.narrativeState,sourceScope,targetScope,eventIds:sourceToTargetEventId});
+            const nextBody={...body,narrativeState:state as unknown as JsonValue};
+            storedPayload=payload.__realmRuntimePayload?{...payload,__realmRuntimePayload:nextBody}:nextBody;
+          }
           await client.query(
             `INSERT INTO events (
                workspace_id, world_id, worldline_id, record_id, scene_id, id,
@@ -2716,7 +3760,7 @@ export function createPostgresRealmRuntimeSaveRestorer(
               targetActorParticipantId ?? null,
               event.speakerName,
               event.content,
-              JSON.stringify(payload),
+              JSON.stringify(storedPayload),
               targetVisibilityPolicyId,
               event.worldTick,
               event.worldOrdinal,
@@ -2749,13 +3793,20 @@ export function createPostgresRealmRuntimeSaveRestorer(
           ],
         );
 
-        for (const goal of goals) {
+        if(events.some(event=>{
+          const body=restoreObject(event.eventPayload,'event.payload');const inner=restoreObject(body.__realmRuntimePayload??body,'event.runtimePayload');
+          return inner.narrativeState!==undefined;
+        })) await rebuildRecordNarrativeState(client,targetScope);
+        if(definitions.length) await client.query(`SELECT record_goal_restore_definitions($1,$2,$3,$4::jsonb)`,
+          [input.workspaceId,input.sessionProof,targetRecordId,JSON.stringify(definitions)]);
+        for (const goal of [...goals].sort((a,b)=>a.definitionVersion-b.definitionVersion)) {
           await client.query(
             `INSERT INTO goal_instances (
                workspace_id, world_id, worldline_id, record_id, id, goal_key,
-               state, revision, progress, outcome, policy_version, completed_at
+               state, revision, progress, outcome, policy_version, completed_at,
+               definition_source,definition_id,resolution_kind,evidence_start_version,evidence_start_ordinal,attempt,supersedes_instance_id
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11,
-                       CASE WHEN $7 = 'active' THEN NULL ELSE CURRENT_TIMESTAMP END)`,
+                       CASE WHEN $7 = 'active' THEN NULL ELSE CURRENT_TIMESTAMP END,$12,$13,$14,$15,$16,$17,$18)`,
             [
               input.workspaceId,
               targetWorldId,
@@ -2768,6 +3819,8 @@ export function createPostgresRealmRuntimeSaveRestorer(
               JSON.stringify(goal.progress),
               goal.outcome === null ? null : JSON.stringify(goal.outcome),
               goal.policyVersion,
+              goal.definitionSource,goal.definitionId,goal.resolutionKind,goal.evidenceStartVersion,goal.evidenceStartOrdinal,
+              goal.attempt,goal.supersedesInstanceId,
             ],
           );
         }
@@ -3068,6 +4121,346 @@ export function createPostgresRealmRuntimeSaveRestorer(
           );
         }
 
+        if (domain) {
+          for (const project of domain.projects) {
+            await client.query(
+              `INSERT INTO projects (
+                 workspace_id, world_id, worldline_id, id, kind, status, stage,
+                 title, currency, deadline, owner_id, version
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                project.targetId,
+                project.kind,
+                project.status,
+                project.stage,
+                project.title,
+                project.currency,
+                project.deadline,
+                project.version,
+              ],
+            );
+          }
+          for (const account of domain.financeAccounts) {
+            await client.query(
+              `INSERT INTO finance_accounts (
+                 workspace_id, world_id, worldline_id, id, currency, status,
+                 opening_balance_minor
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                account.targetId,
+                account.currency,
+                account.status,
+                account.openingBalanceMinor,
+              ],
+            );
+          }
+          for (const link of domain.projectStoryLinks) {
+            await client.query(
+              `INSERT INTO project_story_links (
+                 workspace_id, world_id, worldline_id, id, project_id, story_id, link_kind
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                link.targetId,
+                link.targetProjectId,
+                link.targetStoryId,
+                link.linkKind,
+              ],
+            );
+          }
+          for (const budget of domain.budgetAllocations) {
+            await client.query(
+              `INSERT INTO budget_allocations (
+                 workspace_id, world_id, worldline_id, id, project_id, category,
+                 amount_minor, currency, version
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                budget.targetId,
+                budget.targetProjectId,
+                budget.category,
+                budget.amountMinor,
+                budget.currency,
+                budget.version,
+              ],
+            );
+          }
+          for (const group of domain.financeCommandGroups) {
+            await client.query(
+              `INSERT INTO project_finance_command_groups (
+                 workspace_id, world_id, worldline_id, id, idempotency_key,
+                 request_fingerprint, state, result_manifest, rejection_code,
+                 policy_version, source_record_id, completed_at
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
+                         CASE WHEN $7 = 'committed' THEN CURRENT_TIMESTAMP ELSE NULL END)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                group.targetId,
+                group.idempotencyKey,
+                group.requestFingerprint,
+                group.state,
+                JSON.stringify(group.resultManifest),
+                group.rejectionCode,
+                group.policyVersion,
+                group.targetSourceRecordId,
+              ],
+            );
+          }
+          for (const ledger of domain.ledgerEntries) {
+            await client.query(
+              `INSERT INTO ledger_entries (
+                 workspace_id, world_id, worldline_id, id, account_id, kind,
+                 direction, amount_minor, currency, category, memo, project_id,
+                 source_record_id, source_event_id, occurred_at, idempotency_key
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                         $13, $14, $15::timestamptz, $16)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                ledger.targetId,
+                ledger.targetAccountId,
+                ledger.kind,
+                ledger.direction,
+                ledger.amountMinor,
+                ledger.currency,
+                ledger.category,
+                ledger.memo,
+                ledger.targetProjectId,
+                ledger.targetSourceRecordId,
+                ledger.targetSourceEventId,
+                ledger.occurredAt,
+                ledger.idempotencyKey,
+              ],
+            );
+          }
+          for (const obligation of domain.obligations) {
+            await client.query(
+              `INSERT INTO obligations (
+                 workspace_id, world_id, worldline_id, id, project_id, kind,
+                 status, principal_minor, outstanding_minor, share_bps,
+                 undelivered_count, due_on, version
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                obligation.targetId,
+                obligation.targetProjectId,
+                obligation.kind,
+                obligation.status,
+                obligation.principalMinor,
+                obligation.outstandingMinor,
+                obligation.shareBps,
+                obligation.undeliveredCount,
+                obligation.dueOn,
+                obligation.version,
+              ],
+            );
+          }
+          for (const settlement of domain.obligationSettlements) {
+            await client.query(
+              `INSERT INTO obligation_settlements (
+                 workspace_id, world_id, worldline_id, id, obligation_id,
+                 ledger_entry_id, kind, amount_minor
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                settlement.targetId,
+                settlement.targetObligationId,
+                settlement.targetLedgerEntryId,
+                settlement.kind,
+                settlement.amountMinor,
+              ],
+            );
+          }
+          for (const milestone of domain.milestones) {
+            await client.query(
+              `INSERT INTO project_milestones (
+                 workspace_id, world_id, worldline_id, id, project_id, sequence,
+                 title, status, due_on, completion_record_id, completion_event_id
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                milestone.targetId,
+                milestone.targetProjectId,
+                milestone.sequence,
+                milestone.title,
+                milestone.status,
+                milestone.dueOn,
+                milestone.targetCompletionRecordId,
+                milestone.targetCompletionEventId,
+              ],
+            );
+          }
+          for (const node of domain.storyNodes) {
+            await client.query(
+              `INSERT INTO story_node_instances (
+                 workspace_id, world_id, worldline_id, story_id, node_key, id,
+                 state, revision, record_id, definition_hash,
+                 unlock_evidence_event_ids, unlock_evidence, unlocked_at, activated_at
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text[],
+                         $12::jsonb,
+                         CASE WHEN $7 = 'locked' THEN NULL ELSE CURRENT_TIMESTAMP END,
+                         CASE WHEN $7 = 'locked' THEN NULL ELSE CURRENT_TIMESTAMP END)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                targetStoryId,
+                node.nodeKey,
+                node.targetId,
+                node.state,
+                node.revision,
+                node.targetRecordId,
+                node.definitionHash,
+                [...node.unlockEvidenceEventIds],
+                JSON.stringify(node.unlockEvidence),
+              ],
+            );
+          }
+          for (const unlock of domain.storyUnlockLedger) {
+            await client.query(
+              `INSERT INTO story_unlock_ledger (
+                 workspace_id, world_id, worldline_id, story_id, id,
+                 story_node_instance_id, node_key, transition, idempotency_key,
+                 record_id, evidence_event_ids, evidence_hash, evidence
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text[], $12, $13::jsonb)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                targetStoryId,
+                unlock.targetId,
+                unlock.targetStoryNodeInstanceId,
+                unlock.nodeKey,
+                unlock.transition,
+                unlock.idempotencyKey,
+                unlock.targetRecordId,
+                [...unlock.evidenceEventIds],
+                unlock.evidenceHash,
+                JSON.stringify(unlock.evidence),
+              ],
+            );
+          }
+          for (const command of domain.committedFactCommands) {
+            await client.query(
+              `INSERT INTO committed_fact_commands (
+                 workspace_id, world_id, worldline_id, id, idempotency_key,
+                 request_fingerprint, kind, result_manifest
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                command.targetId,
+                command.idempotencyKey,
+                command.requestFingerprint,
+                command.kind,
+                JSON.stringify(command.resultManifest),
+              ],
+            );
+          }
+          for (const assessment of domain.performanceAssessments) {
+            await client.query(
+              `INSERT INTO performance_assessments (
+                 workspace_id, world_id, worldline_id, record_id, id,
+                 policy_version, score, evidence_event_ids,
+                 evidence_snapshot_hash, command_id
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text[], $9, $10)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                assessment.targetRecordId,
+                assessment.targetId,
+                assessment.policyVersion,
+                assessment.score,
+                [...assessment.evidenceEventIds],
+                assessment.evidenceSnapshotHash,
+                assessment.targetCommandId,
+              ],
+            );
+          }
+          for (const revision of domain.memberRelationshipRevisions) {
+            await client.query(
+              `INSERT INTO member_relationship_revisions (
+                 workspace_id, world_id, worldline_id, id, subject_entity_key,
+                 object_entity_key, relation_kind, revision_ordinal,
+                 source_event_id, source_record_id, occurred_tick, occurred_ordinal,
+                 command_id
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                revision.targetId,
+                revision.subjectEntityKey,
+                revision.objectEntityKey,
+                revision.relationKind,
+                revision.revisionOrdinal,
+                revision.targetSourceEventId,
+                revision.targetSourceRecordId,
+                revision.occurredTick,
+                revision.occurredOrdinal,
+                revision.targetCommandId,
+              ],
+            );
+          }
+          for (const asset of domain.characterAssets) {
+            // A base save may be explicitly upgraded to another World. Its
+            // database ids are not content identities; resolve a carried key
+            // only inside the already authorized target World. Legacy archives
+            // remain id-bound and never guess a key from an id or source DB.
+            const definition = await client.query<{ id: string }>(
+              `SELECT id FROM asset_definitions
+               WHERE workspace_id = $1 AND world_id = $2
+                 AND (($3::text IS NOT NULL AND asset_key = $3)
+                   OR ($3::text IS NULL AND id = $4))`,
+              [input.workspaceId, targetWorldId, asset.assetKey ?? null, asset.assetDefinitionId],
+            );
+            if (definition.rowCount !== 1) {
+              throw new RealmRuntimeSaveRepositoryError(
+                "RESTORE_INVALID_TARGET",
+                "The target World lacks a restored asset definition.",
+              );
+            }
+            await client.query(
+              `INSERT INTO character_assets (
+                 workspace_id, world_id, worldline_id, record_id,
+                 character_instance_id, asset_definition_id, quantity, revision, metadata
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+              [
+                input.workspaceId,
+                targetWorldId,
+                targetWorldlineId,
+                asset.targetRecordId,
+                asset.targetCharacterInstanceId,
+                definition.rows[0]!.id,
+                asset.quantity,
+                asset.revision,
+                JSON.stringify(asset.metadata),
+              ],
+            );
+          }
+        }
+
         return {
           worldId: targetWorldId,
           worldVersion: world.world_version,
@@ -3086,6 +4479,14 @@ export function createPostgresRealmRuntimeSaveRestorer(
           importedOutboxMessageCount: outboxMessages.length,
           importedFirstNightCount: firstNight ? 1 : 0,
           importedSelfPlaySessionCount: selfPlaySessions.length,
+          importedDomainProjectCount: domain?.projects.length ?? 0,
+          importedDomainLedgerEntryCount: domain?.ledgerEntries.length ?? 0,
+          importedDomainStoryNodeCount: domain?.storyNodes.length ?? 0,
+          importedDomainUnlockCount: domain?.storyUnlockLedger.length ?? 0,
+          importedDomainFactCommandCount: domain?.committedFactCommands.length ?? 0,
+          importedDomainAssessmentCount: domain?.performanceAssessments.length ?? 0,
+          importedDomainRelationshipRevisionCount: domain?.memberRelationshipRevisions.length ?? 0,
+          importedDomainAssetCount: domain?.characterAssets.length ?? 0,
           warnings: effectiveWarnings,
           replayed: false,
         };

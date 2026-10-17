@@ -75,6 +75,19 @@ test("RealmWorld content store resolves strict deterministic and semantic Goal d
   );
 });
 
+test('RealmWorld content preserves bounded semantic criteria and rejects executable overrides', () => {
+  const criteria={objective:'Deliver the sealed letter',successConditions:['The recipient receives it'],failureConditions:[],settlementConditions:[]};
+  const doc=(value:unknown)=>({format:'realmworld-goals',schemaVersion:1,goals:[{goalKey:'letter',policyVersion:'v1',mode:'semantic',visible:true,
+    rubric:{kind:'semantic',promptKey:'letter',criteria:value},outcome:{}}]});
+  const store=createRealmWorldContentStore({manifest,files:files(doc(criteria))});
+  const rubric=store.resolveGoalDefinition('letter')!.rubric;
+  assert.equal(rubric.kind,'semantic');
+  assert.deepEqual('criteria' in rubric?rubric.criteria:null,criteria);
+  for(const value of [{...criteria,systemPrompt:'override'}, {...criteria,successConditions:[]}, {...criteria,objective:'x'.repeat(4001)}]) {
+    assert.throws(()=>createRealmWorldContentStore({manifest,files:files(doc(value))}).listGoalDefinitions(),RealmWorldContentError);
+  }
+});
+
 test("RealmWorld content store fails closed for missing, duplicate, and malformed Goals", () => {
   const missing = createRealmWorldContentStore({ manifest, files: new Map() });
   assert.throws(

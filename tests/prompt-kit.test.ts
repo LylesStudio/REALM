@@ -90,3 +90,15 @@ test("json output instruction renders object arrays, nested objects and nullable
   assert.match(instruction, /"recipientId": string or null — addressee id/);
   assert.match(instruction, /"triggerKind"\?: "greeting" or null — omit or null when silent/);
 });
+
+test('required nullable output keys are explicitly required, never confused with optional fields',()=>{
+  const instruction=jsonOutputInstruction([
+    {name:'decision',kind:'enum',values:['continue','complete']},
+    {name:'outcome',kind:'object',nullable:true},
+    {name:'optionalNote',kind:'string',required:false,nullable:true},
+  ]);
+  assert.match(instruction,/Required fields: "decision", "outcome"\./);
+  assert.match(instruction,/nullable does not mean optional/);
+  assert.match(instruction,/Only fields marked with \? are optional/);
+  assert.ok(!instruction.includes('Required fields: "decision", "outcome", "optionalNote"'));
+});

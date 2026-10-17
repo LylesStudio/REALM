@@ -10,6 +10,8 @@ import {
   type GoalTransition,
 } from "./public.ts";
 import type { JsonValue } from "../runtime/public.ts";
+import type { GoalEvolutionPlanner } from "./model-evolution.ts";
+import { decodeRecordGoalDefinition, planRecordGoalReplacement, planRecordGoalSuccessor, type RecordGoalEvolutionPlan } from "./record-authoring.ts";
 
 export interface GoalAssessmentJob {
   jobId: string;
@@ -37,6 +39,8 @@ export interface GoalAssessmentContext {
 export type GoalAssessmentDecision =
   | {
       status: "accepted";
+      definitionVisible?: boolean;
+      evolution?: RecordGoalEvolutionPlan;
       source: "deterministic" | "judge";
       policyVersion: string;
       observedHead: { recordVersion: number; ordinal: number };
@@ -56,7 +60,7 @@ export type GoalAssessmentDecision =
 
 export interface GoalAssessmentJobRepository {
   claimNext(input: { now: string }): Promise<ClaimedGoalAssessmentJob | null>;
-  loadContext(job: ClaimedGoalAssessmentJob): Promise<GoalAssessmentContext>;
+  loadContext(job: ClaimedGoalAssessmentJob, definition?: GoalDefinition): Promise<GoalAssessmentContext>;
   settle(input: {
     job: ClaimedGoalAssessmentJob;
     decision: GoalAssessmentDecision;
@@ -87,6 +91,7 @@ export async function runGoalAssessmentOnce(input: {
   repository: GoalAssessmentJobRepository;
   resolveDefinition: (job: ClaimedGoalAssessmentJob) => Promise<GoalDefinition | null>;
   judge?: GoalJudge;
+  evolutionPlanner?: GoalEvolutionPlanner;
   now: string;
 }): Promise<GoalAssessmentRunReport> {
   const job = await input.repository.claimNext({ now: input.now });
@@ -114,7 +119,7 @@ export async function runGoalAssessmentOnce(input: {
 
   let context: GoalAssessmentContext;
   try {
-    context = await input.repository.loadContext(job);
+    context = await input.repository.loadContext(job, definition);
   } catch {
     await input.repository.fail({ job, code: "GOAL_CONTEXT_LOAD_FAILED", now: input.now });
     return { kind: "failed", code: "GOAL_CONTEXT_LOAD_FAILED" };
@@ -123,6 +128,7 @@ export async function runGoalAssessmentOnce(input: {
   if (definition.mode === "deterministic") {
     const evaluation = evaluateDeterministicGoal({ definition, ...context });
     const decision = deterministicDecision(evaluation, definition.policyVersion, context.head);
+    if (decision.status === "accepted") decision.definitionVisible = definition.visible;
     const result = await input.repository.settle({ job, decision, now: input.now });
     if (result === "retryable") return { kind: "retryable" };
     return { kind: "settled", status: decision.status };
@@ -154,6 +160,28 @@ export async function runGoalAssessmentOnce(input: {
     definition,
     context,
   );
+  if (decision.status === "accepted") decision.definitionVisible = definition.visible;
+  if (decision.status === "accepted" && input.evolutionPlanner
+    && "source" in definition && definition.source === "record") {
+    const previous = decodeRecordGoalDefinition(definition);
+    if (previous.draft.changePolicy === "evolving") {
+      try {
+        const terminal = decision.transition.to !== "active";
+        const proposal = await input.evolutionPlanner.plan({ job, definition, context,
+          assessment: { state: decision.transition.to, progress: decision.transition.progress } });
+        if (proposal) decision.evolution = (terminal ? planRecordGoalSuccessor : planRecordGoalReplacement)({ previous, scope: previous.scope,
+          instance: terminal ? { ...context.instance, state: decision.transition.to, resolutionKind: "natural",
+            revision: decision.transition.revision, progress: decision.transition.progress, outcome: decision.transition.outcome } : context.instance,
+          expectedDefinitionVersion: previous.definitionVersion,
+          expectedInstanceRevision: terminal ? decision.transition.revision : context.instance.revision,
+          nextDraft: proposal.draft, reason: proposal.reason, evidenceEventIds: proposal.basisEventIds, events: context.events,
+          observedHead: terminal ? { recordVersion: context.head.recordVersion + 1, ordinal: context.head.ordinal + 1 } : context.head });
+      } catch {
+        await input.repository.fail({ job, code: "GOAL_EVOLUTION_FAILED", now: input.now });
+        return { kind: "failed", code: "GOAL_EVOLUTION_FAILED" };
+      }
+    }
+  }
   const result = await input.repository.settle({ job, decision, now: input.now });
   if (result === "retryable") return { kind: "retryable" };
   return { kind: "settled", status: decision.status };

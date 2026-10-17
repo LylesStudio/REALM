@@ -1,4 +1,5 @@
 "use client";
+import { GenesisGoalFields } from './record-goal-fields.tsx';
 
 import { uiText, type UiLanguage } from "../../modules/i18n/public.ts";
 import { WORLD_STYLE_KEYS, worldStyleText, type WorldStyle } from "../../modules/style/world-style.ts";
@@ -274,6 +275,8 @@ export function GenesisDraftFields({ draft, patchDraft, uiLanguage, disabled = f
                 </div>
               </div>
 
+              <GenesisGoalFields goals={draft.recordGoals ?? []} uiLanguage={uiLanguage}
+                onChange={recordGoals=>patchDraft(current=>({...current,recordGoals}))}/>
               <label className="is-wide">
                 <span>{uiText("ui.genesisChat.openingEyebrow", uiLanguage)}</span>
                 <textarea

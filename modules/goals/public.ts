@@ -3,6 +3,8 @@ import { RuntimeInvariantError, type JsonValue } from "../runtime/public.ts";
 
 export type GoalState = "active" | "completed" | "failed" | "settled";
 export type GoalTerminalState = "completed" | "failed" | "settled";
+/** Administrative closure never proves a narrative terminal criterion. */
+export type GoalResolutionKind = "natural" | "withdrawn" | "superseded";
 export type GoalMode = "deterministic" | "semantic";
 
 /** Goal runtime scope 判别位：record | story | worldline。 */
@@ -174,9 +176,37 @@ export interface GoalEventCountRubric {
   };
 }
 
+export interface GoalSemanticCriteria {
+  objective: string;
+  successConditions: readonly string[];
+  failureConditions: readonly string[];
+  settlementConditions: readonly string[];
+}
+
+/** Content-owned standards, bounded as data; they never become a system prompt. */
+export function normalizeGoalSemanticCriteria(value: unknown): GoalSemanticCriteria {
+  const bad = (): never => { throw new RuntimeInvariantError('GOAL_CRITERIA_INVALID','Goal criteria are invalid.'); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return bad();
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).some(k=>!['objective','successConditions','failureConditions','settlementConditions'].includes(k))) return bad();
+  const text = (v: unknown, max: number): string => {
+    if (typeof v !== 'string' || !v.trim() || v.length>max || v.includes('\0')) return bad();
+    return v.trim();
+  };
+  const list = (v: unknown, required: boolean): readonly string[] => {
+    if (!Array.isArray(v) || v.length>16 || (required && !v.length)) return bad();
+    const result = v.map(item=>text(item,1000));
+    if (new Set(result).size!==result.length) return bad();
+    return Object.freeze(result);
+  };
+  return Object.freeze({objective:text(row.objective,4000),successConditions:list(row.successConditions,true),
+    failureConditions:list(row.failureConditions??[],false),settlementConditions:list(row.settlementConditions??[],false)});
+}
+
 export interface GoalSemanticRubric {
   kind: "semantic";
   promptKey: string;
+  criteria?: GoalSemanticCriteria;
 }
 
 export type GoalRubric = GoalEventCountRubric | GoalSemanticRubric;
@@ -203,6 +233,8 @@ export interface GoalDefinition {
 
 export interface GoalInstanceSnapshot {
   goalInstanceId: string;
+  /** Missing on legacy instances means a natural runtime transition. */
+  resolutionKind?: GoalResolutionKind;
   /** Record anchor for record-scoped instances; absent for story/worldline scope. */
   recordId?: string;
   /** Story anchor for story-scoped instances. */
@@ -230,9 +262,9 @@ export interface GoalEvidenceSummary {
 
 export interface GoalTransition extends GoalEvidenceSummary {
   from: GoalState;
-  to: GoalTerminalState;
+  to: GoalState;
   revision: number;
-  outcome: Readonly<Record<string, JsonValue>>;
+  outcome: Readonly<Record<string, JsonValue>> | null;
   policyVersion: string;
 }
 
@@ -447,7 +479,7 @@ export function validateGoalAssessment(input: {
   if (candidate.policyVersion !== definition.policyVersion) {
     return { kind: "rejected", code: "GOAL_POLICY_VERSION_MISMATCH" };
   }
-  const target: GoalTerminalState | null = candidate.decision === "complete"
+  const target: GoalState | null = candidate.decision === 'continue' ? 'active' : candidate.decision === "complete"
     ? "completed"
     : candidate.decision === "fail"
       ? "failed"
@@ -457,7 +489,7 @@ export function validateGoalAssessment(input: {
   if (target === null) {
     return { kind: "rejected", code: "GOAL_ASSESSMENT_NOT_COMPLETE" };
   }
-  if (!goalAllowedTerminals(definition).has(target)) {
+  if (target !== 'active' && !goalAllowedTerminals(definition).has(target)) {
     return { kind: "rejected", code: "GOAL_TERMINAL_NOT_ALLOWED" };
   }
   if (
@@ -506,7 +538,7 @@ export function validateGoalAssessment(input: {
       to: target,
       revision: instance.revision + 1,
       progress: candidate.progress,
-      outcome: candidate.outcome ?? definition.outcome,
+      outcome: target === 'active' ? null : candidate.outcome ?? definition.outcome,
       evidenceEventIds: [...candidate.evidenceEventIds],
       evidenceHead: head,
       evidenceSnapshotHash: expectedHash,

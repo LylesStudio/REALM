@@ -29,6 +29,7 @@ export interface GoalProjectionReadResult {
 
 interface GoalRow extends QueryResultRow {
   world_id: string;
+  worldline_id: string;
   world_version: string;
   goal_instance_id: string;
   goal_key: string;
@@ -40,6 +41,10 @@ interface GoalRow extends QueryResultRow {
   scope_kind: string;
   attempt: string | number;
   supersedes_instance_id: string | null;
+  definition_source: string;
+  definition_id: string | null;
+  policy_version: string;
+  resolution_kind: string;
   latest_goal_transition_ordinal: string | number | null;
 }
 
@@ -65,7 +70,8 @@ export function createPostgresGoalProjectionRepository(
           const result = await client.query<GoalRow>(
             `SELECT
                goal.world_id,
-               world.world_version,
+               goal.worldline_id,
+               record.world_version,
                goal.id AS goal_instance_id,
                goal.goal_key,
                goal.state,
@@ -76,6 +82,10 @@ export function createPostgresGoalProjectionRepository(
                goal.scope_kind,
                goal.attempt,
                goal.supersedes_instance_id,
+               goal.definition_source,
+               goal.definition_id,
+               goal.policy_version,
+               goal.resolution_kind,
                (
                  SELECT MAX(goal_event.record_ordinal)
                  FROM events AS goal_event
@@ -180,6 +190,12 @@ function normalizeGoalTransitionOrdinal(value: string | number | null): number {
 function normalizeGoalRow(row: GoalRow, recordId: string): GoalProjectionInstance {
   if (
     typeof row.world_id !== "string"
+    || typeof row.worldline_id !== "string"
+    || (row.definition_source !== "content" && row.definition_source !== "record")
+    || (row.definition_source === "content" && row.definition_id !== null)
+    || (row.definition_source === "record" && (typeof row.definition_id !== "string" || !row.definition_id))
+    || typeof row.policy_version !== "string" || !row.policy_version.trim()
+    || !["natural", "withdrawn", "superseded"].includes(row.resolution_kind)
     || typeof row.world_version !== "string"
     || typeof row.goal_instance_id !== "string"
     || typeof row.goal_key !== "string"
@@ -223,6 +239,13 @@ function normalizeGoalRow(row: GoalRow, recordId: string): GoalProjectionInstanc
   }
   return {
     goalKey: row.goal_key,
+    worldlineId: row.worldline_id,
+    definitionSource: row.definition_source as "content" | "record",
+    definitionId: row.definition_id,
+    policyVersion: row.policy_version,
+    ...(row.resolution_kind === "natural" ? {} : {
+      resolutionKind: row.resolution_kind as "withdrawn" | "superseded",
+    }),
     goalInstanceId: row.goal_instance_id,
     recordId,
     state: row.state as GoalProjectionInstance["state"],

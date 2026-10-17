@@ -54,6 +54,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Record 独立的 fixed/evolving Goal：AI 或人工创世、创建、修订、撤回、按正式证据评估，以及有版本和后继关系的自动演化。
+- Goal 与 narrative situation 的有界公开上下文、运行状态展示，以及 `.realm` 存档恢复和独立分支中的完整历史继承。
+- 真实模型、实际安装验签的受控 RealmWorld、恢复/分支继续运行，以及 Chromium/WebKit 的联合回归。
+
+### Fixed
+
+- 空 Record 第一轮正式叙事的 head ordinal 归一化，避免负游标导致合法 narrative proposal 被拒绝。
+- public 干净安装的文档和静态契约依赖：公开契约与通用模板独立于内部任务书和本机运维配置。
+
 ## [1.0.0] - 2026-10-11
 
 ### Added

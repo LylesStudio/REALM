@@ -379,6 +379,7 @@ async function loadFacts(
      WHERE goal.workspace_id = $1
        AND goal.world_id = $2
        AND goal.worldline_id = $3
+       AND goal.resolution_kind = 'natural'
        AND (
          (goal.scope_kind = 'story' AND goal.story_id = $4)
          OR goal.scope_kind = 'worldline'

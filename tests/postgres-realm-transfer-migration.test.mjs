@@ -122,7 +122,7 @@ if (!adminConnectionString) {
 
 
   // ------------------------------------------------------------------
-  test("full migration chain via real runner: ledger checksums, idempotent replay, 91 tables", { timeout: 300_000 }, async (t) => {
+  test("full migration chain via real runner: ledger checksums, idempotent replay, 95 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -143,7 +143,10 @@ if (!adminConnectionString) {
     assert.match(first, /apply 0066_committed_fact_commands\.sql/);
     assert.match(first, /apply 0067_member_relationship_revisions\.sql/);
     assert.match(first, /apply 0068_inventory_grant_command\.sql/);
-    assert.match(first, /91 tables/);
+    assert.match(first, /apply 0069_record_goal_authoring\.sql/);
+    assert.match(first, /apply 0070_record_goal_authoring_capability\.sql/);
+    assert.match(first, /apply 0074_record_goal_restore_capability\.sql/);
+    assert.match(first, /95 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(

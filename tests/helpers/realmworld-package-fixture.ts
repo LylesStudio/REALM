@@ -4,6 +4,7 @@
  * 包内容由测试常量组成，签名用一次性 ed25519 测试密钥。
  */
 import { sign, type KeyObject } from "node:crypto";
+import type { GoalDefinition } from "../../modules/goals/public.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,7 @@ export async function installSignedRealmWorldFixture(input: {
   worldId: string;
   version: string;
   recordTitle: string;
+  goals?: readonly GoalDefinition[];
   keyId: string;
   keyPair: RealmWorldFixtureKeyPair;
   /** manifest engineCompat.baseRange（缺省兼容引擎当前 base 版本段）。 */
@@ -69,7 +71,7 @@ export async function installSignedRealmWorldFixture(input: {
     ["content/goals.json", Buffer.from(JSON.stringify({
       format: "realmworld-goals",
       schemaVersion: 1,
-      goals: [],
+      goals: input.goals ?? [],
     }))],
   ]);
   const unsigned: RealmWorldManifestV1 = {

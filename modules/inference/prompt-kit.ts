@@ -133,6 +133,7 @@ export function jsonOutputInstruction(fields: readonly JsonFieldSpec[]): string 
   return [
     "Respond with exactly one JSON object and nothing else — no prose, no markdown fences.",
     `Schema: {${schema.join(", ")}}`,
-    "Optional fields: omit them entirely when there is no change or no content.",
+    `Required fields: ${fields.filter(field => field.required !== false).map(field => JSON.stringify(field.name)).join(", ") || "none"}. Include every required key, using null when the schema allows null; nullable does not mean optional.`,
+    "Only fields marked with ? are optional; omit them when there is no change or no content.",
   ].join("\n");
 }

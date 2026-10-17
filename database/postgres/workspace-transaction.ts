@@ -4,6 +4,8 @@ export type WorkspaceDatabase = Pool | PoolClient;
 
 export interface WorkspaceTransactionOptions {
   readOnly?: boolean;
+  /** Multi-query snapshots must not mix record heads and later domain writes. */
+  isolationLevel?: 'repeatable read';
 }
 
 function isPoolClient(database: WorkspaceDatabase): database is PoolClient {
@@ -34,13 +36,20 @@ export async function withWorkspaceTransaction<T>(
 
   try {
     if (ownsClient) {
-      await client.query(options.readOnly ? "BEGIN READ ONLY" : "BEGIN");
+      await client.query(options.isolationLevel==='repeatable read'
+        ? options.readOnly?'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY':'BEGIN ISOLATION LEVEL REPEATABLE READ'
+        : options.readOnly ? "BEGIN READ ONLY" : "BEGIN");
     } else {
       await client.query(`SAVEPOINT ${savepoint}`);
       const previousScope = await client.query<{ workspace_id: string | null }>(
         `SELECT current_setting('realm.workspace_id', true) AS workspace_id`,
       );
       previousWorkspaceId = previousScope.rows[0]?.workspace_id ?? null;
+      if(options.isolationLevel==='repeatable read') {
+        const isolation=await client.query<{transaction_isolation:string}>('SHOW transaction_isolation');
+        if(!['repeatable read','serializable'].includes(isolation.rows[0]?.transaction_isolation??''))
+          throw new Error('Snapshot work requires repeatable read or serializable isolation in its parent transaction.');
+      }
     }
     await client.query(`SELECT set_config('realm.workspace_id', $1, true)`, [
       normalizedWorkspaceId,

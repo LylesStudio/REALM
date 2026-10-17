@@ -265,6 +265,34 @@ test("base→base 恢复绝不调用 validateUpgradeTarget", async () => {
   assert.equal(calls, 0);
 });
 
+test('snapshot branch verifies the pinned signed package and observes trust-store revocation without restart',async t=>{
+  const {validateRecordBranchWorldBinding:validate}=await import('../modules/application/record-branch-world-binding.ts');
+  const keys=['REALM_REALMWORLD_INSTALL_ROOT','REALM_GOAL_WORKER_INSTALL_ROOT','REALM_REALMWORLD_TRUST_STORE'];
+  const prior=new Map(keys.map(key=>[key,process.env[key]]));
+  t.after(()=>{for(const [key,value] of prior){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
+  for(const key of keys)delete process.env[key];
+  const binding={worldId:WORLD_ID,worldVersion:WORLD_VERSION};
+  await assert.rejects(()=>validate(binding),(error:unknown)=>error instanceof RealmRuntimeSaveRepositoryError&&error.code==='REALMWORLD_VALIDATION_UNAVAILABLE');
+  const directory=await mkdtemp(join(tmpdir(),'realm-branch-trust-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const installRoot=join(directory,'installed'),path=join(directory,'trust.json');
+  const pair=generateKeyPairSync('ed25519');
+  const fixture=await installFixturePackage({installRoot,worldId:WORLD_ID,version:WORLD_VERSION,privateKey:pair.privateKey});
+  t.after(()=>rm(fixture.sourceDir,{recursive:true,force:true}));
+  const document={format:'realmworld-trust-store',version:1,base:{activeVersion:'1.0.0'},keys:[{keyId:'pure-fixture-key',
+    publicKey:pair.publicKey.export({type:'spki',format:'pem'}).toString(),status:'active'}]};
+  await writeFile(path,JSON.stringify(document),{mode:0o600});
+  process.env.REALM_REALMWORLD_INSTALL_ROOT=installRoot;process.env.REALM_REALMWORLD_TRUST_STORE=path;
+  await validate(binding);
+  await assert.rejects(()=>validate({...binding,worldVersion:'9.9.9'}),(error:unknown)=>error instanceof RealmRuntimeSaveRepositoryError&&error.code==='REALMWORLD_PACKAGE_MISSING');
+  document.keys[0].status='revoked';await writeFile(path,JSON.stringify(document));
+  await assert.rejects(()=>validate(binding),(error:unknown)=>error instanceof RealmRuntimeSaveRepositoryError&&error.code==='REALMWORLD_PACKAGE_UNTRUSTED');
+  document.keys[0].status='active';document.base.activeVersion='2.0.0';await writeFile(path,JSON.stringify(document));
+  await assert.rejects(()=>validate(binding),(error:unknown)=>error instanceof RealmRuntimeSaveRepositoryError&&error.code==='BASE_VERSION_INCOMPATIBLE');
+  document.base.activeVersion='1.0.0';await writeFile(path,JSON.stringify(document));
+  await writeFile(join(installRoot,WORLD_ID,WORLD_VERSION,'content','world.json'),'{}');
+  await assert.rejects(()=>validate(binding),(error:unknown)=>error instanceof RealmRuntimeSaveRepositoryError&&error.code==='REALMWORLD_PACKAGE_UNTRUSTED');
+});
+
 async function installFixturePackage(input: {
   installRoot: string;
   worldId: string;

@@ -432,6 +432,13 @@ test("model-powered orchestration preserves DM, Character, Rule and Narrator aut
     JSON.stringify({ narration: candidate.narration, characters: candidate.characterResponses }),
     /d20|骰|检定|难度/i,
   );
+  const ownActionReaction = prompts.find((prompt) =>
+    String(prompt.messages[0]?.content).includes("Based on your own action"));
+  assert.ok(ownActionReaction, "the own-action reaction must actually run");
+  assert.ok(
+    String(ownActionReaction.messages.at(-1)?.content).includes("冷雾沿石阶向上漫开。"),
+    "own-action reactions must receive the same-turn narrator result too",
+  );
   const characterProposal = prompts.find((prompt) => prompt.tools)?.messages ?? [];
   // Prompt System v2：角色身份来自调用时数据，进 user 的 [Character] 块；
   // system 只含静态 English 策略，不含动态角色名。

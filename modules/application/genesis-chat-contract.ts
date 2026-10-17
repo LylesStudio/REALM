@@ -1,4 +1,5 @@
 import { WORLD_STYLE_KEYS, normalizeWorldStyle } from "../style/world-style.ts";
+import { normalizeRecordGoalDrafts } from '../goals/authoring-contract.ts';
 import {
   GENESIS_LIMITS,
   normalizeGenesisDraft,
@@ -106,6 +107,10 @@ export function sanitizeDraftPatch(
 ): Partial<WorldGenesisDraft> | null {
   if (!isObject(patch)) return null;
   const result: Record<string, unknown> = {};
+  if (patch.recordGoals !== undefined && patch.recordGoals !== null) {
+    try { result.recordGoals = normalizeRecordGoalDrafts(patch.recordGoals); }
+    catch { return null; }
+  }
 
   if (patch.language === "zh-CN" || patch.language === "en" || patch.language === "ja") {
     result.language = patch.language;
@@ -233,7 +238,7 @@ export const GENESIS_EDITABLE_FIELD_PATHS = [
   "world.name", "world.era", "world.summary",
   "story.title", "story.premise", "record.title",
   "style", "language", "playerRole", "playerStance", "opening",
-  "companions",
+  "companions", "recordGoals",
   "scene.title", "scene.location", "scene.weather",
   "scene.tension", "scene.displayTime", "scene.objective",
 ] as const;
@@ -264,7 +269,7 @@ export function diffEditedGenesisFields(
   for (const path of GENESIS_EDITABLE_FIELD_PATHS) {
     const a = fieldValue(before, path);
     const b = fieldValue(after, path);
-    const same = path === "companions"
+    const same = path === "companions" || path === "recordGoals"
       ? JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
       : (a ?? "") === (b ?? "");
     if (!same) edited.push(path);

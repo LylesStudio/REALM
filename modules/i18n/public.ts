@@ -26,6 +26,7 @@ type MessageTable = Record<UiLanguage, string>;
  *  base bundle "ember-coast"）——世界内容不是界面固定文案。 */
 import { SETTINGS_MESSAGES } from "./messages-settings.ts";
 import { PANEL_MESSAGES } from "./messages-panels.ts";
+import { GOAL_MESSAGES } from './messages-goals.ts';
 
 function interpolate(template: string, params?: Record<string, string>): string {
   if (!params) return template;
@@ -599,7 +600,7 @@ const MESSAGES: Record<string, MessageTable> = {
 };
 
 /** 批次注册表：按面板分批维护，统一并入主表（契约测试覆盖全部 key）。 */
-for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES }) as [string, MessageTable][]) {
+for (const [key, table] of Object.entries({ ...SETTINGS_MESSAGES, ...PANEL_MESSAGES, ...GOAL_MESSAGES }) as [string, MessageTable][]) {
   if (!(key in MESSAGES)) MESSAGES[key] = table;
 }
 

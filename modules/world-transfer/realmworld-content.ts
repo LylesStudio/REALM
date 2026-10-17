@@ -1,4 +1,5 @@
 import type { GoalDefinition, GoalEventCountRubric, GoalSemanticRubric } from "../goals/public.ts";
+import { normalizeGoalSemanticCriteria } from "../goals/public.ts";
 import type { JsonValue } from "../runtime/public.ts";
 import type { RealmWorldManifestV1 } from "./realmworld-manifest.ts";
 
@@ -117,11 +118,15 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
       threshold: rubricRaw.threshold as number,
     } satisfies GoalEventCountRubric;
   } else if (rubricRaw.kind === "semantic") {
-    assertExactKeys(rubricRaw, ["kind", "promptKey"], `${where}.rubric`);
+    assertExactKeys(rubricRaw, ["kind", "promptKey", "criteria"], `${where}.rubric`);
     rubric = {
       kind: "semantic",
       promptKey: requireText(rubricRaw.promptKey, `${where}.rubric.promptKey`, MAX_PROMPT_KEY_LENGTH),
     } satisfies GoalSemanticRubric;
+    if (rubricRaw.criteria !== undefined) {
+      try { rubric.criteria=normalizeGoalSemanticCriteria(rubricRaw.criteria); }
+      catch { throw new RealmWorldContentError('GOALS_INVALID','RealmWorld semantic criteria are invalid'); }
+    }
   } else {
     throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.rubric.kind is invalid`);
   }

@@ -12,6 +12,13 @@ import {
   validateStrictZipArchive,
 } from "./realm-pack.ts";
 import type { JsonValue } from "../runtime/public.ts";
+import { decodeRecordGoalDefinition } from "../goals/record-authoring.ts";
+import {
+  normalizeRealmRuntimeSaveDomainV1,
+  parseRealmRuntimeSaveDomainV1,
+  serializeRealmRuntimeSaveDomainV1,
+  type RealmRuntimeSaveDomainV1,
+} from "./realm-runtime-domain-save.ts";
 
 export type RealmRuntimeSaveErrorCode =
   | "INVALID_SAVE"
@@ -115,6 +122,7 @@ export interface RealmRuntimeSaveGoalsV1 {
   schemaVersion: 1;
   instances: readonly JsonValue[];
   assessments: readonly JsonValue[];
+  definitions?: readonly JsonValue[];
 }
 
 /**
@@ -471,6 +479,8 @@ export interface RealmRuntimeSaveArchive {
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
   selfPlay?: RealmRuntimeSaveSelfPlayV1;
+  /** Server-owned Project/Finance, Story Graph, and committed-fact runtime. */
+  domain?: RealmRuntimeSaveDomainV1;
 }
 
 const MANIFEST_ENTRY = "realm-save-manifest.json" as const;
@@ -484,6 +494,7 @@ const MEMORY_ENTRY = "runtime/memory.json" as const;
 const OUTBOX_ENTRY = "runtime/outbox.json" as const;
 const FIRST_NIGHT_ENTRY = "runtime/first-night.json" as const;
 const SELF_PLAY_ENTRY = "runtime/self-play.json" as const;
+const DOMAIN_ENTRY = "runtime/domain.json" as const;
 const KNOWN_ENTRIES: ReadonlySet<string> = new Set([
   MANIFEST_ENTRY,
   RECORD_ENTRY,
@@ -496,6 +507,7 @@ const KNOWN_ENTRIES: ReadonlySet<string> = new Set([
   OUTBOX_ENTRY,
   FIRST_NIGHT_ENTRY,
   SELF_PLAY_ENTRY,
+  DOMAIN_ENTRY,
 ]);
 const ARCHIVE_ENTRY_RE = /^(realm-save-manifest\.json|runtime\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)$/;
 const SAFE_IDENTITY = /^[A-Za-z0-9._-]+$/;
@@ -762,7 +774,7 @@ export function serializeRealmRuntimeSaveRecordV1(record: RealmRuntimeSaveRecord
 }
 
 export function serializeRealmRuntimeSaveGoalsV1(goals: RealmRuntimeSaveGoalsV1): string {
-  return canonicalJson(goals as unknown as JsonValue);
+  return canonicalJson(validateGoals(goals) as unknown as JsonValue);
 }
 
 export function serializeRealmRuntimeSaveActionReceiptsV1(
@@ -960,11 +972,11 @@ export function normalizeRealmRuntimeSaveEventForRestore(
   };
 }
 
-function validateGoals(value: unknown): RealmRuntimeSaveGoalsV1 {
+function validateGoals(value: unknown, expectedScope?: RealmRuntimeSaveRecordScope & {workspaceId:string}): RealmRuntimeSaveGoalsV1 {
   if (!isPlainObject(value)) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime goals must be an object");
   }
-  assertExactKeys(value, ["format", "schemaVersion", "instances", "assessments"], "goals");
+  assertExactKeys(value, ["format", "schemaVersion", "instances", "assessments", "definitions"], "goals");
   if (value.format !== "realm-runtime-goals" || value.schemaVersion !== 1) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime Goal schema is unsupported");
   }
@@ -972,14 +984,54 @@ function validateGoals(value: unknown): RealmRuntimeSaveGoalsV1 {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime Goal rows must be arrays");
   }
   if (![...value.instances, ...value.assessments].some((row) => !isPlainObject(row) || !isJsonValue(row))) {
+    const definitions = validateAuthoredGoalSaveBindings(value,expectedScope);
     return {
       format: "realm-runtime-goals",
       schemaVersion: 1,
       instances: value.instances,
       assessments: value.assessments,
+      ...(definitions === undefined ? {} : {definitions}),
     };
   }
   throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime Goal rows must be JSON objects");
+}
+
+function validateAuthoredGoalSaveBindings(value: Record<string, unknown>, expectedScope?: RealmRuntimeSaveRecordScope & {workspaceId:string}): readonly JsonValue[] | undefined {
+  const fail = (): never => { throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime Goal definition binding is invalid"); };
+  if (value.definitions !== undefined && (!Array.isArray(value.definitions) || value.definitions.length > 10000)) fail();
+  const definitions = value.definitions as unknown[] | undefined;
+  const byId = new Map<string, ReturnType<typeof decodeRecordGoalDefinition>>();
+  for (const raw of definitions ?? []) {
+    const definition = (()=>{try {return decodeRecordGoalDefinition(raw);} catch {return fail();}})();
+    if(expectedScope && (definition.scope.workspaceId !== expectedScope.workspaceId
+      || definition.scope.worldId !== expectedScope.worldId || definition.scope.worldlineId !== expectedScope.worldlineId
+      || definition.scope.recordId !== expectedScope.recordId)) fail();
+    if (byId.has(definition.definitionId)) fail();
+    byId.set(definition.definitionId, definition);
+  }
+  const bound = new Set<string>();
+  for (const raw of value.instances as Record<string, unknown>[]) {
+    if (raw.definitionSource !== 'record') continue;
+    const definition = byId.get(typeof raw.definitionId === 'string' ? raw.definitionId : '');
+    if (!definition || bound.has(definition.definitionId)
+      || raw.id !== definition.goalInstanceId || raw.goalKey !== definition.goalKey
+      || raw.policyVersion !== definition.policyVersion
+      || raw.evidenceStartVersion !== definition.activationHead.recordVersion
+      || raw.evidenceStartOrdinal !== definition.activationHead.ordinal
+      || !['active','completed','failed','settled'].includes(String(raw.state))
+      || !['natural','withdrawn','superseded'].includes(String(raw.resolutionKind))
+      || (raw.resolutionKind !== 'natural' && raw.state !== 'settled')) return fail();
+    bound.add(definition.definitionId);
+  }
+  if (bound.size !== byId.size) fail();
+  for (const definition of byId.values()) {
+    if (definition.supersedesDefinitionId === null) continue;
+    const previous = byId.get(definition.supersedesDefinitionId);
+    if (!previous || previous.goalId !== definition.goalId
+      || previous.definitionVersion + 1 !== definition.definitionVersion
+      || JSON.stringify(previous.scope) !== JSON.stringify(definition.scope)) fail();
+  }
+  return definitions as readonly JsonValue[] | undefined;
 }
 
 const CONTROLLER_MODES = new Set<RealmRuntimeSaveControllerMode>(["human", "ai", "hybrid"]);
@@ -2596,6 +2648,7 @@ function buildRuntimeFiles(
   outbox?: RealmRuntimeSaveOutboxV1,
   firstNight?: RealmRuntimeSaveFirstNightV1,
   selfPlay?: RealmRuntimeSaveSelfPlayV1,
+  domain?: RealmRuntimeSaveDomainV1,
 ): ReadonlyMap<string, Uint8Array> {
   const files: [string, Uint8Array][] = [
     [RECORD_ENTRY, Buffer.from(serializeRealmRuntimeSaveRecordV1(record), "utf8")],
@@ -2626,6 +2679,9 @@ function buildRuntimeFiles(
   if (selfPlay) {
     files.push([SELF_PLAY_ENTRY, Buffer.from(serializeRealmRuntimeSaveSelfPlayV1(selfPlay), "utf8")]);
   }
+  if (domain) {
+    files.push([DOMAIN_ENTRY, Buffer.from(serializeRealmRuntimeSaveDomainV1(domain), "utf8")]);
+  }
   return new Map(files);
 }
 
@@ -2644,6 +2700,7 @@ export function realmRuntimeSaveManifestFromData(input: {
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
   selfPlay?: RealmRuntimeSaveSelfPlayV1;
+  domain?: RealmRuntimeSaveDomainV1;
 }): RealmRuntimeSaveManifestV2 {
   const files = buildRuntimeFiles(
     input.record,
@@ -2656,6 +2713,7 @@ export function realmRuntimeSaveManifestFromData(input: {
     input.outbox,
     input.firstNight,
     input.selfPlay,
+    input.domain,
   );
   return {
     format: "realm-save",
@@ -2684,10 +2742,11 @@ export function buildRealmRuntimeSaveArchive(input: {
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
   selfPlay?: RealmRuntimeSaveSelfPlayV1;
+  domain?: RealmRuntimeSaveDomainV1;
 }): Uint8Array {
   const manifest = normalizeManifest(input.manifest);
   const record = validateRecord(input.record, manifest);
-  const goals = validateGoals(input.goals);
+  const goals = validateGoals(input.goals,{...record.scope,workspaceId:manifest.scope.workspaceId});
   const topology = input.topology === undefined ? undefined : validateTopology(input.topology);
   const actionReceipts = input.actionReceipts === undefined
     ? undefined
@@ -2708,9 +2767,10 @@ export function buildRealmRuntimeSaveArchive(input: {
   }
   const firstNight = input.firstNight === undefined ? undefined : validateFirstNight(input.firstNight);
   const selfPlay = input.selfPlay === undefined ? undefined : validateSelfPlay(input.selfPlay);
+  const domain = input.domain === undefined ? undefined : normalizeRealmRuntimeSaveDomainV1(input.domain);
   const files = buildRuntimeFiles(
     record, goals, topology, actionReceipts, characterEffects, observations, memory,
-    outbox, firstNight, selfPlay,
+    outbox, firstNight, selfPlay, domain,
   );
   if (computeRealmRuntimeSaveContentHash(files) !== manifest.snapshot.runtimeHash) {
     throw new RealmRuntimeSaveError("RUNTIME_HASH_MISMATCH", "runtime save content hash mismatch");
@@ -2746,6 +2806,9 @@ export function buildRealmRuntimeSaveArchive(input: {
   }
   if (selfPlay) {
     entries[SELF_PLAY_ENTRY] = [files.get(SELF_PLAY_ENTRY)!, { level: 6, mtime: new Date(1980, 0, 1) }];
+  }
+  if (domain) {
+    entries[DOMAIN_ENTRY] = [files.get(DOMAIN_ENTRY)!, { level: 6, mtime: new Date(1980, 0, 1) }];
   }
   return zipSync(entries);
 }
@@ -2790,6 +2853,7 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
   let outboxRaw: unknown;
   let firstNightRaw: unknown;
   let selfPlayRaw: unknown;
+  let domainRaw: unknown;
   try {
     recordRaw = JSON.parse(Buffer.from(files.get(RECORD_ENTRY)!).toString("utf8"));
     goalsRaw = JSON.parse(Buffer.from(files.get(GOALS_ENTRY)!).toString("utf8"));
@@ -2817,11 +2881,14 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
     if (files.has(SELF_PLAY_ENTRY)) {
       selfPlayRaw = JSON.parse(Buffer.from(files.get(SELF_PLAY_ENTRY)!).toString("utf8"));
     }
+    if (files.has(DOMAIN_ENTRY)) {
+      domainRaw = files.get(DOMAIN_ENTRY);
+    }
   } catch {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime save JSON is invalid");
   }
   const record = validateRecord(recordRaw, manifest);
-  const goals = validateGoals(goalsRaw);
+  const goals = validateGoals(goalsRaw,{...record.scope,workspaceId:manifest.scope.workspaceId});
   const topology = topologyRaw === undefined ? undefined : validateTopology(topologyRaw);
   const actionReceipts = actionReceiptsRaw === undefined ? undefined : validateActionReceipts(actionReceiptsRaw);
   const characterEffects = characterEffectsRaw === undefined ? undefined : validateCharacterEffects(characterEffectsRaw);
@@ -2836,6 +2903,9 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
   }
   const firstNight = firstNightRaw === undefined ? undefined : validateFirstNight(firstNightRaw);
   const selfPlay = selfPlayRaw === undefined ? undefined : validateSelfPlay(selfPlayRaw);
+  const domain = domainRaw === undefined
+    ? undefined
+    : parseRealmRuntimeSaveDomainV1(domainRaw as Uint8Array);
   return {
     manifest,
     record,
@@ -2848,5 +2918,6 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
     ...(outbox ? { outbox } : {}),
     ...(firstNight ? { firstNight } : {}),
     ...(selfPlay ? { selfPlay } : {}),
+    ...(domain ? { domain } : {}),
   };
 }
