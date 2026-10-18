@@ -26,6 +26,7 @@ const require0 = createRequire(import.meta.url);
 const pg = require0("pg");
 
 const DEFAULT_TEST_FILES = [
+  "tests/postgres-pool-lifecycle.test.mjs",
   "tests/postgres-runtime-migration-hardening.test.ts",
   "tests/postgres-runtime-repository.test.ts",
   "tests/postgres-runtime-repository-failures.test.ts",
@@ -209,6 +210,8 @@ try {
   await runNode(
     [
       "--experimental-strip-types",
+      "--import",
+      "./tests/helpers/postgres-pool-lifecycle.mjs",
       "--test",
       "--test-concurrency=1",
       ...TEST_FILES,
