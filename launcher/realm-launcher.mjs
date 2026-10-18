@@ -456,6 +456,25 @@ export function resolveStartRealmDataHome(options = {}) {
   return options.dataHome ?? resolveDataHome(options.environment ?? process.env);
 }
 
+/** Reuse only a live cluster belonging to this exact managed data directory. */
+export function resolveRunningPostgresPort({ dataHome, pgBin, spawnSyncImpl = spawnSync }) {
+  const data = resolve(dataHome, "postgres", "data");
+  try {
+    const lines = readFileSync(resolve(data, "postmaster.pid"), "utf8").trimEnd().split(/\r?\n/u);
+    const pid = Number(lines[0]);
+    const port = Number(lines[3]);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !Number.isSafeInteger(port) || port < 1 || port > 65_535
+      || !lines[1] || !sameFile(lines[1], data)) return null;
+    const result = spawnSyncImpl(resolve(pgBin, process.platform === "win32" ? "pg_ctl.exe" : "pg_ctl"), ["status", "-D", data], {
+      encoding: "utf8", windowsHide: true, timeout: 5_000,
+    });
+    return result.status === 0 ? port : null;
+  } catch {
+    // No live owned cluster: retain fresh-install/free-port behavior.
+    return null;
+  }
+}
+
 export async function startRealm(options = {}) {
   const home = options.home ?? realmHome();
   const parentEnvironment = options.environment ?? process.env;
@@ -502,7 +521,9 @@ export async function startRealm(options = {}) {
       : home);
   const pgBin = options.pgBin ?? resolvePgBin(home);
   const appPort = options.appPort ?? await pickPort(portCandidates(9999));
-  const pgPort = options.pgPort ?? await pickPort(portCandidates(55432));
+  const pgPort = options.pgPort
+    ?? resolveRunningPostgresPort({ dataHome, pgBin })
+    ?? await pickPort(portCandidates(55432));
   // 0.0.0.0 仅接受显式传入并记录醒目警告——绝不默认/硬编码。
   if (hostBind === "0.0.0.0") {
     log("WARNING: LAN bind 0.0.0.0 exposes REALM on every interface; trusted LAN only.");
