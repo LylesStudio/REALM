@@ -28,6 +28,7 @@ import {
 import { MessageComposer } from "./components/message-composer";
 import { PendingSubmission } from "./components/pending-submission";
 import { PreviewCards } from "./components/preview-cards";
+import { GenerationIndicator, readGenerationStatus, useGenerationStatus } from "./components/generation-status";
 import type { WorldGenesisDraft } from "../modules/application/world-genesis-contract.ts";
 import type {
   GenesisSuggestions,
@@ -1125,6 +1126,7 @@ export function RealmClient() {
   }
 
   const streamRecordId = envelope?.record.record.id ?? "";
+  const generationState = useGenerationStatus(streamRecordId, (recordId) => loadRecord(recordId, { silent: true }));
   const streamDynamicKnowledge = envelope?.viewer.dynamicKnowledgeVisible ?? false;
 
   useEffect(() => {
@@ -1310,6 +1312,23 @@ export function RealmClient() {
     },
   ) {
     if (!envelope || !projection || !envelope.writeToken || isSending) return false;
+    // A fresh server read closes the polling window before clearing a player's draft.
+    if (generationState.blocked) return false;
+    let submissionEnvelope = envelope;
+    try {
+      if ((await readGenerationStatus(projection.record.id)).busy) {
+        setNotice(uiText("ui.generation.preparing", uiLanguage));
+        return false;
+      }
+      const fresh = await fetch(`/api/record?recordId=${encodeURIComponent(projection.record.id)}`, { cache: "no-store" });
+      if (!fresh.ok) return false;
+      submissionEnvelope = normalizeRecordEnvelope(await readJson(fresh), projection);
+      if (!submissionEnvelope.writeToken) return false;
+      setEnvelope(submissionEnvelope);
+    } catch {
+      setNotice(uiText("ui.generation.unknown", uiLanguage));
+      return false;
+    }
 
     const clientMessageId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setCancelKey(clientMessageId);
@@ -1351,7 +1370,7 @@ export function RealmClient() {
           content,
           recordId: projection.record.id,
           clientMessageId,
-          writeToken: envelope.writeToken,
+          writeToken: submissionEnvelope.writeToken,
           ...(actionSelection ? { actionSelection } : {}),
           ...(visibilityConfirmation ? { visibilityConfirmation } : {}),
         }),
@@ -1951,7 +1970,9 @@ export function RealmClient() {
             />
           ) : null}
 
+          <GenerationIndicator generation={generationState.generation} uiLanguage={uiLanguage} />
           <MessageComposer
+            submissionBlocked={generationState.blocked}
             affordances={envelope.affordances.map((affordance) => demoAffordanceText(affordance, uiLanguage))}
             disabled={isSending || !envelope.writeToken}
             suggestions={

@@ -113,6 +113,14 @@ export function GenesisDraftFields({ draft, patchDraft, uiLanguage, disabled = f
                 />
               </label>
               <label className="is-wide">
+                <span>{uiText("ui.genesisChat.field.playerName", uiLanguage)}</span>
+                <input
+                  maxLength={24}
+                  onChange={(event) => patchDraft((current) => ({ ...current, playerName: event.target.value }))}
+                  value={draft.playerName ?? ""}
+                />
+              </label>
+              <label className="is-wide">
                 <span>{uiText("ui.genesisChat.field.playerRole", uiLanguage)}</span>
                 <input
                   maxLength={60}

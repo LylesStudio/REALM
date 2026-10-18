@@ -6,6 +6,8 @@ import type { ActionAffordance, VisibilityProposal } from "./record-types";
 
 interface MessageComposerProps {
   disabled: boolean;
+  /** Background generation blocks only submission, not composing a draft. */
+  submissionBlocked?: boolean;
   affordances: readonly ActionAffordance[];
   /** 回合后的下一步对话提案（纸签快捷入口，点击填入输入框确认后送出）。 */
   suggestions?: readonly string[];
@@ -26,6 +28,7 @@ interface MessageComposerProps {
 
 export function MessageComposer({
   disabled,
+  submissionBlocked = false,
   affordances,
   suggestions = [],
   uiLanguage = "zh-CN",
@@ -38,16 +41,19 @@ export function MessageComposer({
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [selected, setSelected] = useState<ActionAffordance | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const submitInFlight = useRef(false);
 
   async function submit(visibilityDecision?: "public" | "restricted") {
     const trimmed = content.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || disabled || submissionBlocked || submitInFlight.current) return;
     if (visibilityProposal && !visibilityDecision) return;
+    submitInFlight.current = true;
     const pendingSelection = selected;
     setContent("");
     setSelected(null);
     setIsPanelOpen(false);
-    const didCommit = await onSubmit(
+    let didCommit = false;
+    try { didCommit = await onSubmit(
       trimmed,
       pendingSelection ? { affordanceId: pendingSelection.id } : undefined,
       visibilityDecision && visibilityProposal
@@ -56,7 +62,7 @@ export function MessageComposer({
             decision: visibilityDecision,
           }
         : undefined,
-    );
+    ); } finally { submitInFlight.current = false; }
     if (!didCommit) {
       setContent(trimmed);
       setSelected(pendingSelection);
@@ -150,10 +156,10 @@ export function MessageComposer({
           value={content}
         />
         <button
-          disabled={disabled || !content.trim() || visibilityProposal !== null}
+          disabled={disabled || submissionBlocked || !content.trim() || visibilityProposal !== null}
           type="submit"
         >
-          <span>{disabled ? uiText("ui.composer.busy", uiLanguage) : uiText("ui.composer.submit", uiLanguage)}</span>
+          <span>{disabled || submissionBlocked ? uiText("ui.composer.busy", uiLanguage) : uiText("ui.composer.submit", uiLanguage)}</span>
           <span aria-hidden="true">↵</span>
         </button>
       </div>
@@ -166,14 +172,14 @@ export function MessageComposer({
           </div>
           <div className="visibility-proposal-actions">
             <button
-              disabled={disabled}
+              disabled={disabled || submissionBlocked}
               onClick={() => void submit("restricted")}
               type="button"
             >
               {uiText("ui.visibilityCheck.restricted", uiLanguage)}
             </button>
             <button
-              disabled={disabled}
+              disabled={disabled || submissionBlocked}
               onClick={() => void submit("public")}
               type="button"
             >

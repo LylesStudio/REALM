@@ -19,6 +19,7 @@ import {
 } from "../modules/presentation/semantic-segments.ts";
 import type {
   M2TurnCandidate,
+  M2TurnOrchestrator,
   M2TurnPlan,
   M2TurnValidation,
   TurnVisibilityPlan,
@@ -55,7 +56,7 @@ type Repository = RuntimeRepository<
   OutboxPayload
 >;
 
-function createFixture(actionCatalog?: ActionAffordanceCatalog, freshNarrative=false) {
+function createFixture(actionCatalog?: ActionAffordanceCatalog, freshNarrative=false, orchestrator?: M2TurnOrchestrator) {
   const repository: Repository = createInMemoryRuntimeRepository({
     recordHeads: [
       { recordId: LOCAL_RECORD_SCOPE.recordId, version: freshNarrative?0:1, nextOrdinal: freshNarrative?0:2 },
@@ -123,6 +124,7 @@ function createFixture(actionCatalog?: ActionAffordanceCatalog, freshNarrative=f
     clock: () => new Date("2026-08-13T02:00:00.000Z"),
     idFactory: () => `local-${++idSequence}`,
     actionCatalog,
+    orchestrator,
     ...(freshNarrative?{orchestratorFactory:()=>createLocalM2TurnOrchestrator({characters:[],narrator:{async narrate(){
       const content='The doorway is open.';
       return {speaker:'Narrator',participantId:null,characterInstanceId:null,content,
@@ -133,6 +135,27 @@ function createFixture(actionCatalog?: ActionAffordanceCatalog, freshNarrative=f
   });
   return { repository, service };
 }
+
+test("live service exposes planner work before output and releases occupancy after a rejected turn", async () => {
+  const started = Promise.withResolvers<void>();
+  const held = Promise.withResolvers<void>();
+  const { service, repository } = createFixture(undefined, false, {
+    async plan() { started.resolve(); await held.promise; throw new Error("provider failed"); },
+    async draft() { throw new Error("must not draft"); },
+    async validate() { throw new Error("must not validate"); },
+  });
+  const before = await service.loadRecord(LOCAL_RECORD_SCOPE.recordId);
+  const pending = service.submitMessage({ recordId: LOCAL_RECORD_SCOPE.recordId, content: "我看看窗外。", idempotencyKey: "generation-service", writeToken: before.writeToken! });
+  await started.promise;
+  const active = await service.generationStatus(LOCAL_RECORD_SCOPE.recordId);
+  assert.equal(active.busy, true);
+  assert.ok(active.activities.some((activity) => activity.phase === "planner"));
+  assert.equal((await service.generationStatus("unrelated-record")).busy, false);
+  held.resolve();
+  await pending.catch(() => undefined);
+  assert.deepEqual(await service.generationStatus(LOCAL_RECORD_SCOPE.recordId), { busy: false, activities: [] });
+  assert.equal((await repository.listCommittedEvents(LOCAL_RECORD_SCOPE.recordId)).length, 0);
+});
 
 test('the first turn of an eventless Record can commit a supported narrative consequence',async()=>{
   const {repository,service}=createFixture(undefined,true);
@@ -598,6 +621,7 @@ test("committed SSE replays only projected events and honors viewer-local cursor
     async authorizeRecordViewer() { return undefined; },
     async admitMessage() { throw new Error("not used"); },
     async runAdmittedTurn() { return null; },
+    generationStatus() { return { busy: false, activities: [] }; },
     async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
@@ -662,6 +686,7 @@ test("SSE cancellation stops projection polling immediately", async () => {
     async authorizeRecordViewer() { return undefined; },
     async admitMessage() { throw new Error("not used"); },
     async runAdmittedTurn() { return null; },
+    generationStatus() { return { busy: false, activities: [] }; },
     async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
@@ -700,6 +725,7 @@ test("SSE request abort stops projection polling", async () => {
     async authorizeRecordViewer() { return undefined; },
     async admitMessage() { throw new Error("not used"); },
     async runAdmittedTurn() { return null; },
+    generationStatus() { return { busy: false, activities: [] }; },
     async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;
@@ -740,6 +766,7 @@ test("SSE does not poll when the request was already aborted", async () => {
     async authorizeRecordViewer() { return undefined; },
     async admitMessage() { throw new Error("not used"); },
     async runAdmittedTurn() { return null; },
+    generationStatus() { return { busy: false, activities: [] }; },
     async readTurnStatus() { throw new Error("not used"); },
     cancelMessage() {
       return false;

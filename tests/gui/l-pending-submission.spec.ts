@@ -40,7 +40,7 @@ test.describe("L. 生成中暂存位", () => {
     const panel = page.getByRole("dialog", { name: "当前可用行动" });
     await panel.locator(".affordance-list button", { hasText: "细致观察" }).click();
     let status = 0;
-    for (let attempt = 0; attempt < 4 && status !== 201; attempt += 1) {
+    for (let attempt = 0; attempt < 4 && status !== 202; attempt += 1) {
       const responsePromise = page.waitForResponse(
         (res) =>
           res.url().includes("/api/record/messages")
@@ -50,7 +50,7 @@ test.describe("L. 生成中暂存位", () => {
       await page.getByRole("button", { name: "送出" }).click();
       status = (await responsePromise).status();
     }
-    expect(status).toBe(201);
+    expect(status).toBe(202);
 
     // 揭示完成后：滚动类消失，真实结果文本稳定可读，数据属性保留。
     const dice = page.locator(".event-dice").last();

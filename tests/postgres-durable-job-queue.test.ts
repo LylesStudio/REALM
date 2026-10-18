@@ -18,6 +18,7 @@ import {
 } from "../database/postgres/public.ts";
 import { DurableJobQueueError } from "../database/postgres/durable-job-queue.ts";
 import { withWorkspaceTransaction } from "../database/postgres/workspace-transaction.ts";
+import { readPersistentGenerationStatus } from "../database/postgres/generation-status.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -98,6 +99,12 @@ test(
       requeueTerminal: true,
       availableAt: NOW,
     }), "inserted");
+    assert.deepEqual(await readPersistentGenerationStatus(runtimePool, WORKSPACE, "record_a"), {
+      busy: true, activities: [{ phase: "queued" }],
+    });
+    assert.deepEqual(await readPersistentGenerationStatus(runtimePool, WORKSPACE, "record_b"), {
+      busy: false, activities: [],
+    });
     // active 去重：同 id 不重叠。
     assert.equal(await queue.enqueue({
       jobId: "first-night:record_a",
@@ -115,11 +122,17 @@ test(
     assert.equal(claimed.kind, "first-night");
     assert.equal(claimed.attemptCount, 1);
     assert.equal(claimed.leaseOwner, "test-worker-1");
+    assert.deepEqual(await readPersistentGenerationStatus(runtimePool, WORKSPACE, "record_a"), {
+      busy: true, activities: [{ phase: "opening" }],
+    });
     // 未到期 claimed 行不得重领。
     assert.equal(await queue.claimNext({ now: NOW, kinds: ["first-night"] }), null);
 
     // 幂等 complete：applied → settled；其他 lease owner 的完成是 stale。
     assert.equal(await queue.complete(claimed, NOW), "applied");
+    assert.deepEqual(await readPersistentGenerationStatus(runtimePool, WORKSPACE, "record_a"), {
+      busy: false, activities: [],
+    });
     assert.equal(await queue.complete(claimed, NOW), "settled");
     assert.equal(
       await queue.complete({ ...claimed, leaseOwner: "intruder" }, NOW),

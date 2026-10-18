@@ -162,7 +162,7 @@ test(
     await seedPostgresDemo(ownerPool);
     await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
 
-    // 当前账号的 displayName 是新记录人类玩家名的唯一权威来源。
+    // Account identity remains stable; unnamed worlds retain the legacy name fallback.
     await ownerPool.query(
       `INSERT INTO accounts (workspace_id, principal_id, display_name)
        VALUES ($1, $2, $3)
@@ -796,12 +796,13 @@ test(
     );
 
     // 启笔铸界：单事务原子创建世界/故事/记录/阵容/场景，
-    // 人类玩家名绑定 accounts.display_name，同伴来自草稿。
+    // Explicit in-world name wins; the account still owns the human seat.
     const genesis = await service.createGenesis(scope, {
       world: { name: "云港志", era: "风账纪元 3 年", summary: "云海上的旧船港。" },
       style: "modern",
       story: { title: "雾中航船", premise: "一艘无籍船靠岸。" },
       record: { title: "靠岸" },
+      playerName: "霁川",
       playerRole: "替港口辨认风声的新账房",
       companions: [
         { name: "阿橹", role: "记账员", summary: "听得懂风声的人。" },
@@ -833,20 +834,40 @@ test(
     // 阵容定义含自动装配的人类玩家与草稿同伴，无任何演示世界角色。
     assert.deepEqual(
       genesisWorld.characters.map((character) => character.name).sort(),
-      ["测试旅人", "阿橹", "老锚"].sort(),
+      ["霁川", "阿橹", "老锚"].sort(),
     );
 
     const genesisEnvelope = await recordService.loadRecord(genesis.recordId);
     assert.equal(genesisEnvelope.record.record.id, genesis.recordId);
     assert.deepEqual(
       genesisEnvelope.record.cast.map((member) => member.name).sort(),
-      ["测试旅人", "阿橹", "老锚"].sort(),
+      ["霁川", "阿橹", "老锚"].sort(),
     );
     const genesisPlayer = genesisEnvelope.record.cast.find(
-      (member) => member.name === "测试旅人",
+      (member) => member.name === "霁川",
     );
     assert.equal(genesisPlayer?.controlledBy, "human");
     assert.equal(genesisPlayer?.role, "替港口辨认风声的新账房");
+    const namedScope = await runtimeScopeProvider.resolve({ workspaceId: scope.workspaceId, principalId: scope.principalId, recordId: genesis.recordId });
+    assert.equal(namedScope?.playerActor.displayName, "霁川");
+    assert.equal(namedScope?.principalId, scope.principalId);
+    const firstNightName = await ownerPool.query<{ name: string }>(
+      `SELECT context->>'playerName' AS name FROM record_first_nights WHERE workspace_id = $1 AND record_id = $2`,
+      [scope.workspaceId, genesis.recordId],
+    );
+    assert.equal(firstNightName.rows[0]?.name, "霁川");
+    await service.create(scope, { kind: "record", storyId: genesis.storyId, title: "霁川的新记录" });
+    const continued = (await service.list(scope)).worlds.find((world) => world.id === genesis.worldId)
+      ?.stories.find((story) => story.id === genesis.storyId)?.records.find((record) => record.title === "霁川的新记录");
+    assert.ok(continued);
+    const continuedEnvelope = await recordService.loadRecord(continued.id);
+    assert.ok(continuedEnvelope.record.cast.some((member) => member.name === "霁川" && member.controlledBy === "human"));
+    assert.ok(!continuedEnvelope.record.cast.some((member) => member.name === "测试旅人"));
+    const unchangedAccount = await ownerPool.query<{ display_name: string }>(
+      `SELECT display_name FROM accounts WHERE workspace_id = $1 AND principal_id = $2`,
+      [scope.workspaceId, scope.principalId],
+    );
+    assert.equal(unchangedAccount.rows[0]?.display_name, "测试旅人");
     assert.equal(genesisEnvelope.record.scene.location, "七号泊台");
     assert.equal(genesisEnvelope.record.scene.weather, "平流雾");
     assert.equal(genesisEnvelope.record.scene.tension, "港卫警惕");
@@ -1426,7 +1447,7 @@ test(
     const observerPhaseEnvelope = await recordService.loadRecord(genesis.recordId);
     assert.equal(observerPhaseEnvelope.viewer.membershipRole, "observer");
     assert.ok(!observerPhaseEnvelope.record.cast.some(
-      (member) => member.name === "测试旅人" && member.isActive,
+      (member) => member.name === "霁川" && member.isActive,
     ));
     await service.create(scope, {
       kind: "player-stance",
@@ -1436,7 +1457,7 @@ test(
     const restoredEnvelope = await recordService.loadRecord(genesis.recordId);
     assert.equal(restoredEnvelope.viewer.membershipRole, "player");
     assert.ok(restoredEnvelope.record.cast.some(
-      (member) => member.name === "测试旅人" && member.isActive,
+      (member) => member.name === "霁川" && member.isActive,
     ));
     const seatsAfterToggle = await ownerPool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM participants

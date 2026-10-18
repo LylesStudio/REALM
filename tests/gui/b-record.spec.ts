@@ -94,14 +94,14 @@ test.describe("B. 记录页交互", () => {
     expect(widths.content / widths.article).toBeGreaterThan(0.9);
   });
 
-  test("B3 自然输入提交：201 且时间线出现新事件", async ({ page, request }) => {
+  test("B3 自然输入提交：202 且时间线出现新事件", async ({ page, request }) => {
     const record = await createRecordViaApi(request);
     await openDemoRecord(page);
     await openRecordViaLibrary(page, record.title);
 
     const content = "今晚的雾比昨晚更重。";
     const { response } = await submitMessage(page, content);
-    expect(response.status()).toBe(201);
+    expect(response.status()).toBe(202);
 
     const card = page.locator(".event-card.is-committed", { hasText: content });
     await expect(card).toBeVisible();
@@ -114,7 +114,7 @@ test.describe("B. 记录页交互", () => {
     await openRecordViaLibrary(page, record.title);
 
     const { response } = await submitMessage(page, "（环顾四周）这里好安静。");
-    expect(response.status()).toBe(201);
+    expect(response.status()).toBe(202);
 
     const card = page.locator(".event-card.is-committed", {
       hasText: "这里好安静",
@@ -162,7 +162,7 @@ test.describe("B. 记录页交互", () => {
 
     const response = await responsePromise;
     // 真实模型偶发失败不算 UI bug：失败后草稿恢复，补一次重试。
-    if (response.status() !== 201) {
+    if (response.status() !== 202) {
       await expect(input).toHaveValue(content, { timeout: 30_000 });
       const retryPromise = page.waitForResponse(
         (res) =>
@@ -209,7 +209,7 @@ test.describe("B. 记录页交互", () => {
     // 恢复网络后可直接重试并成功提交。
     // 真实模型偶发失败不算 UI bug：最多重试 3 次。
     let status = 0;
-    for (let attempt = 0; attempt < 4 && status !== 201; attempt += 1) {
+    for (let attempt = 0; attempt < 4 && status !== 202; attempt += 1) {
       const responsePromise = page.waitForResponse(
         (res) =>
           res.url().includes("/api/record/messages")
@@ -219,7 +219,7 @@ test.describe("B. 记录页交互", () => {
       await page.getByRole("button", { name: "送出" }).click();
       status = (await responsePromise).status();
     }
-    expect(status).toBe(201);
+    expect(status).toBe(202);
     await expect(
       page.locator(".event-card.is-committed", { hasText: content }),
     ).toBeVisible({ timeout: 180_000 });

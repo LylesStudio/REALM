@@ -148,6 +148,9 @@ export function sanitizeDraftPatch(
     const title = clampText(patch.record.title, GENESIS_LIMITS.recordTitle);
     if (typeof patch.record.title === "string" && title) result.record = { title };
   }
+  if (typeof patch.playerName === "string") {
+    result.playerName = clampText(patch.playerName, GENESIS_LIMITS.playerName);
+  }
   if (patch.playerRole !== undefined && patch.playerRole !== null) {
     if (typeof patch.playerRole === "string") {
       result.playerRole = clampText(patch.playerRole, GENESIS_LIMITS.playerRole);
@@ -237,7 +240,7 @@ export function mergeDraftPatch(
 export const GENESIS_EDITABLE_FIELD_PATHS = [
   "world.name", "world.era", "world.summary",
   "story.title", "story.premise", "record.title",
-  "style", "language", "playerRole", "playerStance", "opening",
+  "style", "language", "playerName", "playerRole", "playerStance", "opening",
   "companions", "recordGoals",
   "scene.title", "scene.location", "scene.weather",
   "scene.tension", "scene.displayTime", "scene.objective",

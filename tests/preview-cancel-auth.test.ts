@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handlePreviewGet } from "../app/api/record/preview/route.ts";
+import { handleGenerationGet } from "../app/api/record/generation/route.ts";
 import {
   POST as cancelPost,
   handleCancelPost,
@@ -33,6 +34,40 @@ import type { SemanticSegment } from "../modules/presentation/semantic-segments.
  */
 
 type CommandPayload = { text: string; visibility: TurnVisibilityPlan };
+
+test("generation status authenticates and authorizes before reading; failures reveal no internals", async () => {
+  await withGate(true, async () => {
+    const { service, spies } = createFakeService();
+    let reads = 0;
+    service.generationStatus = (recordId, viewer) => {
+      reads++;
+      assert.equal(recordId, "allowed");
+      assert.equal(viewer, "char_inst_player");
+      return { busy: true, activities: [{ phase: "character", speaker: "阿橹" }] };
+    };
+    const request = (path: string, authenticated = true) => new Request(`http://localhost/api/record/generation${path}`, {
+      headers: authenticated ? { Cookie: sessionCookie(SESSION_PRINCIPAL) } : {},
+    });
+    assert.equal((await handleGenerationGet(request("?recordId=allowed", false), service)).status, 401);
+    assert.equal(spies.authorizeCalls.length, 0);
+    assert.equal((await handleGenerationGet(request(""), service)).status, 400);
+    assert.equal(reads, 0);
+    const response = await handleGenerationGet(request("?recordId=allowed"), service);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("cache-control")!, /no-store/);
+    assert.deepEqual(await response.json(), { ok: true, recordId: "allowed", generation: { busy: true, activities: [{ phase: "character", speaker: "阿橹" }] } });
+    assert.equal(reads, 1);
+    const denied = createFakeService({ authorizeError: new LocalRecordServiceError("NOT_FOUND", "hidden record and SQL diagnostics") }).service;
+    denied.generationStatus = () => { throw new Error("must not read"); };
+    const hidden = await handleGenerationGet(request("?recordId=hidden"), denied);
+    assert.equal(hidden.status, 404);
+    assert.deepEqual(await hidden.json(), { ok: false, error: { code: "NOT_FOUND" } });
+    service.generationStatus = () => { throw new Error("prompt, SQL and private connection detail"); };
+    const unavailable = await handleGenerationGet(request("?recordId=allowed"), service);
+    assert.equal(unavailable.status, 500);
+    assert.deepEqual(await unavailable.json(), { ok: false, error: { code: "GENERATION_STATUS_UNAVAILABLE" } });
+  });
+});
 type EventPayload = {
   schemaVersion: 1;
   role: "player" | "character" | "narrator" | "system";
@@ -101,6 +136,7 @@ function createFakeService(options: {
     throw new Error("not used");
   };
   const service: LocalRecordService = {
+    generationStatus() { return { busy: false, activities: [] }; },
     loadRecord: unused,
     openDefaultRecord: unused,
     submitMessage: unused,

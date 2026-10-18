@@ -60,7 +60,9 @@ export interface WorldGenesisDraft {
   style: WorldStyle;
   story: { title: string; premise: string };
   record: { title: string };
-  /** 人类玩家在本世界中的角色定位（名称来自登录账号，不在草稿内）。 */
+  /** In-world role name. Omitted/blank preserves the legacy account-name fallback. */
+  playerName?: string;
+  /** 人类玩家在本世界中的角色定位，与登录账号身份分离。 */
   playerRole: string;
   /** 契合世界观的本地 AI 同伴，至多两名。 */
   companions: { name: string; role: string; summary: string }[];
@@ -127,6 +129,7 @@ export const GENESIS_LIMITS = {
   storyTitle: 60,
   premise: 300,
   recordTitle: 60,
+  playerName: 24,
   playerRole: 60,
   companionName: 24,
   companionRole: 40,
@@ -214,6 +217,7 @@ export function normalizeGenesisDraft(
     record: {
       title: clamp(record.title, GENESIS_LIMITS.recordTitle) || defaultGenesisRecordTitle(language),
     },
+    ...(typeof source.playerName === "string" ? { playerName: clamp(source.playerName, GENESIS_LIMITS.playerName) } : {}),
     playerRole: clamp(source.playerRole, GENESIS_LIMITS.playerRole),
     companions,
     scene: {
@@ -286,6 +290,7 @@ export function sanitizeUntrustedGenesisDraft(value: unknown): Partial<WorldGene
     const title = clamp(value.record.title, GENESIS_LIMITS.recordTitle);
     if (title) result.record = { title };
   }
+  if (typeof value.playerName === "string") result.playerName = clamp(value.playerName, GENESIS_LIMITS.playerName);
   const playerRole = clamp(value.playerRole, GENESIS_LIMITS.playerRole);
   if (playerRole) result.playerRole = playerRole;
   if (value.playerStance === "observer" || value.playerStance === "player") {
@@ -350,6 +355,7 @@ export function settledGenesisView(value: unknown): Record<string, unknown> | nu
     if (Object.keys(story).length > 0) view.story = story;
   }
   if (typeof draft.record?.title === "string") view.record = { title: draft.record.title };
+  if (typeof draft.playerName === "string") view.playerName = draft.playerName;
   if (typeof draft.playerRole === "string") view.playerRole = draft.playerRole;
   if (draft.playerStance) view.playerStance = draft.playerStance;
   if (typeof draft.opening === "string") view.opening = draft.opening;

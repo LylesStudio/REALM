@@ -48,6 +48,7 @@ import type {
 import { isInternalInstructionText } from "../presentation/semantic-segments.ts";
 import { FatalTurnError, RetryableTurnError } from "../runtime/public.ts";
 import { createJsonFieldPreviewExtractor } from "../streaming/json-preview.ts";
+import { trackGeneration, type GenerationSink } from "../streaming/generation-status.ts";
 import { decodeNarrativeState, normalizeNarrativeConsequence } from "../application/narrative-situation.ts";
 import { parseRecordGoalNarrativeContext } from "../goals/narrative-context.ts";
 import {
@@ -535,6 +536,8 @@ export function createModelPoweredM2TurnOrchestrator(options: {
   recallMemory?: (character: ActivatedCharacter, query: string) => Promise<string>;
   /** M4：流式 Preview 块出口；仅内存广播，永不持久化。 */
   previewSink?: (event: ModelPreviewEvent) => void;
+  /** Actual model-stage occupancy; no chain-of-thought or prompt content. */
+  onGeneration?: GenerationSink;
   /** 世界/故事/场景快照：回合管线的设定依据。 */
   brief?: WorldSceneBrief;
   /** 世界文风（缺省 modern）。 */
@@ -569,32 +572,21 @@ export function createModelPoweredM2TurnOrchestrator(options: {
     language: options.language,
     stageDeadlineMs: options.stageDeadlineMs,
   });
+  const narrator = createModelNarrator(options.getGateway, options.previewSink, options.brief, options.style,
+    options.language, options.subjectContext?.recordKnowledge, options.stageDeadlineMs);
+  const runner = createModelCharacterRunner(options.getGateway, options.recallMemory, options.previewSink,
+    options.brief, options.style, options.language, options.characterSkillProvider, options.subjectContext, options.stageDeadlineMs);
   return createLocalM2TurnOrchestrator({
     characters: options.characters,
     dmController,
-    narrator: createModelNarrator(
-      options.getGateway,
-      options.previewSink,
-      options.brief,
-      options.style,
-      options.language,
-      options.subjectContext?.recordKnowledge,
-      options.stageDeadlineMs,
-    ),
+    narrator: { narrate: (input) => trackGeneration(options.onGeneration, { phase: "narrator" }, () => narrator.narrate(input), input.signal) },
     actionResolver: options.actionResolver ?? createDeterministicActionResolver({
       allowStatefulReceipts: true,
     }),
-    characterRunner: createModelCharacterRunner(
-      options.getGateway,
-      options.recallMemory,
-      options.previewSink,
-      options.brief,
-      options.style,
-      options.language,
-      options.characterSkillProvider,
-      options.subjectContext,
-      options.stageDeadlineMs,
-    ),
+    characterRunner: {
+      propose: (input) => trackGeneration(options.onGeneration, { phase: "character", speaker: input.character.displayName }, () => runner.propose(input), input.signal),
+      react: (input) => trackGeneration(options.onGeneration, { phase: "character", speaker: input.character.displayName }, () => runner.react(input), input.signal),
+    },
   });
 }
 

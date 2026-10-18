@@ -27,7 +27,7 @@ test.describe("G. 实时同步", () => {
     await openRecordViaLibrary(pageB, record.title);
     const content = "我向大家挥手致意。";
     const { response } = await submitMessage(pageB, content);
-    expect(response.status()).toBe(201);
+    expect(response.status()).toBe(202);
     // 本页不刷新，事件经 SSE 自动出现。
     await expect(
       page.locator(".event-card.is-committed.event-player", { hasText: content }),
@@ -56,7 +56,7 @@ test.describe("G. 实时同步", () => {
     await openRecordViaLibrary(pageB, record.title);
     const content = "雾中传来一阵脚步声。";
     const { response } = await submitMessage(pageB, content);
-    expect(response.status()).toBe(201);
+    expect(response.status()).toBe(202);
     await contextB.close();
     // 恢复连接：状态回到实时同步，断线期间的事件回补到时间线。
     await page.unroute("**/api/record/events**");

@@ -1102,6 +1102,21 @@ button:disabled {
 }
 
 /* M4 流式 Preview 卡：虚线、降低不透明度，明确“尚未写入记录”。 */
+.generation-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px clamp(20px, 4vw, 52px);
+  border-top: 1px solid var(--line-dark);
+  color: var(--ink-soft);
+  background: var(--paper-soft);
+  font-size: 12px;
+}
+.generation-indicator strong, .generation-indicator small { display: block; }
+.generation-indicator strong { font-weight: 500; }
+.generation-indicator small { margin-top: 3px; opacity: 0.75; }
+.generation-indicator > span { color: var(--gold); font-size: 22px; }
+
 .preview-card {
   background: var(--paper-soft);
   border: 1px dashed var(--gold);

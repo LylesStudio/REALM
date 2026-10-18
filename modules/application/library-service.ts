@@ -27,6 +27,7 @@ import {
 import { genesisDraftFromResolvedContent } from "./preset-worlds.ts";
 import {
   GENESIS_CREATION_REQUEST_ID,
+  GENESIS_LIMITS,
   genesisBindingFromDraft,
   genesisDraftFingerprint,
   normalizeGenesisLanguage,
@@ -1344,6 +1345,7 @@ export function createPostgresLibraryService(
             recordId,
             companions,
             {
+              playerName: draft.playerName,
               playerRole: draft.playerRole,
               observer,
               scene: {
@@ -2348,6 +2350,7 @@ export interface AssembleSceneSeed {
 }
 
 export interface AssembleOptions {
+  playerName?: string;
   /** 草稿为人类玩家赋予的本世界角色定位；缺省沿用种子定义或留空。 */
   playerRole?: string;
   scene?: AssembleSceneSeed;
@@ -2382,7 +2385,8 @@ async function resolveAccountLanguage(
 }
 
 /**
- * 人类玩家名称解析: 当前账号 displayName → 本世界种子人类定义 → 中性名。
+ * World-local owned character → account fallback → seeded demo → neutral.
+ * Ownership is always principal-bound; another player's name is never reused.
  * 任何分支都不硬编码演示世界的角色名。
  */
 async function resolvePlayerPersona(
@@ -2390,6 +2394,27 @@ async function resolvePlayerPersona(
   scope: LibraryScope,
   worldId: string,
 ): Promise<PlayerPersona> {
+  const owned = await client.query<{ display_name: string; role: string }>(
+    `SELECT definition.display_name, COALESCE(definition.profile->>'role', '') AS role
+     FROM participants AS participant
+     JOIN character_instances AS instance
+       ON instance.workspace_id = participant.workspace_id
+      AND instance.id = participant.character_instance_id
+     JOIN character_continuities AS continuity
+       ON continuity.workspace_id = instance.workspace_id
+      AND continuity.id = instance.continuity_id
+     JOIN character_definitions AS definition
+       ON definition.workspace_id = continuity.workspace_id
+      AND definition.world_id = continuity.world_id
+      AND definition.id = continuity.definition_id
+     WHERE participant.workspace_id = $1 AND participant.world_id = $2
+       AND participant.principal_id = $3 AND participant.controller_mode = 'human'
+       AND participant.participant_kind = 'character'
+     ORDER BY participant.created_at, participant.id LIMIT 1`,
+    [scope.workspaceId, worldId, scope.principalId],
+  );
+  const ownedName = owned.rows[0]?.display_name?.trim();
+  if (ownedName) return { name: ownedName, role: owned.rows[0]?.role?.trim() ?? "" };
   const account = await client.query<{ display_name: string }>(
     `SELECT display_name
      FROM accounts
@@ -2491,7 +2516,7 @@ async function assembleDefaultRecord(
     ...(persona
       ? [{
           key: "player",
-          name: persona.name,
+          name: options.playerName?.trim().slice(0, GENESIS_LIMITS.playerName) || persona.name,
           role: options.playerRole?.trim() || persona.role,
           controller: "human",
         }]

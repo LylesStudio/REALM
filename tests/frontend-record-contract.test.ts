@@ -409,7 +409,9 @@ test("frontend sends the opaque write token and subscribes to committed SSE", ()
     new URL("../app/realm-client.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /writeToken:\s*envelope\.writeToken/);
+  assert.match(source, /writeToken:\s*submissionEnvelope\.writeToken/);
+  assert.match(source, /submissionEnvelope = normalizeRecordEnvelope\(await readJson\(fresh\), projection\)/);
+  assert.match(source, /await readGenerationStatus\(projection\.record\.id\)/);
   assert.match(source, /actionSelection/);
   assert.doesNotMatch(source, /expectedVersion/);
   assert.match(source, /new EventSource\(`/);

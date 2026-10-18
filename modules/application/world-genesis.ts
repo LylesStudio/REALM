@@ -21,7 +21,7 @@ import {
  * 启笔铸界：自然语言一键创世的生成通道（server-only，含模型调用）。
  *
  * 草稿始终先以「纸墨手稿」呈现给用户微调，确认后才原子落库；
- * 人类玩家不进入草稿——创建时绑定当前会话 principal 的账号 displayName。
+ * The in-world playerName is editable; authorization remains bound to the session principal.
  * 草稿类型/规整/降级等纯契约在 ./world-genesis-contract.ts（client-safe）。
  */
 
@@ -59,7 +59,8 @@ const GENESIS_SCHEMA = jsonOutputInstruction([
   { name: "story", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.storyTitle} chars, "premise": <= ${GENESIS_LIMITS.premise} chars}` },
   { name: "record", kind: "object", note: `{"title": <= ${GENESIS_LIMITS.recordTitle} chars}` },
   { name: "style", kind: "enum", values: WORLD_STYLE_KEYS, note: "world register; omit to keep the modern default" },
-  { name: "playerRole", kind: "string", maxLength: GENESIS_LIMITS.playerRole, note: "the human player's position in this world (the player plays themself; do not name them)" },
+  { name: "playerName", kind: "string", required: false, maxLength: GENESIS_LIMITS.playerName, note: "the player's in-world character name; preserve an explicitly requested name; omit when unspecified, never substitute a sign-in account name" },
+  { name: "playerRole", kind: "string", maxLength: GENESIS_LIMITS.playerRole, note: "the human player's position in this world, separate from their character name" },
   { name: "playerStance", kind: "enum", values: ["player", "observer"], note: "observer = the player holds the pen without playing a character" },
   { name: "companions", kind: "object[]", note: `1–${MAX_COMPANIONS} original characters fitting the world, each {"name": <= ${GENESIS_LIMITS.companionName} chars, "role": <= ${GENESIS_LIMITS.companionRole} chars, "summary": one line <= ${GENESIS_LIMITS.companionSummary} chars}` },
   { name: "scene", kind: "object", note: `{"title"?: <= ${GENESIS_LIMITS.sceneTitle} chars, "location","weather","tension" each <= ${GENESIS_LIMITS.sceneField} chars, "displayTime"?: <= ${GENESIS_LIMITS.displayTime} chars, "objective": <= ${GENESIS_LIMITS.objective} chars}` },

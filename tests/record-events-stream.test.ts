@@ -51,6 +51,7 @@ function fakeService(initial: ProjectionEvent[]): FakeService {
     service: undefined as unknown as LocalRecordService,
   };
   state.service = {
+    generationStatus() { return { busy: false, activities: [] }; },
     async loadRecord() {
       throw new Error("not used");
     },

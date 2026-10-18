@@ -2,6 +2,29 @@
 
 本文件记录公开版本的重要变化。尚未发布的内容放在 `[Unreleased]`。
 
+## [Unreleased]
+
+## [1.1.0] - 2026-10-18
+
+### Added
+
+- Record 独立的 fixed/evolving Goal：AI 或人工创世、创建、修订、撤回、按正式证据评估，以及有版本和后继关系的自动演化。
+- Goal 与 narrative situation 的有界公开上下文、运行状态展示，以及 `.realm` 存档恢复和独立分支中的完整历史继承。
+- 生成状态提示：显示角色正在思考、旁白、导演规划、审核、场景整理及排队/开场任务；私密阶段按当前读者权限隐藏细节。
+- 后台忙或状态未知时保留可编辑草稿并阻止发送，恢复后刷新记录和提交凭据，减少过早提交后重新输入的问题。
+- 创世角色姓名与账号昵称解耦：显式姓名用于世界内身份、开场上下文和玩家发言，同世界后续记录延续当前账号拥有的角色名；不回写账号昵称或旧事件。
+
+### Fixed
+
+- 空 Record 第一轮正式叙事的 head ordinal 归一化，避免负游标导致合法 narrative proposal 被拒绝。
+- public 干净安装的文档和静态契约依赖：公开契约与通用模板独立于内部任务书和本机运维配置。
+- 相邻 GUI 回归按既有 `202` 异步受理协议等待正式事件，不把已受理的请求当失败重复提交。
+
+### Verification scope
+
+- 代码门禁、隔离 PostgreSQL 与确定性 Chromium/WebKit 回归通过；此前 Record Goal 的真实模型、已安装验签受控 RealmWorld 与恢复/分支验收保留在维护证据中。
+- 本次为源码发行，不附带新的预构建桌面安装器。目标设备部署与平台验证另行记录，不将隔离测试扩大为所有平台安装验收。
+
 ## [0.4.9] - 2026-10-02
 
 ### Fixed
@@ -51,19 +74,6 @@
 - Windows 旧安装目录的 PostgreSQL migration ledger 若记录了 `0014` 的 CRLF checksum，升级时现在会按明确白名单兼容，不会误报迁移文件被修改。
 - PostgreSQL migration checksum 统一按 LF 计算，避免 Windows 换行格式让后续升级再次产生跨平台漂移；未知 checksum 仍 fail-closed。
 - migration checksum 错误现在同时报告已存储与当前 checksum，便于定位真实的历史漂移。
-
-## [Unreleased]
-
-### Added
-
-- Record 独立的 fixed/evolving Goal：AI 或人工创世、创建、修订、撤回、按正式证据评估，以及有版本和后继关系的自动演化。
-- Goal 与 narrative situation 的有界公开上下文、运行状态展示，以及 `.realm` 存档恢复和独立分支中的完整历史继承。
-- 真实模型、实际安装验签的受控 RealmWorld、恢复/分支继续运行，以及 Chromium/WebKit 的联合回归。
-
-### Fixed
-
-- 空 Record 第一轮正式叙事的 head ordinal 归一化，避免负游标导致合法 narrative proposal 被拒绝。
-- public 干净安装的文档和静态契约依赖：公开契约与通用模板独立于内部任务书和本机运维配置。
 
 ## [1.0.0] - 2026-10-11
 

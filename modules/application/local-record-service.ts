@@ -1,6 +1,8 @@
 import type { ProjectionEvent } from "./legacy-record-projection-types.ts";
 import type { Pool } from "pg";
 import { createHash } from "node:crypto";
+import { createGenerationStatusHub, type GenerationSink, type GenerationStatus } from "../streaming/generation-status.ts";
+import { readPersistentGenerationStatus } from "../../database/postgres/generation-status.ts";
 import {
   POSTGRES_DEMO_IDS,
   createLocalPostgresPool,
@@ -315,6 +317,8 @@ export type OpenDefaultRecordResult =
   | { kind: "onboarding" };
 
 export interface LocalRecordService {
+  /** Session/member authorization must precede this ephemeral read. */
+  generationStatus(recordId: string, viewerCharacterInstanceId?: string): GenerationStatus | Promise<GenerationStatus>;
   /**
    * Slice 2.5：recordId 必填——公共方法不再以演示 Record 为缺省。
    * 「打开上次记录/新手引导」的缺省入口是 openDefaultRecord。
@@ -411,7 +415,8 @@ export interface LocalRecordServiceDependencies {
   clock?: () => Date;
   idFactory?: () => string;
   orchestrator?: M2TurnOrchestrator;
-  orchestratorFactory?: (scope: RecordRuntimeScope) => M2TurnOrchestrator;
+  orchestratorFactory?: (scope: RecordRuntimeScope, onGeneration?: GenerationSink) => M2TurnOrchestrator;
+  loadGenerationStatus?: (recordId: string) => Promise<GenerationStatus>;
   runtimeScopeProvider?: RecordRuntimeScopeRepository;
   actionCatalog?: ActionAffordanceCatalog;
   visibilityAssessor?: LocalVisibilityAssessor;
@@ -631,7 +636,7 @@ export function createLocalRecordService(
   const visibilityProposals = dependencies.visibilityProposals
     ?? createMemoryVisibilityProposalRegistry({ clock });
   const orchestratorForRuntime = dependencies.orchestratorFactory
-    ? (scope: RecordRuntimeScope) => dependencies.orchestratorFactory!(scope)
+    ? (scope: RecordRuntimeScope, onGeneration?: GenerationSink) => dependencies.orchestratorFactory!(scope, onGeneration)
     : dependencies.orchestrator;
   const turnControl = dependencies.turnControl ?? createTurnControl({});
   const interjectionPolicy = dependencies.interjectionPolicy
@@ -644,6 +649,7 @@ export function createLocalRecordService(
         ? () => dependencies.presenceAssessor!
         : null;
   const previewHub = dependencies.previewHub ?? createLocalPreviewHub();
+  const generationStatus = createGenerationStatusHub();
   const turnSignals = new Map<string, ActiveTurnSignal>();
   const actionCatalog = dependencies.actionCatalog ?? {
     async listAuthorized() {
@@ -657,6 +663,7 @@ export function createLocalRecordService(
     orchestratorForRuntime,
     turnSignals,
     actionCatalog,
+    generationStatus,
   );
   // Phase 2F-A：自演拍循环由独立 coordinator 承载；facade 只组装窄依赖
   // （快照/晶化走本文件既有函数，单飞守卫在 coordinator 内部）。
@@ -737,6 +744,7 @@ export function createLocalRecordService(
     /** 发起回合的 principal；快照加载按真实 membership 解析。 */
     principalId?: string;
   }): Promise<void> {
+    const finishGeneration = generationStatus.begin(input.recordId, { phase: "preparing" }, { kind: "public" });
     try {
       const decision = interjectionPolicy.evaluate({
         recordId: input.recordId,
@@ -816,6 +824,8 @@ export function createLocalRecordService(
       console.warn(
         `[realm] interjection skipped: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      finishGeneration();
     }
   }
 
@@ -844,6 +854,7 @@ export function createLocalRecordService(
     };
     prefetchedMemories: ReadonlyMap<string, string>;
   }): Promise<void> {
+    const finishGeneration = generationStatus.begin(input.recordId, { phase: "preparing" }, { kind: "public" });
     try {
       if (!presenceAssessorFor) return; // 未装配 → 在场禁用（内存测试零变化）
       const budget = Math.min(
@@ -908,11 +919,13 @@ export function createLocalRecordService(
         turnControl,
       });
       if (candidates.length === 0) return;
-      const decision = await presenceAssessorFor(freshScope).assess({
+      const finishAssessment = generationStatus.begin(input.recordId, { phase: "reviewer" }, { kind: "public" });
+      let decision: Awaited<ReturnType<PresenceAssessor["assess"]>>;
+      try { decision = await presenceAssessorFor(freshScope).assess({
         context,
         candidates,
         budget,
-      });
+      }); } finally { finishAssessment(); }
       if (decision.kind !== "speak") return;
       const selectedCharacter = candidates.find(
         (candidate) => candidate.characterInstanceId === decision.characterInstanceId,
@@ -1050,6 +1063,8 @@ export function createLocalRecordService(
       console.warn(
         `[realm] presence skipped: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      finishGeneration();
     }
   }
 
@@ -1304,6 +1319,7 @@ export function createLocalRecordService(
     generation: number,
   ): void {
     crystallizationInFlight.add(key);
+    const finishGeneration = generationStatus.begin(input.recordId, { phase: "scene" }, { kind: "public" });
     // re-arm 沿用 pending 保存的 generation（不重新分配 token）。
     const isCurrentGeneration = () =>
       crystallizationGenerations.get(key) === generation;
@@ -1320,6 +1336,7 @@ export function createLocalRecordService(
         // 只释放自己这次 flight；若已有更新 schedule（generation 更大），
         // 其 pending 在本 finally 恰好启动一次，状态不被旧 finally 清除。
         crystallizationInFlight.delete(key);
+        finishGeneration();
         const next = crystallizationPending.get(key);
         crystallizationPending.delete(key);
         if (next) {
@@ -1574,6 +1591,7 @@ export function createLocalRecordService(
     const controller = new AbortController();
     turnSignals.set(idempotencyKey, { recordId, controller });
     const visibility = existing.command.payload.visibility ?? { kind: "public" as const };
+    const finishGeneration = generationStatus.begin(recordId, { phase: "preparing" }, visibility, controller.signal);
     previewHub.begin(recordId, idempotencyKey, controller.signal, visibility);
     try {
       const turnDependencies = {
@@ -1656,6 +1674,7 @@ export function createLocalRecordService(
       if (turnSignals.get(idempotencyKey)?.controller === controller) {
         turnSignals.delete(idempotencyKey);
       }
+      finishGeneration();
     }
   }
 
@@ -1670,6 +1689,15 @@ export function createLocalRecordService(
   }
 
   return {
+    async generationStatus(recordId, viewerCharacterInstanceId) {
+      const persisted = await dependencies.loadGenerationStatus?.(recordId);
+      const local = generationStatus.read(recordId, viewerCharacterInstanceId);
+      const activities = [...local.activities];
+      for (const activity of persisted?.activities ?? []) {
+        if (!activities.some((item) => item.phase === activity.phase && item.speaker === activity.speaker)) activities.push(activity);
+      }
+      return { busy: local.busy || persisted?.busy === true, activities };
+    },
     async loadRecord(recordId, principalId) {
       const envelope = await loadConsistentEnvelope(
         dependencies,
@@ -1875,6 +1903,7 @@ export function createLocalRecordService(
       // 注册，使 cancelMessage 能命中整条主链路；所有出口统一 finally 清理。
       const turnController = new AbortController();
       turnSignals.set(input.idempotencyKey, { recordId: input.recordId, controller: turnController });
+      const finishGeneration = generationStatus.begin(input.recordId, { phase: "preparing" }, { kind: "public" }, turnController.signal);
       try {
         const visibility = authorization.replay
           ? { plan: { kind: "public" as const }, proposalId: null }
@@ -2069,6 +2098,7 @@ export function createLocalRecordService(
       } finally {
         // 回合退出（提交成功/失败/异常）一律清理预取会话。
         memoryPrefetchCoordinator.endTurn(prefetchHandle);
+        finishGeneration();
         // Batch 2D：早注册的 Turn controller 统一清理（幂等；presence/插话
         // 的独立 key 不受本回合影响）。
         if (turnSignals.get(input.idempotencyKey)?.controller === turnController) {
@@ -2728,13 +2758,14 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
       language: scope.language,
     }),
     characterMemory: memory,
-    orchestratorFactory: (scope) => {
+    orchestratorFactory: (scope, onGeneration) => {
       // Slice 2.5：运行时内容身份——base/缺省 → BaseContentResolver；
       // world-bound（身份完整）→ 已挂载 RealmWorld 包的 resolver；畸形
       // world binding → null（内容层禁用，仅 DB 物化定义，fail-closed）。
       const contentBinding = narrowWorldBinding(scope.worldBinding);
       return createModelPoweredM2TurnOrchestrator({
         characters: scope.aiCharacters,
+        onGeneration,
         getGateway: () => modelSettings.gateway(),
         brief: scope.brief,
         style: scope.style,
@@ -2805,5 +2836,6 @@ async function createDefaultLocalRecordService(): Promise<LocalRecordService> {
         },
       });
     },
+    loadGenerationStatus: (recordId) => readPersistentGenerationStatus(pool, LOCAL_RECORD_SCOPE.workspaceId, recordId),
   });
 }

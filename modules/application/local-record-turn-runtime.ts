@@ -33,6 +33,7 @@ import {
   type TurnVisibilityPlan,
 } from "../orchestration/public.ts";
 import { type PresenceTriggerKind } from "../orchestration/presence.ts";
+import { trackGeneration, type GenerationSink, type GenerationStatusHub } from "../streaming/generation-status.ts";
 import {
   fallbackCompositeSemanticSegments,
   type SemanticSegment,
@@ -145,9 +146,10 @@ export function createLocalTurnDependencies(
   repository: LocalRuntimeRepository,
   clock: () => Date,
   idFactory?: () => string,
-  orchestration?: M2TurnOrchestrator | ((scope: RecordRuntimeScope) => M2TurnOrchestrator),
+  orchestration?: M2TurnOrchestrator | ((scope: RecordRuntimeScope, onGeneration?: GenerationSink) => M2TurnOrchestrator),
   turnSignals?: ReadonlyMap<string, ActiveTurnSignal>,
   actionCatalog?: ActionAffordanceCatalog,
+  generationStatus?: GenerationStatusHub,
 ): TurnRuntimeDependencies<
   PlayerUtterancePayload,
   M2TurnPlan,
@@ -156,11 +158,19 @@ export function createLocalTurnDependencies(
   FormalEventPayload,
   OutboxPayload
 > {
-  function orchestratorFor(scope: RecordRuntimeScope): M2TurnOrchestrator {
-    if (typeof orchestration === "function") return orchestration(scope);
-    return orchestration ?? createLocalM2TurnOrchestrator({
+  function orchestratorFor(scope: RecordRuntimeScope, visibility: TurnVisibilityPlan): M2TurnOrchestrator {
+    const sink: GenerationSink | undefined = generationStatus
+      ? (activity, signal) => generationStatus.begin(scope.recordId, activity, visibility, signal)
+      : undefined;
+    const orchestrator = typeof orchestration === "function" ? orchestration(scope, sink) : orchestration ?? createLocalM2TurnOrchestrator({
       characters: scope.aiCharacters,
     });
+    return {
+      ...orchestrator,
+      plan: (input) => trackGeneration(sink, { phase: "planner" }, () => orchestrator.plan(input), input.signal),
+      draft: (input) => trackGeneration(sink, { phase: "preparing" }, () => orchestrator.draft(input), input.signal),
+      validate: (input) => trackGeneration(sink, { phase: "reviewer" }, () => orchestrator.validate(input), input.signal),
+    };
   }
   function assertNotCancelled(idempotencyKey: string) {
     // M4：打断在阶段边界生效；被取消的 Turn 不得提交任何正式事件。
@@ -226,7 +236,7 @@ export function createLocalTurnDependencies(
             visibility: context.command.payload.visibility,
           };
         }
-        const orchestrator = orchestratorFor(scope);
+        const orchestrator = orchestratorFor(scope, context.command.payload.visibility);
         const selfPlay = context.command.payload.selfPlay;
         if (selfPlay) {
           // 批次 T7 自演拍：真实 DM 模型规划（无玩家输入，instruction 作上下文），
@@ -269,7 +279,7 @@ export function createLocalTurnDependencies(
       async draft(context) {
         assertNotCancelled(context.command.idempotencyKey);
         const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const orchestrator = orchestratorFor(scope);
+        const orchestrator = orchestratorFor(scope, context.command.payload.visibility);
         return orchestrator.draft({
           turnId: context.turnId,
           playerText: context.command.payload.interjection
@@ -301,7 +311,7 @@ export function createLocalTurnDependencies(
           });
         }
         const scope = context.command.payload.runtimeScope ?? demoRecordRuntimeScope();
-        const orchestrator = orchestratorFor(scope);
+        const orchestrator = orchestratorFor(scope, context.command.payload.visibility);
         return orchestrator.validate({
           plan: context.plan.body,
           candidate: context.candidate.body,

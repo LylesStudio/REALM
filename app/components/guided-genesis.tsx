@@ -177,6 +177,9 @@ function scrollEntries(
         : draft.story.title,
     });
   }
+  if (draft.playerName) {
+    entries.push({ key: "player-name", label: uiText("ui.genesisChat.field.playerName", uiLanguage), value: draft.playerName });
+  }
   if (draft.playerRole) {
     entries.push({
       key: "player-role",
@@ -523,9 +526,19 @@ export function GuidedGenesis({
           {step.id !== "review" && step.id !== "companions" && step.id !== "scene" && step.id !== "style" && step.id !== "stance" ? (
             <form className="guided-input-area" onSubmit={confirmStep}>
               {step.id === "player-role" ? (
-                <p className="guided-note">
-                  {uiText("ui.guided.playerNote", uiLanguage, { name: playerName })}
-                </p>
+                <>
+                  <p className="guided-note">
+                    {uiText("ui.guided.playerNote", uiLanguage, { name: playerName })}
+                  </p>
+                  <label>
+                    <span>{uiText("ui.genesisChat.field.playerName", uiLanguage)}</span>
+                    <input
+                      maxLength={GENESIS_LIMITS.playerName}
+                      value={draft.playerName ?? ""}
+                      onChange={(event) => setDraft((current) => ({ ...current, playerName: event.target.value }))}
+                    />
+                  </label>
+                </>
               ) : null}
               <textarea
                 aria-label={`${stepTitle}${uiText("ui.guided.inputSuffix", uiLanguage)}`}
