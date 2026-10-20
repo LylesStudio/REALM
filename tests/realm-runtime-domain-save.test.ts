@@ -1692,7 +1692,9 @@ async function a2ReaderProtocol(schema: boolean, purpose: "record-export" | "who
   const previous = process.env.REALM_OPERATOR_PRINCIPALS;
   process.env.REALM_OPERATOR_PRINCIPALS = "a2-owner";
   let archive;
-  try { archive = await createPostgresRealmRuntimeSaveReader({ connect: async () => client } as never).load({ workspaceId: "a2-ws", recordId: "record-demo", principalId: "a2-owner", purpose }); }
+  // This protocol fixture models a pre-witness consumer; the production reader
+  // now opts in by default, so explicitly override that capability here.
+  try { archive = await createPostgresRealmRuntimeSaveReader({ connect: async () => client } as never, { performanceWitnessesSchemaVersion: undefined }).load({ workspaceId: "a2-ws", recordId: "record-demo", principalId: "a2-owner", purpose }); }
   finally { if (previous === undefined) delete process.env.REALM_OPERATOR_PRINCIPALS; else process.env.REALM_OPERATOR_PRINCIPALS = previous; }
   assert.ok(archive);
   return { archive: parseRealmRuntimeSaveArchive(buildRealmRuntimeSaveArchive(archive)), calls };

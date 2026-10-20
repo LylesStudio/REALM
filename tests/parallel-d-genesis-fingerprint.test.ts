@@ -11,12 +11,20 @@ const legacyDigest = "cd30eb20f47eaa2e3986c56c9e85d931186aecdff8002c84abff33a35f
 const scope = { workspaceId: "workspace-d", principalId: "principal-d" };
 const topology = { worldId: "world-d", storyId: "story-d", recordId: "record-d" };
 
+function isAccountLanguageRead(sql: string): boolean {
+  return sql.replace(/\s+/g, " ").trim() === "SELECT ui_language FROM accounts WHERE workspace_id = $1 AND principal_id = $2";
+}
+
 function committedService(fingerprint: string) {
   const calls: { sql: string; values?: unknown[] }[] = [];
   const client = {
     release() {},
     async query(sql: string, values?: unknown[]) {
       calls.push({ sql, values });
+      if (isAccountLanguageRead(sql)) {
+        assert.deepEqual(values, [scope.workspaceId, scope.principalId]);
+        return { rows: [{ ui_language: "zh-CN" }] };
+      }
       if (sql.includes("INSERT INTO genesis_creation_requests")) {
         assert.deepEqual(values?.slice(0, 3), [scope.workspaceId, scope.principalId, "request_d_123"]);
         return { rows: [] };
@@ -50,13 +58,13 @@ test("D whitespace and length normalization match accepted actor-name semantics"
 test("D same normalized named request replays only its principal-scoped saved topology", async () => {
   const { service, calls } = committedService(genesisDraftFingerprint({ ...draft, playerName: "霁川" }));
   assert.deepEqual(await service.createGenesis(scope, { ...draft, playerName: "  霁川  " }, { creationRequestId: "request_d_123" }), topology);
-  assert.ok(!calls.some(({ sql }) => /accounts|character_definitions|record_first_nights/.test(sql)), "replay must not derive evidence from mutable names or mutate accounts");
+  assert.ok(!calls.some(({ sql }) => !isAccountLanguageRead(sql) && /accounts|character_definitions|record_first_nights/.test(sql)), "replay may read scoped UI language but must not derive evidence from mutable names or mutate accounts");
 });
 
 test("D same key with a different name conflicts before account or topology writes", async () => {
   const { service, calls } = committedService(genesisDraftFingerprint({ ...draft, playerName: "霁川" }));
   await assert.rejects(service.createGenesis(scope, { ...draft, playerName: "夜航" }, { creationRequestId: "request_d_123" }), (e: unknown) => e instanceof LibraryServiceError && e.code === "GENESIS_REQUEST_CONFLICT");
-  assert.ok(!calls.some(({ sql }) => /accounts|character_definitions|INSERT INTO worlds/.test(sql)));
+  assert.ok(!calls.some(({ sql }) => !isAccountLanguageRead(sql) && /accounts|character_definitions|INSERT INTO worlds/.test(sql)));
 });
 
 for (const name of ["霁川", "夜航"]) test(`D pre-correction named receipt fails closed for ${name} without original input provenance`, async () => {
@@ -64,7 +72,7 @@ for (const name of ["霁川", "夜航"]) test(`D pre-correction named receipt fa
   // original request named it explicitly or omitted it and used the fallback.
   const { service, calls } = committedService(legacyDigest);
   await assert.rejects(service.createGenesis(scope, { ...draft, playerName: name }, { creationRequestId: "request_d_123" }), (e: unknown) => e instanceof LibraryServiceError && e.code === "GENESIS_REQUEST_CONFLICT");
-  assert.ok(!calls.some(({ sql }) => /accounts|character_definitions|record_first_nights/.test(sql)));
+  assert.ok(!calls.some(({ sql }) => !isAccountLanguageRead(sql) && /accounts|character_definitions|record_first_nights/.test(sql)));
 });
 
 test("D old unnamed request still replays its exact legacy receipt", async () => {
