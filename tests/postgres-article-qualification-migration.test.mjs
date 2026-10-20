@@ -255,7 +255,7 @@ test(
     // 手工复刻 runner 语义：逐文件应用 0001–0040（不含 0041）。
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
     const filenames = (await readdir(migrationDir))
-      .filter((name) => name.endsWith(".sql") && !/^004[123]_/.test(name))
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) >= "0001" && name.slice(0, 4) <= "0040")
       .sort();
     for (const filename of filenames) {
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));

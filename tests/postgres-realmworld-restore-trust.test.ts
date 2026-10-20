@@ -36,6 +36,10 @@ test(
   "world-bound .realm restore：精确 RealmWorld 包信任闸 fail-closed 全链验收",
   { skip: !adminConnectionString || !runtimeConnectionString, timeout: 300_000 },
   async (t) => {
+    // Explicit server backup capability for this isolated fixture only.
+    const previousBackupOperators = process.env.REALM_OPERATOR_PRINCIPALS;
+    process.env.REALM_OPERATOR_PRINCIPALS = LOCAL_RECORD_SCOPE.principalId;
+    try {
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
     ownerPool.on("error", () => {});
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 4 });
@@ -137,11 +141,21 @@ test(
     const archiveAt = (version: string): Uint8Array => {
       const parsed = parseRealmRuntimeSaveArchive(saveBytes);
       return buildRealmRuntimeSaveArchive({
-        ...parsed,
         manifest: {
           ...parsed.manifest,
           world: { worldId: FIXTURE_WORLD, worldVersion: version },
         },
+        record: parsed.record,
+        goals: parsed.goals,
+        domain: parsed.domain,
+        topology: parsed.topology,
+        actionReceipts: parsed.actionReceipts,
+        characterEffects: parsed.characterEffects,
+        observations: parsed.observations,
+        memory: parsed.memory,
+        outbox: parsed.outbox,
+        firstNight: parsed.firstNight,
+        selfPlay: parsed.selfPlay,
       });
     };
     const restoreRowCounts = async () => (await ownerPool.query<{
@@ -272,5 +286,9 @@ test(
     await rm(join(installRoot, FIXTURE_WORLD, FIXTURE_VERSION), { recursive: true, force: true });
     await expectFailure(saveBytes, "prt-restore-ok", 503, "REALMWORLD_PACKAGE_MISSING");
     assert.deepEqual(await restoreRowCounts(), afterBase, "失败重放不得留下任何 restore 行");
+    } finally {
+      if (previousBackupOperators === undefined) delete process.env.REALM_OPERATOR_PRINCIPALS;
+      else process.env.REALM_OPERATOR_PRINCIPALS = previousBackupOperators;
+    }
   },
 );

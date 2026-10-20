@@ -1,3 +1,4 @@
+import { isRecordCommittedBody, normalizeRestoreDelivery, type RestoreDelivery } from "./outbox-delivery-contract.ts";
 import { RuntimeInvariantError } from "../runtime/public.ts";
 import {
   PermanentOutboxPublishError,
@@ -17,6 +18,7 @@ type FetchLike = (
 export interface HttpOutboxDeliverySinkOptions {
   /** Operator-configured HTTP(S) endpoint. Credentials in the URL are rejected. */
   endpoint: string;
+  restoreDelivery?: RestoreDelivery;
   timeoutMs?: number;
   userAgent?: string;
   fetch?: FetchLike;
@@ -33,6 +35,7 @@ export interface HttpOutboxDeliverySinkOptions {
 export function createHttpOutboxDeliverySink(
   options: HttpOutboxDeliverySinkOptions,
 ): OutboxPublishSink {
+  const restoreDelivery = normalizeRestoreDelivery(options.restoreDelivery);
   const endpoint = validateEndpoint(options.endpoint);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
@@ -52,6 +55,19 @@ export function createHttpOutboxDeliverySink(
 
   return {
     async publish(request: OutboxPublishRequest): Promise<void> {
+      const restored = request.origin === "record-events-restore-v1";
+      if (restored ? (
+        request.turnId !== null || request.topic !== "record.events.committed"
+        || !isRecordCommittedBody(request.payload, request.recordId)
+      ) : (
+        (request.origin !== undefined && request.origin !== "runtime-turn")
+        || typeof request.turnId !== "string" || request.turnId.trim() === ""
+      )) {
+        throw new PermanentOutboxPublishError("OUTBOX_DELIVERY_REQUEST_INVALID", "The Outbox delivery request is invalid.");
+      }
+      if (restored && restoreDelivery !== "record-events-v2") {
+        throw new PermanentOutboxPublishError("OUTBOX_RESTORE_DELIVERY_DISABLED", "Restore delivery is disabled.");
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
@@ -66,7 +82,8 @@ export function createHttpOutboxDeliverySink(
             "x-realm-topic": request.topic,
           },
           body: JSON.stringify({
-            version: 1,
+            version: restored ? 2 : 1,
+            ...(restored ? { origin: "record-events-restore-v1" } : {}),
             messageId: request.messageId,
             turnId: request.turnId,
             recordId: request.recordId,

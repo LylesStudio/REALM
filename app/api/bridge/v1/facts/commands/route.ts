@@ -1,93 +1,110 @@
 import { createPostgresCommittedFactCommandStore } from "../../../../../../database/postgres/committed-fact-command-repository.ts";
+import { PerformanceAdmissionError } from "../../../../../../database/postgres/performance-evidence-admission.ts";
+import { createPerformanceCommandTrust, executePerformanceAssessmentCommand } from "../../../../../../modules/application/performance-command-executor.ts";
 import {
   CommittedFactCommandError,
   createCommittedFactCommandService,
 } from "../../../../../../modules/application/committed-fact-command.ts";
 import {
+  authorizeProjectFinanceWrite,
   projectFinanceRouteError,
   resolveProjectFinanceContext,
 } from "../../project-finance-context.ts";
+import {
+  runCommandWithStoryContinuation,
+  storyContinuationMeta,
+  type StoryContinuationOutcome,
+} from "../../../../../../modules/application/story-graph-continuation.ts";
 
 export const runtime = "nodejs";
 
 const MAX_TEXT = 256;
 
 export async function POST(request: Request): Promise<Response> {
+  let performanceBranch = false;
   try {
-    const context = await resolveProjectFinanceContext(request);
+    const context = await resolveProjectFinanceContext(request, { access: "write" });
     const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
     if (!idempotencyKey || idempotencyKey.length > 128) {
       throw new CommittedFactCommandError("COMMAND_INVALID", "Idempotency-Key is required.");
     }
     const body = await readBody(request);
-    const service = createCommittedFactCommandService({
-      store: createPostgresCommittedFactCommandStore(context.database),
-    });
-    if (body.command === "adjust_inventory") {
-      const result = await service.adjustInventory({
-        scope: context.scope,
-        recordId: requiredText(body.recordId, "recordId"),
-        characterInstanceId: requiredText(body.characterInstanceId, "characterInstanceId"),
-        assetDefinitionId: requiredText(body.assetDefinitionId, "assetDefinitionId"),
-        delta: requiredInteger(body.delta, "delta"),
-        sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
-        expectedRevision: nonNegativeInteger(body.expectedRevision, "expectedRevision"),
-        idempotencyKey,
-        possession: body.possession,
-        quantity: body.quantity,
-        owned: body.owned,
-      });
-      return json(context.scope, result);
-    }
-    if (body.command === "grant_inventory") {
-      const result = await service.grantInventory({
-        scope: context.scope,
-        recordId: requiredText(body.recordId, "recordId"),
-        characterInstanceId: requiredText(body.characterInstanceId, "characterInstanceId"),
-        assetDefinitionId: requiredText(body.assetDefinitionId, "assetDefinitionId"),
-        quantity: requiredInteger(body.quantity, "quantity"),
-        sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
-        idempotencyKey,
-        possession: body.possession,
-        owned: body.owned,
-        delta: body.delta,
-      });
-      return json(context.scope, result);
-    }
-    if (body.command === "revise_relationship") {
-      const result = await service.reviseRelationship({
-        scope: context.scope,
-        subjectEntityKey: requiredText(body.subjectEntityKey, "subjectEntityKey"),
-        objectEntityKey: requiredText(body.objectEntityKey, "objectEntityKey"),
-        relationKind: requiredText(body.relationKind, "relationKind"),
-        sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
-        idempotencyKey,
-        relationshipDelta: body.relationshipDelta,
-        delta: body.delta,
-        fidelity: body.fidelity,
-        observerContinuityId: body.observerContinuityId,
-        content: body.content,
-      });
-      return json(context.scope, result);
-    }
     if (body.command === "record_performance_assessment") {
-      const result = await service.recordPerformanceAssessment({
-        scope: context.scope,
-        recordId: requiredText(body.recordId, "recordId"),
-        policyVersion: requiredText(body.policyVersion, "policyVersion"),
-        evidenceEventIds: readEvidenceIds(body.evidenceEventIds),
-        idempotencyKey,
-        score: body.score,
-        factors: body.factors,
-        unlocked: body.unlocked,
-        goalCompleted: body.goalCompleted,
-        decision: body.decision,
-        failed: body.failed,
-      });
-      return json(context.scope, result);
+      performanceBranch = true;
+      for (const field of ["score", "factors", "unlocked", "goalCompleted", "decision", "failed", "balanceMinor"]) {
+        if (Object.hasOwn(body, field) && body[field] !== undefined) throw new CommittedFactCommandError("COMMAND_INVALID", "Client authority is not permitted.");
+      }
+      const policyVersion = requiredText(body.policyVersion, "policyVersion");
+      if (policyVersion !== "structured-factors:v1") throw new CommittedFactCommandError("COMMAND_INVALID", "policyVersion is invalid.");
+      const executed = await executePerformanceAssessmentCommand(context.database,
+        createPerformanceCommandTrust(context.scope, context.principalId),
+        { recordId: requiredText(body.recordId, "recordId"), policyVersion, evidenceEventIds: readEvidenceIds(body.evidenceEventIds), idempotencyKey });
+      return json(context.scope, executed.result, executed.continuation);
     }
-    throw new CommittedFactCommandError("COMMAND_INVALID", "Unsupported fact command.");
+    // F1b: one outer transaction carries the fact command store/service AND
+    // the full Story continuation on the SAME client; everything commits
+    // once or rolls back together.
+    const { command: executed, continuation } = await runCommandWithStoryContinuation(
+      context.database,
+      context.scope,
+      async (client) => {
+        await authorizeProjectFinanceWrite(client, context);
+        const service = createCommittedFactCommandService({
+          store: createPostgresCommittedFactCommandStore(client),
+        });
+        if (body.command === "adjust_inventory") {
+          return { result: await service.adjustInventory({
+            scope: context.scope,
+            recordId: requiredText(body.recordId, "recordId"),
+            characterInstanceId: requiredText(body.characterInstanceId, "characterInstanceId"),
+            assetDefinitionId: requiredText(body.assetDefinitionId, "assetDefinitionId"),
+            delta: requiredInteger(body.delta, "delta"),
+            sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
+            expectedRevision: nonNegativeInteger(body.expectedRevision, "expectedRevision"),
+            idempotencyKey,
+            possession: body.possession,
+            quantity: body.quantity,
+            owned: body.owned,
+          }) };
+        }
+        if (body.command === "grant_inventory") {
+          return { result: await service.grantInventory({
+            scope: context.scope,
+            recordId: requiredText(body.recordId, "recordId"),
+            characterInstanceId: requiredText(body.characterInstanceId, "characterInstanceId"),
+            assetDefinitionId: requiredText(body.assetDefinitionId, "assetDefinitionId"),
+            quantity: requiredInteger(body.quantity, "quantity"),
+            sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
+            idempotencyKey,
+            possession: body.possession,
+            owned: body.owned,
+            delta: body.delta,
+          }) };
+        }
+        if (body.command === "revise_relationship") {
+          return { result: await service.reviseRelationship({
+            scope: context.scope,
+            subjectEntityKey: requiredText(body.subjectEntityKey, "subjectEntityKey"),
+            objectEntityKey: requiredText(body.objectEntityKey, "objectEntityKey"),
+            relationKind: requiredText(body.relationKind, "relationKind"),
+            sourceEventId: requiredText(body.sourceEventId, "sourceEventId"),
+            idempotencyKey,
+            relationshipDelta: body.relationshipDelta,
+            delta: body.delta,
+            fidelity: body.fidelity,
+            observerContinuityId: body.observerContinuityId,
+            content: body.content,
+          }) };
+        }
+        throw new CommittedFactCommandError("COMMAND_INVALID", "Unsupported fact command.");
+      },
+    );
+    // The response is constructed only after the outer COMMIT succeeded.
+    return json(context.scope, executed.result, continuation);
   } catch (error) {
+    if (performanceBranch && error instanceof PerformanceAdmissionError) {
+      return Response.json({ ok: false as const, error: { code: error.status === 422 ? "COMMAND_INVALID" : error.code, message: "演出证据暂时无法接纳。" } }, { status: error.status, headers: { "Cache-Control": "no-store" } });
+    }
     if (error instanceof CommittedFactCommandError) {
       return Response.json(
         { ok: false as const, error: { code: error.code, message: safeMessage(error.code) } },
@@ -98,11 +115,20 @@ export async function POST(request: Request): Promise<Response> {
   }
 }
 
-function json(scope: { worldId: string; worldlineId: string }, data: unknown): Response {
+function json(
+  scope: { worldId: string; worldlineId: string },
+  data: unknown,
+  continuation: StoryContinuationOutcome,
+): Response {
   return Response.json({
     ok: true as const,
     data,
-    meta: { worldId: scope.worldId, worldlineId: scope.worldlineId, projectionVersion: 1 },
+    meta: {
+      worldId: scope.worldId,
+      worldlineId: scope.worldlineId,
+      projectionVersion: 1,
+      ...storyContinuationMeta(continuation),
+    },
   }, { headers: { "Cache-Control": "no-store" } });
 }
 

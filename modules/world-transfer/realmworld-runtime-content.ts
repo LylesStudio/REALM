@@ -1,3 +1,4 @@
+import { commandPolicyFromFiles, type CommandPolicyDocument } from "./realmworld-command-policy.ts";
 import type { GoalDefinition } from "../goals/public.ts";
 import type { JsonValue } from "../runtime/public.ts";
 import type { RealmWorldManifestV1 } from "./realmworld-manifest.ts";
@@ -33,6 +34,9 @@ export interface RealmWorldRuntimeCharacterPlan {
 }
 
 export interface RealmWorldRuntimeInstantiationPlan {
+  /** Always emitted by the decoder; optional for legacy policy-free programmatic plans. */
+  contentHash?: string;
+  commandPolicy?: CommandPolicyDocument;
   binding: { kind: "world"; worldId: string; worldVersion: string };
   world: {
     name: string;
@@ -181,7 +185,7 @@ function parseWorld(
   };
 }
 
-function parseRuntimeDocument(value: unknown, locale: string): Omit<RealmWorldRuntimeInstantiationPlan, "binding" | "world" | "goals"> {
+function parseRuntimeDocument(value: unknown, locale: string): Omit<RealmWorldRuntimeInstantiationPlan, "binding" | "world" | "goals" | "contentHash" | "commandPolicy"> {
   if (!isPlainObject(value)) {
     throw new RealmWorldRuntimeContentError("RUNTIME_INVALID", "RealmWorld runtime document is invalid");
   }
@@ -270,12 +274,15 @@ export function createRealmWorldInstantiationPlan(input: {
   const world = parseWorld(input.files, input.manifest, input.locale);
   const runtime = parseRuntimeDocument(parseJson(runtimeBytes, RUNTIME_PATH), input.locale);
   const goals = createRealmWorldContentStore(input).listGoalDefinitions();
+  const commandPolicy = commandPolicyFromFiles(input.files);
   return {
     binding: {
       kind: "world",
       worldId: input.manifest.worldId,
       worldVersion: input.manifest.worldVersion,
     },
+    contentHash: input.manifest.contentHash,
+    ...(commandPolicy ? { commandPolicy } : {}),
     world,
     ...runtime,
     goals,

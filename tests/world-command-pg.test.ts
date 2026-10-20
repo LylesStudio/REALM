@@ -40,6 +40,33 @@ import {
   type WorldCommandScope,
 } from "../modules/worldline/world-command.ts";
 
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance: pg.Client, name: string) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 
 interface FixtureIds {
@@ -53,6 +80,7 @@ interface FixtureIds {
 }
 
 interface Fixture {
+  onCleanup: (cleanup: () => Promise<void>) => void;
   pool: pg.Pool;
   owner: pg.Client;
   runtimeUrl: URL;
@@ -80,14 +108,17 @@ async function createFixture(
   const runtimeUrl = new URL(ownerUrl);
   runtimeUrl.username = "realm_runtime";
   runtimeUrl.password = "";
-  const pool = new pg.Pool({ connectionString: runtimeUrl.href, max: 8 });
+  const pool = createFixturePool({ connectionString: runtimeUrl.href, max: 8 });
   pool.on("error", () => undefined);
 
+  const cleanups: Array<() => Promise<void>> = [];
   t.after(async () => {
-    await pool.end();
+    for (const cleanup of cleanups) await cleanup();
+    await endFixturePool(pool);
     await owner.end();
+    await assertFixtureBackendsGone(maintenance, databaseName);
     await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+      `DROP DATABASE ${quoteIdentifier(databaseName)}`,
     );
     await maintenance.end();
   });
@@ -128,6 +159,7 @@ async function createFixture(
   // 收敛为最小授权，不能再经 runtime 角色建拓扑。
   await seedWorldCommandScope(owner, workspaceId, ids);
   return {
+    onCleanup: cleanup => { cleanups.push(cleanup); },
     pool,
     owner,
     runtimeUrl,
@@ -760,14 +792,12 @@ test(
       workspaceId: fixture.workspaceId,
       recordId: recordA!,
     });
+    fixture.onCleanup(() => wakeA.close());
     const wakeB = await listenRecordCommitted(fixture.runtimeUrl.href, {
       workspaceId: fixture.workspaceId,
       recordId: recordB!,
     });
-    t.after(async () => {
-      await wakeA.close();
-      await wakeB.close();
-    });
+    fixture.onCleanup(() => wakeB.close());
 
     const result = await service.executeWorldCommand(
       requestFor(fixture, "wake-1", [recordA!, recordB!]),

@@ -252,3 +252,24 @@ test("RealmWorld loader rejects symlinked content and missing mounts fail explic
     );
   });
 });
+
+test("A2 installed policy resolver verifies real signatures and rejects self-asserted trust, mutations and missing exact versions", async t => {
+  const { generateKeyPairSync, verify } = await import("node:crypto");
+  const { installSignedRealmWorldFixture, syntheticCommandPolicyFixture } = await import("./helpers/realmworld-package-fixture.ts");
+  const { createInstalledRealmWorldCommandPolicyResolver, assertMountedCommandPolicy } = await import("../modules/world-transfer/realmworld-command-policy.ts");
+  const { serializeRealmWorldManifestSigningPayload } = await import("../modules/world-transfer/realmworld-manifest.ts");
+  const root = await mkdtemp(join(tmpdir(), "a2-signed-policy-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const pair = generateKeyPairSync("ed25519");
+  const keyPair = { privateKey: pair.privateKey, publicKeyPem: pair.publicKey.export({ type: "spki", format: "pem" }).toString() };
+  await installSignedRealmWorldFixture({ installRoot: root, worldId: "world-synthetic", version: "1.0.0", recordTitle: "Synthetic",
+    keyId: "synthetic", keyPair, commandPolicy: syntheticCommandPolicyFixture(), declaredEvents: ["synthetic.ready"] });
+  const resolver = createInstalledRealmWorldCommandPolicyResolver({ installRoot: root, verifySignature: ({ manifest }) => verify(null,
+    Buffer.from(serializeRealmWorldManifestSigningPayload(manifest)), keyPair.publicKeyPem, Buffer.from(manifest.signature.value, "base64url")) });
+  const policy = await resolver({ worldId: "world-synthetic", worldVersion: "1.0.0" });
+  assert.ok(policy); assertMountedCommandPolicy(policy);
+  assert.throws(() => assertMountedCommandPolicy({ ...policy }));
+  assert.throws(() => { policy.document.bindings[0]!.all.length = 0; });
+  await assert.rejects(() => resolver({ worldId: "world-synthetic", worldVersion: "2.0.0" }));
+  await writeFile(join(root, "world-synthetic", "1.0.0", "content", "command-policy.json"), JSON.stringify({ ...syntheticCommandPolicyFixture(), policyVersion: "tampered" }));
+  await assert.rejects(() => resolver({ worldId: "world-synthetic", worldVersion: "1.0.0" }), /hash/);
+});

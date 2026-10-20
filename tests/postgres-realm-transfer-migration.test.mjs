@@ -24,6 +24,33 @@ import { createHash } from "node:crypto";
 
 const execFileAsync = promisify(execFile);
 
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap();
+function observeFixturePool(pool) {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options) {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool) {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance, name) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 if (!adminConnectionString) {
   test.skip("DATABASE_URL required", () => {});
@@ -58,19 +85,20 @@ if (!adminConnectionString) {
   async function createDatabase(t, label) {
     const name = `realm_y2t_${label}_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
     await withMaintenance((m) => m.query(`CREATE DATABASE "${name}"`));
-    // t.after 按注册序（FIFO）执行：池必须先于 DROP 关闭，否则 FORCE 终止
-    // 的 FATAL 通知会打到未关闭连接上（实测归因竞态）。经 registerPool
-    // 登记的池统一在 DROP 前关闭。
+    // node:test after hooks are FIFO: this database owner closes every
+    // registered pool (including actual Client end) before ordinary DROP.
     const managedPools = [];
     // 自定义清理队列（先于池关闭/DROP 执行——用于归还占用连接等）。
     const customCleanups = [];
     t.after(async () => {
       for (const fn of customCleanups) {
-        await (async () => fn())().catch(() => undefined);
+        await fn();
       }
-      await Promise.all(managedPools.map((pool) => pool.end().catch(() => undefined)));
-      await withMaintenance((m) =>
-        m.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`));
+      await Promise.all(managedPools.map(endFixturePool));
+      await withMaintenance(async (m) => {
+        await assertFixtureBackendsGone(m, name);
+        await m.query(`DROP DATABASE IF EXISTS "${name}"`);
+      });
     });
     const url = requireLoopbackUrl(adminConnectionString);
     url.pathname = `/${name}`;
@@ -81,7 +109,7 @@ if (!adminConnectionString) {
         customCleanups.push(fn);
       },
       registerPool: (pool) => {
-        managedPools.push(pool);
+        managedPools.push(observeFixturePool(pool));
         pool.on("error", () => undefined);
         return pool;
       },
@@ -98,16 +126,8 @@ if (!adminConnectionString) {
 
   function ownerPoolOf(url, max = 3) {
     // idleTimeoutMillis 0：session 级 GUC/temp 对象跟随连接，禁 idle 回收。
-    const pool = new pg.Pool({ connectionString: url.href, max, idleTimeoutMillis: 0 });
+    const pool = createFixturePool({ connectionString: url.href, max, idleTimeoutMillis: 0 });
     pool.on("error", () => undefined);
-    return pool;
-  }
-
-  // 池登记进 onCleanup（先于 DROP 关闭；池 error 事件吞掉终止噪音）。
-  function onCleanupPool(onCleanup, url, max = 3) {
-    const pool = ownerPoolOf(url, max);
-    pool.on("error", () => undefined);
-    onCleanup(() => pool.end().catch(() => undefined));
     return pool;
   }
 
@@ -115,14 +135,14 @@ if (!adminConnectionString) {
     const roleUrl = new URL(url.href);
     roleUrl.username = role;
     roleUrl.password = "";
-    const pool = new pg.Pool({ connectionString: roleUrl.href, max, idleTimeoutMillis: 0 });
+    const pool = createFixturePool({ connectionString: roleUrl.href, max, idleTimeoutMillis: 0 });
     pool.on("error", () => undefined);
     return pool;
   }
 
 
   // ------------------------------------------------------------------
-  test("full migration chain via real runner: ledger checksums, idempotent replay, 95 tables", { timeout: 300_000 }, async (t) => {
+  test("full migration chain via real runner: ledger checksums, idempotent replay, 101 tables", { timeout: 300_000 }, async (t) => {
     const { url, registerPool } = await createDatabase(t, "chain");
     const first = (await execFileAsync(
       process.execPath,
@@ -146,7 +166,10 @@ if (!adminConnectionString) {
     assert.match(first, /apply 0069_record_goal_authoring\.sql/);
     assert.match(first, /apply 0070_record_goal_authoring_capability\.sql/);
     assert.match(first, /apply 0074_record_goal_restore_capability\.sql/);
-    assert.match(first, /95 tables/);
+    assert.match(first, /apply 0075_record_goal_branch_capability\.sql/);
+    assert.match(first, /apply 0076_story_definition_bindings\.sql/);
+    assert.match(first, /apply 0077_grouped_record_goal_restore_capability\.sql/);
+    assert.match(first, /101 tables/);
 
     // 幂等重放：全 skip，checksum 不变。
     const second = (await execFileAsync(
@@ -162,6 +185,15 @@ if (!adminConnectionString) {
       "SELECT filename, checksum FROM realm_schema_migrations ORDER BY filename",
     );
     assert.equal(ledger.rows.length, ALL_MIGRATIONS.length);
+    const expectedTables = new Set(["realm_schema_migrations"]);
+    for (const filename of ALL_MIGRATIONS) {
+      const ddl = await readFile(new URL(filename, migrationDir), "utf8");
+      for (const match of ddl.matchAll(/CREATE TABLE IF NOT EXISTS ([a-z_]+)/g)) expectedTables.add(match[1]);
+    }
+    const catalog = await pool.query("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename");
+    assert.equal(catalog.rows.length, 101);
+    assert.deepEqual(catalog.rows.map(row => row.tablename), [...expectedTables].sort());
+    console.log("R1 full migration catalog", JSON.stringify({ tables: catalog.rows, ledger: ledger.rows, idempotentReplay: !second.includes("apply ") }));
     for (const row of ledger.rows) {
       const sql = await readFile(new URL(row.filename, migrationDir), "utf8");
       assert.equal(
@@ -188,27 +220,27 @@ if (!adminConnectionString) {
     const cluster = await startScratchPgCluster({
       label: `y2-${randomUUID().replaceAll("-", "").slice(0, 8)}`,
     });
+    const cleanups = [];
     t.after(async () => {
+      for (const cleanup of cleanups) await cleanup();
       await cluster.stop();
     });
-    await fn(cluster.adminUrl);
+    await fn(cluster.adminUrl, cleanup => cleanups.push(cleanup));
   }
 
 
   // ------------------------------------------------------------------
   test("role states: migration-first / NOLOGIN residual / wrong membership fail-closed; LOGIN converges", { timeout: 300_000 }, async (t) => {
-    await withScratchCluster(t, async (base) => {
+    await withScratchCluster(t, async (base, onCleanup) => {
       const dbName = "realm_y2_roles";
       const admin = new pg.Client({ connectionString: base });
       await admin.connect();
       await admin.query(`CREATE DATABASE ${dbName}`);
       await admin.end();
       const dbUrl = `${base.replace(/\/postgres$/, "")}/${dbName}`;
-      const pool = new pg.Pool({ connectionString: dbUrl, max: 2, idleTimeoutMillis: 0 });
+      const pool = createFixturePool({ connectionString: dbUrl, max: 2, idleTimeoutMillis: 0 });
       pool.on("error", (error) => console.error("pool-conn-error:", error.message));
-      t.after(async () => {
-        await pool.end().catch(() => undefined);
-      });
+      onCleanup(() => endFixturePool(pool));
       await applyMigrations(pool, { upTo: "0041_article_qualification_and_import_entries.sql" });
 
       const sql0042 = await readFile(
@@ -226,9 +258,7 @@ if (!adminConnectionString) {
       const cluster = new pg.Client({ connectionString: base });
       cluster.on("error", (error) => console.error("cluster-conn-error:", error.message));
       await cluster.connect();
-      t.after(async () => {
-        await cluster.end().catch(() => undefined);
-      });
+      onCleanup(() => cluster.end());
       await cluster.query("CREATE ROLE realm_transfer NOLOGIN");
       await assert.rejects(pool.query(sql0042), /TRANSFER_NOT_PROVISIONED/);
       assert.equal(
@@ -387,12 +417,8 @@ if (!adminConnectionString) {
     const pool = registerPool(ownerPoolOf(url));
     await applyMigrations(pool);
 
-    const transfer = rolePoolOf(url, "realm_transfer");
-    const runtime = rolePoolOf(url, "realm_runtime");
-    t.after(async () => {
-      await transfer.end().catch(() => undefined);
-      await runtime.end().catch(() => undefined);
-    });
+    const transfer = registerPool(rolePoolOf(url, "realm_transfer"));
+    const runtime = registerPool(rolePoolOf(url, "realm_runtime"));
 
     // realm_transfer 直写五表 → permission denied（table 级 + column 级双负例）。
     for (const table of ["realm_import_jobs", "realm_import_job_events",
@@ -492,8 +518,7 @@ if (!adminConnectionString) {
       "INSERT INTO accounts (workspace_id, principal_id, display_name) VALUES ('ws_demo', 'principal_op', '操作员')",
     );
 
-    const transfer = rolePoolOf(url, "realm_transfer", 1);
-    t.after(() => transfer.end().catch(() => undefined));
+    const transfer = registerPool(rolePoolOf(url, "realm_transfer", 1));
     // 逐调用前置 set_config——node-pg 在查询错误后丢弃连接，session GUC
     // 不跨错误存活（实测）。
     const call = (sql, params) => transfer
@@ -631,8 +656,7 @@ if (!adminConnectionString) {
   // ------------------------------------------------------------------
   test("TEMP shadow protocol: pre-migration temp tables never shadow real tables (pg_temp last)", { timeout: 300_000 }, async (t) => {
     // 本测试自建库（不用 createDatabase helper）：node:test 的 t.after 按
-    // 注册序（FIFO）执行——temp 会话 client 的 end 必须先于 DROP（FORCE
-    // 的 FATAL 通知竞态会让未关闭连接的错误事件打到测试上）。
+    // 注册序（FIFO）执行——temp 会话 client 的 end 必须先于 DROP。
     const label = "tempshadow";
     const name = `realm_y2t_${label}_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
     await withMaintenance((m) => m.query(`CREATE DATABASE "${name}"`));
@@ -646,10 +670,12 @@ if (!adminConnectionString) {
     const client = new pg.Client({ connectionString: url.href });
     await client.connect();
     t.after(async () => {
-      await client.end().catch(() => undefined);
-      await pool.end().catch(() => undefined);
-      await withMaintenance((m) =>
-        m.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`));
+      await client.end();
+      await endFixturePool(pool);
+      await withMaintenance(async (m) => {
+        await assertFixtureBackendsGone(m, name);
+        await m.query(`DROP DATABASE IF EXISTS "${name}"`);
+      });
     });
     await client.query(
       "CREATE TEMP TABLE worlds (workspace_id text, id text, name text, status text)",
@@ -694,9 +720,9 @@ if (!adminConnectionString) {
 
   // ------------------------------------------------------------------
   test("admission/drain: xact lock holder blocks runner drain; release lets it through; idle-in-transaction covered", { timeout: 300_000 }, async (t) => {
-    const { url, onCleanup } = await createDatabase(t, "drain");
+    const { url, onCleanup, registerPool } = await createDatabase(t, "drain");
     // max=8：holder/runnerSim/lateAdmission/lateBlocked 并发占用 + 主查询。
-    const pool = onCleanupPool(onCleanup, url, 8);
+    const pool = registerPool(ownerPoolOf(url, 8));
     await applyMigrations(pool, { upTo: "0042_realm_transfer_and_import_jobs.sql" });
 
     // 长事务持 admission xact lock（模拟 capability 在途；连接处于
@@ -869,7 +895,7 @@ if (!adminConnectionString) {
 
   // ------------------------------------------------------------------
   test("provisioning script: five role states + GUC gate + same-tx atomicity + credential-free output", { timeout: 300_000 }, async (t) => {
-    await withScratchCluster(t, async (base) => {
+    await withScratchCluster(t, async (base, onCleanup) => {
       const password = "pw_" + "x".repeat(16);
       const run = async (env = {}) => {
         try {
@@ -900,9 +926,7 @@ if (!adminConnectionString) {
       const cluster = new pg.Client({ connectionString: base });
       cluster.on("error", (error) => console.error("cluster-conn-error:", error.message));
       await cluster.connect();
-      t.after(async () => {
-        await cluster.end().catch(() => undefined);
-      });
+      onCleanup(() => cluster.end());
       let state = await cluster.query(
         "SELECT rolcanlogin, rolsuper, rolcreaterole, rolinherit, rolbypassrls FROM pg_roles WHERE rolname = 'realm_transfer'");
       assert.deepEqual(state.rows[0], {
@@ -1041,10 +1065,7 @@ if (!adminConnectionString) {
       createRealmDevPostgresPool(url.href, "realm-dev"),
       createRealmDevPostgresPool(url.href, "realm-dev-transfer"),
       createLocalPostgresPool(url.href, { application_name: "realm-cli" }),
-    ];
-    t.after(async () => {
-      for (const pool of pools) await pool.end().catch(() => undefined);
-    });
+    ].map(registerPool);
     for (const pool of pools) pool.on("error", () => undefined);
     const names = [];
     for (const pool of pools) {
@@ -1065,8 +1086,7 @@ if (!adminConnectionString) {
       /not allowed|query parameters/,
     );
     // 公共 factory 默认行为不变（无 application_name 注入）。
-    const plain = createLocalPostgresPool(url.href);
-    t.after(() => plain.end().catch(() => undefined));
+    const plain = registerPool(createLocalPostgresPool(url.href));
     plain.on("error", () => undefined);
     const plainName = await plain.query(
       "SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()");

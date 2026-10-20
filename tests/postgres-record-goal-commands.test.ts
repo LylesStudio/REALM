@@ -717,7 +717,14 @@ test('native Goal export API writes a real archive and restore API retains defin
       body:JSON.stringify({recordId:scope.recordId,idempotencyKey:'native-goal-branch',recordTitle:'A separate delivery route'})});
     const branches=await Promise.all([branch.POST(branchRequest()),branch.POST(branchRequest())]);
     assert.deepEqual(branches.map(response=>response.status).sort(),[200,201],JSON.stringify(await Promise.all(branches.map(response=>response.clone().json()))));
-    const branchTarget=await branches[0].json();assert.equal((await branches[1].json()).recordId,branchTarget.recordId);
+    const branchTarget=await branches[0].json();const branchReplayBody=await branches[1].json();
+    assert.equal(branchReplayBody.recordId,branchTarget.recordId);
+    assert.deepEqual(branchTarget.fork,branchReplayBody.fork,'exact branch replay preserves its actual fork');
+    const forkRows=(await admin.query(`SELECT record.start_tick::text,record.start_ordinal::text,line.fork_tick::text,line.fork_ordinal::text
+      FROM records record JOIN worldlines line ON line.workspace_id=record.workspace_id AND line.id=record.worldline_id
+      WHERE record.workspace_id=$1 AND record.id=$2`,[scope.workspaceId,branchTarget.recordId])).rows[0];
+    assert.deepEqual([forkRows.start_tick,forkRows.start_ordinal],[forkRows.fork_tick,forkRows.fork_ordinal]);
+    assert.deepEqual(branchTarget.fork,{tick:Number(forkRows.fork_tick),ordinal:Number(forkRows.fork_ordinal)});
     const metadata=(await admin.query(`SELECT record.timeline_kind,record.linked_record_id,record.world_version,line.parent_worldline_id,story.premise
       FROM records record JOIN worldlines line ON line.workspace_id=record.workspace_id AND line.id=record.worldline_id
       JOIN stories story ON story.workspace_id=record.workspace_id AND story.id=record.story_id WHERE record.workspace_id=$1 AND record.id=$2`,[scope.workspaceId,branchTarget.recordId])).rows[0];
@@ -898,7 +905,7 @@ test('runtime backup is one immutable snapshot even when another owner commits a
     }});};
   }});
   const {createPostgresRealmRuntimeSaveReader}=await import('../database/postgres/realm-runtime-save-repository.ts');
-  const archive=await createPostgresRealmRuntimeSaveReader(wrapped).load({workspaceId:scope.workspaceId,recordId:scope.recordId,principalId:POSTGRES_DEMO_IDS.principal});
+  const archive=await createPostgresRealmRuntimeSaveReader(wrapped).load({workspaceId:scope.workspaceId,recordId:scope.recordId,principalId:POSTGRES_DEMO_IDS.principal,purpose:"record-export"});
   assert.equal(interleaved,true,'the concurrent write really happened between archive reads');
   assert.equal(archive!.goals.instances.length,1,'backup must not mix the old record head with new Goal definitions');
   assert.equal(archive!.goals.definitions!.length,1);

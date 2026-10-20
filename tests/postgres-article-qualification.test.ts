@@ -24,10 +24,37 @@ import {
   createArticleQualificationRepository,
 } from "../database/postgres/article-qualification-repository.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
-import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { endSharedRuntimePools, getSharedRuntimePool } from "../app/api/world-scope.ts";
 import {
   POST as qualifyPOST,
 } from "../app/api/world-knowledge/articles/qualify/route.ts";
+
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance: pg.Client, name: string) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -62,26 +89,34 @@ async function createTempDatabase(
   await maintenance.query(`CREATE DATABASE "${databaseName}"`);
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
-  const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 3 });
+  const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 3 });
   const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
   runtimeUrl.pathname = `/${databaseName}`;
-  const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
+  const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 4 });
+  const ownedPools = [ownerPool, runtimePool];
+  const registerPool = (pool: pg.Pool) => {
+    ownedPools.push(observeFixturePool(pool));
+    return pool;
+  };
+  const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
   t.after(async () => {
-    await runtimePool.end().catch(() => undefined);
-    await ownerPool.end().catch(() => undefined);
-    await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    await endSharedRuntimePools();
+    await Promise.all(fixtureShutdowns.get(routePool) ?? []);
+    await Promise.all(ownedPools.map(endFixturePool));
+    await assertFixtureBackendsGone(maintenance, databaseName);
+    await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
     await maintenance.end();
   });
 
   const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
   for (const filename of (await readdir(migrationDir)).sort()) {
     if (!filename.endsWith(".sql")) continue;
-    // 0042/0043 依赖 0041（grants/requiresMigrations）——缺 0041 的库三者同缺。
-    if (!with0041 && /^004[123]_/.test(filename)) continue;
+    // Keep this deliberate missing-0041 schema; 0086 requires the omitted 0042 bootstrap.
+    if (!with0041 && (/^004[123]_/.test(filename) || filename === "0086_unsigned_import_declaration_guard.sql")) continue;
     await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
-  return { ownerPool, runtimePool, runtimeUrl };
+  return { ownerPool, runtimePool, runtimeUrl, registerPool };
 }
 
 async function insertArticle(
@@ -223,7 +258,7 @@ test(
   "G3 concurrency: worldline-lock serialization keeps seq consecutive and latest deterministic",
   { skip: !adminConnectionString || !runtimeConnectionString, timeout: 120_000 },
   async (t) => {
-    const { ownerPool, runtimePool } = await createTempDatabase(t, "cc", { with0041: true });
+    const { ownerPool, runtimePool, registerPool } = await createTempDatabase(t, "cc", { with0041: true });
     const scope = { workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE };
 
     // 并发双 attest：恰好一个事件，一方幂等。
@@ -232,12 +267,8 @@ test(
     const secondRuntimeUrl = new URL(runtimeConnectionString!);
     const dbName = (await ownerPool.query("SELECT current_database() AS d")).rows[0].d;
     secondRuntimeUrl.pathname = `/${dbName}`;
-    const runtimePoolB = new pg.Pool({ connectionString: secondRuntimeUrl.href, max: 2 });
-    // 失败路径拆库时 FORCE 终止空闲客户端的噪音不影响主错误报告。
+    const runtimePoolB = registerPool(createFixturePool({ connectionString: secondRuntimeUrl.href, max: 2 }));
     runtimePoolB.on("error", () => {});
-    t.after(async () => {
-      await runtimePoolB.end().catch(() => undefined);
-    });
     const repoB = createArticleQualificationRepository(runtimePoolB);
     const [r1, r2] = await Promise.all([
       repoA.qualify(scope, { articleId: "article_g3_double", decision: "attest", attestedBy: OWNER }),

@@ -11,6 +11,7 @@ import { createOutboxWorkerRuntime } from "../modules/application/outbox-worker-
  *
  * Optional:
  * - REALM_OUTBOX_WORKSPACES (comma-separated, default local demo workspace)
+ * - REALM_OUTBOX_RESTORE_DELIVERY (disabled | record-events-v2; default disabled)
  * - REALM_OUTBOX_TOPICS (comma-separated, default record.events.committed)
  * - REALM_OUTBOX_MAX_ATTEMPTS / LEASE_DURATION_MS / BATCH_LIMIT /
  *   RETRY_DELAY_MS / DELIVERY_TIMEOUT_MS / IDLE_MIN_MS / IDLE_MAX_MS
@@ -34,7 +35,15 @@ const topics = csv(
   "record.events.committed",
 );
 
+const restoreDelivery = process.env.REALM_OUTBOX_RESTORE_DELIVERY ?? "disabled";
+if (restoreDelivery !== "disabled" && restoreDelivery !== "record-events-v2") {
+  throw Object.assign(new Error("Restore delivery requires an exact supported mode."), {
+    code: "OUTBOX_RESTORE_DELIVERY_CONFIG_INVALID",
+  });
+}
+
 const runtime = createOutboxWorkerRuntime({
+  restoreDelivery,
   connectionString,
   deliveryUrl,
   workspaces,

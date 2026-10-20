@@ -32,6 +32,9 @@ import {
   mapLocalFormalEvent,
 } from "../modules/application/local-record-service.ts";
 import { createMemorySyncScheduler } from "../modules/memory/pipeline.ts";
+import { trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
+import { createGoalContentBindingSource } from "../modules/application/goal-content-binding-source.ts";
+import type { RealmWorldMount } from "../modules/world-transfer/realmworld-definition-resolver.ts";
 import type { RealmWorldRuntimeInstantiationPlan } from "../modules/world-transfer/realmworld-runtime-content.ts";
 import {
   createLocalM2TurnOrchestrator,
@@ -53,34 +56,76 @@ import {
   goalInstanceIdFor,
 } from "../modules/goals/public.ts";
 
+// Wait for real pg Client end events as well as pool.end() completion.
+function observePoolEnds(pool: pg.Pool): Promise<void>[] {
+  const ends: Promise<void>[] = [];
+  pool.on("connect", client => {
+    ends.push(new Promise<void>(resolve => client.once("end", resolve)));
+  });
+  return ends;
+}
+
+async function assertCanonReadback(ownerPool: pg.Pool, runtimePool: pg.Pool) {
+  await ownerPool.query(
+    `INSERT INTO world_entities (workspace_id, world_id, worldline_id, id, entity_kind, name)
+     VALUES ($1, $2, $3, 'c5_library_canon_entity', 'setting', 'C5 library beacon')`,
+    [POSTGRES_DEMO_IDS.workspace, POSTGRES_DEMO_IDS.world, POSTGRES_DEMO_IDS.worldline],
+  );
+  await ownerPool.query(
+    `INSERT INTO world_claims (workspace_id, world_id, worldline_id, id, subject_entity_id,
+                               predicate, object_value, scope, truth_status)
+     VALUES ($1, $2, $3, 'c5_library_canon_claim', 'c5_library_canon_entity',
+             'signals', 'C5 library Canon positive', 'world', 'world_canon')`,
+    [POSTGRES_DEMO_IDS.workspace, POSTGRES_DEMO_IDS.world, POSTGRES_DEMO_IDS.worldline],
+  );
+  const role = await runtimePool.query("SELECT current_user AS role");
+  assert.equal(role.rows[0]?.role, "realm_runtime");
+  const canonScope = await createPostgresRecordRuntimeScopeRepository(runtimePool).resolve({
+    workspaceId: POSTGRES_DEMO_IDS.workspace,
+    principalId: POSTGRES_DEMO_IDS.principal,
+    recordId: POSTGRES_DEMO_IDS.record,
+  });
+  assert.ok(canonScope);
+  assert.ok(canonScope.brief.canon.includes("C5 library Canon positive"),
+    "restricted production Canon loader must return the eligible claim");
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 
 test(
   "library lists the demo world and creates world, story and record",
   { skip: !adminConnectionString },
   async (t) => {
+    const close = fixtureCleanup(t);
     const adminUrl = requireLoopbackUrl(adminConnectionString!);
     const databaseName = `realm_library_test_${randomUUID().replaceAll("-", "")}`;
     const maintenanceUrl = new URL(adminUrl);
     maintenanceUrl.pathname = "/postgres";
     const maintenance = new pg.Client({ connectionString: maintenanceUrl.href });
+    close(() => maintenance.end());
     await maintenance.connect();
     await maintenance.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+    close(async () => {
+      const remaining = await maintenance.query("SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [databaseName]);
+      assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+      await maintenance.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`);
+    });
 
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
     const owner = new pg.Client({ connectionString: ownerUrl.href });
+    const ownerEnd = new Promise<void>(resolve => owner.once("end", resolve));
+    close(async () => { await owner.end(); await ownerEnd; });
     await owner.connect();
     const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerEnds = observePoolEnds(ownerPool);
+    close(async () => { await ownerPool.end(); await Promise.all(ownerEnds); });
+    const runtimeUrl = requireLoopbackUrl(process.env.REALM_RUNTIME_DATABASE_URL!);
+    runtimeUrl.pathname = `/${databaseName}`;
+    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 1 });
+    const runtimeEnds = observePoolEnds(runtimePool);
+    close(async () => { await runtimePool.end(); await Promise.all(runtimeEnds); });
 
-    t.after(async () => {
-      await ownerPool.end();
-      await owner.end();
-      await maintenance.query(
-        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
-      );
-      await maintenance.end();
-    });
 
     for (const filename of [
       "0001_runtime_contract.sql",
@@ -91,6 +136,9 @@ test(
       "0006_action_state_ledger.sql",
       "0007_dynamic_visibility_policies.sql",
       "0008_record_timeline_kind.sql",
+      // Canon tables plus the transitive 0025 job/evidence prerequisites.
+      "0010_world_governance.sql",
+      "0011_worldline_merge_semantic_propagation_jobs.sql",
       "0012_accounts.sql",
       "0013_membership_insert_grant.sql",
       "0014_scene_crystallization_grants.sql",
@@ -100,6 +148,9 @@ test(
       "0018_account_last_opened_fk_set_null.sql",
       "0019_record_first_nights.sql",
       "0020_record_self_play_sessions.sql",
+      // The production Canon filter reads campaign/revision security linkage.
+      "0025_propagation_topology_semantic_scope.sql",
+      "0026_canon_security_audience.sql",
       "0029_record_scene_tension.sql",
       "0030_character_instance_state.sql",
       "0031_keen_insight_discovery.sql",
@@ -159,6 +210,17 @@ test(
       );
       await owner.query(sql);
     }
+    // Minimal current capability closure, after the intentional staged upgrade.
+    for (const filename of [
+      "0063_genesis_creation_requests.sql",
+      "0066_committed_fact_commands.sql",
+      "0069_record_goal_authoring.sql",
+      "0070_record_goal_authoring_capability.sql",
+      "0073_record_goal_genesis_capability.sql",
+      "0074_record_goal_restore_capability.sql",
+      "0077_grouped_record_goal_restore_capability.sql",
+      "0083_goal_content_instance_bindings.sql",
+    ]) await owner.query(await readFile(new URL(`../database/postgres/migrations/${filename}`, import.meta.url), "utf8"));
     await seedPostgresDemo(ownerPool);
     await seedCapabilitySessionKey(ownerPool, LOCAL_RECORD_SCOPE.workspaceId);
 
@@ -170,7 +232,13 @@ test(
       [LOCAL_RECORD_SCOPE.workspaceId, LOCAL_RECORD_SCOPE.principalId, "测试旅人"],
     );
 
-    const service = createPostgresLibraryService(ownerPool);
+    const goalMounts = new Map<string, RealmWorldMount>();
+    const resolveGoalSource = createGoalContentBindingSource({ mount: identity => {
+      const mount = goalMounts.get(`${identity.worldId}@${identity.worldVersion}`);
+      assert.ok(mount, "Goal fixture requires an installed trusted source");
+      return mount(identity);
+    } });
+    const service = createPostgresLibraryService(ownerPool, ownerPool, { resolveGoalSource });
     const scope = {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
@@ -957,6 +1025,16 @@ test(
         },
       ],
     };
+    const trustedPlans = new Map<string, string>();
+    for (const binding of [realmWorldPlan.binding,
+      { worldId: "world_harbor_engine", worldVersion: "2.0.0" },
+      { worldId: "world_harbor_dup_goal", worldVersion: "1.0.0" }]) {
+      const trusted = await trustedGoalFixture(t, { ...binding, goals: realmWorldPlan.goals });
+      const identity = `${binding.worldId}@${binding.worldVersion}`;
+      goalMounts.set(identity, trusted.mount);
+      trustedPlans.set(identity, (await trusted.mount(binding)).manifest.contentHash);
+    }
+    realmWorldPlan.contentHash = trustedPlans.get("world_harbor_engine@1.2.0")!;
     const realmInstance = await service.instantiateRealmWorld(
       scope,
       realmWorldPlan,
@@ -990,6 +1068,7 @@ test(
         {
           ...realmWorldPlan,
           binding: { kind: "world", worldId: "world_harbor_engine", worldVersion: "2.0.0" },
+          contentHash: trustedPlans.get("world_harbor_engine@2.0.0")!,
         },
         "realmworld-application-fixture",
       ),
@@ -1136,6 +1215,7 @@ test(
         {
           ...realmWorldPlan,
           binding: { kind: "world", worldId: "world_harbor_dup_goal", worldVersion: "1.0.0" },
+          contentHash: trustedPlans.get("world_harbor_dup_goal@1.0.0")!,
           goals: [realmWorldPlan.goals[0]!, { ...realmWorldPlan.goals[0]! }],
         },
         "realmworld-application-duplicate-goal",
@@ -1740,6 +1820,7 @@ test(
         error instanceof LibraryServiceError
         && error.code === "WORLD_NOT_FOUND",
     );
+    await assertCanonReadback(ownerPool, runtimePool);
   },
 );
 
@@ -1774,9 +1855,21 @@ test(
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
     const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerEnds = observePoolEnds(ownerPool);
+    const runtimeUrl = requireLoopbackUrl(process.env.REALM_RUNTIME_DATABASE_URL!);
+    runtimeUrl.pathname = `/${databaseName}`;
+    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 1 });
+    const runtimeEnds = observePoolEnds(runtimePool);
 
     t.after(async () => {
+      await runtimePool.end();
+      await Promise.all(runtimeEnds);
       await ownerPool.end();
+      await Promise.all(ownerEnds);
+      const remaining = await maintenance.query(
+        "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [databaseName],
+      );
+      assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
       await maintenance.query(
         `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
       );
@@ -1796,6 +1889,7 @@ test(
       workspaceId: POSTGRES_DEMO_IDS.workspace,
       principalId: POSTGRES_DEMO_IDS.principal,
     };
+    await assertCanonReadback(ownerPool, runtimePool);
     const demoWorldId = POSTGRES_DEMO_IDS.world;
 
     // 空 primary Story 与空手动 Worldline（无 Record）必须保留可见。

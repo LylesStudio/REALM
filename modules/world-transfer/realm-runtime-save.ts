@@ -6,9 +6,23 @@
  * treats content files as runtime facts and never installs a RealmWorld.
  */
 import { createHash } from "node:crypto";
+import { RealmRuntimeSaveError, MAX_RUNTIME_FILE_BYTES, RUNTIME_SAVE_FILE_BYTES, memoryStringCharacterBytes,
+  countRuntimeSectionWireBytes, type RuntimeSectionWireFormatter } from "./runtime-save-primitives.ts";
+export { RealmRuntimeSaveError, RUNTIME_SAVE_FILE_BYTES, countRuntimeSectionWireBytes } from "./runtime-save-primitives.ts";
+export type { RealmRuntimeSaveErrorCode, RuntimeSectionWireFormatter } from "./runtime-save-primitives.ts";
+import { isPlainObject, isJsonValue, assertExactKeys, requireField, requireIdentity, requireInteger } from "./runtime-save-validation.ts";
+import { normalizeRealmRuntimeSaveEventForRestore } from "./runtime-save-event.ts";
+export { normalizeRealmRuntimeSaveEventForRestore } from "./runtime-save-event.ts";
+
+import { normalizeRuntimePerformanceWitnesses, runtimePerformanceWitnessesDigest, validateRuntimePerformanceWitnessClosure,
+  PERFORMANCE_WITNESSES_ENTRY, type RuntimePerformanceWitnessesV1 } from "./runtime-performance-witness-transport.ts";
+import { decodeRealmRuntimeSaveGoalsV2, type RealmRuntimeSaveGoalsV2 } from "./realm-runtime-goals-v2.ts";
+import { validatePerformanceSourceConsistency } from "./runtime-performance-source-consistency.ts";
+import { validateReplayBundle, REPLAY_LINEAGE_MAX_BYTES, type ReplayClosure } from "../application/command-replay-lineage.ts";
 import { zipSync, type ZipOptions } from "fflate";
 import {
   RealmPackError,
+  PACK_LIMITS,
   validateStrictZipArchive,
 } from "./realm-pack.ts";
 import type { JsonValue } from "../runtime/public.ts";
@@ -16,24 +30,13 @@ import { decodeRecordGoalDefinition } from "../goals/record-authoring.ts";
 import {
   normalizeRealmRuntimeSaveDomainV1,
   parseRealmRuntimeSaveDomainV1,
-  serializeRealmRuntimeSaveDomainV1,
+  serializeNormalizedRealmRuntimeSaveDomainV1ForArchive,
   type RealmRuntimeSaveDomainV1,
 } from "./realm-runtime-domain-save.ts";
 
-export type RealmRuntimeSaveErrorCode =
-  | "INVALID_SAVE"
-  | "UNSUPPORTED_FORMAT_VERSION"
-  | "RUNTIME_HASH_MISMATCH";
 
-export class RealmRuntimeSaveError extends Error {
-  readonly code: RealmRuntimeSaveErrorCode;
 
-  constructor(code: RealmRuntimeSaveErrorCode, message: string) {
-    super(message);
-    this.name = "RealmRuntimeSaveError";
-    this.code = code;
-  }
-}
+
 
 export interface RealmRuntimeSaveWorldRef {
   worldId: string;
@@ -61,6 +64,7 @@ export interface RealmRuntimeSaveSnapshot {
 export type RealmRuntimeSaveMode = "base" | "world-bound";
 
 export interface RealmRuntimeSaveManifestV2 {
+  performanceWitnessesFormat?: { schemaVersion: 1; digest: string };
   format: "realm-save";
   formatVersion: 2;
   engineApi: string;
@@ -84,7 +88,14 @@ export type RealmRuntimeSaveRestorableEventKind =
   | "narration.committed"
   | "action.transaction.committed"
   | "system.correction.committed"
-  | "goal.transition.committed";
+  | "goal.transition.committed"
+  | "project.created"
+  | "project.stage.changed"
+  | "project.milestone.confirmed"
+  | "finance.budget.allocated"
+  | "finance.income.recorded"
+  | "finance.expense.recorded"
+  | "finance.adjustment.recorded";
 
 /**
  * The stable payload projection emitted by the PostgreSQL runtime reader.
@@ -124,6 +135,7 @@ export interface RealmRuntimeSaveGoalsV1 {
   assessments: readonly JsonValue[];
   definitions?: readonly JsonValue[];
 }
+export type RealmRuntimeSaveGoals = RealmRuntimeSaveGoalsV1 | RealmRuntimeSaveGoalsV2;
 
 /**
  * Durable Action Receipt projection. The receipt payload is carried verbatim
@@ -284,6 +296,60 @@ export interface RealmRuntimeSaveMemoryV1 {
   conclusions: readonly RealmRuntimeSaveMemoryConclusionV1[];
   snapshots: readonly RealmRuntimeSaveMemorySnapshotV1[];
   relationshipStates: readonly RealmRuntimeSaveRelationshipStateV1[];
+}
+
+/** Pure global format only; active archive and RecordBundle fields remain V1.
+ * Unlike V1, V2 permits empty snapshot content and Record-only relationships.
+ */
+export interface RealmRuntimeSaveMemoryV2 {
+  format: "realm-runtime-memory";
+  schemaVersion: 2;
+  scope: { workspaceId: string; worldId: string; worldlineId: string };
+  worldlineHead: { tick: number; ordinal: number };
+  conclusions: readonly RealmRuntimeSaveMemoryConclusionV1[];
+  snapshots: readonly RealmRuntimeSaveMemorySnapshotV1[];
+  relationshipStates: readonly RealmRuntimeSaveRelationshipStateV1[];
+  cacheEpochs: readonly { sourceObserverContinuityId: string; epoch: number }[];
+}
+export type RealmRuntimeSaveMemory = RealmRuntimeSaveMemoryV1 | RealmRuntimeSaveMemoryV2;
+
+/** Separate pure-input surface. No active archive/bundle union is widened.
+ * Siblings are complete existing bundles; domain carries its existing complete
+ * bundles. Supply each Record once. No caller-provided ownership maps are used.
+ */
+export interface RealmRuntimeSaveArchiveMemoryInput {
+  manifest: RealmRuntimeSaveManifestV2;
+  record: RealmRuntimeSaveRecordV1;
+  topology?: RealmRuntimeSaveTopologyV1;
+  observations?: RealmRuntimeSaveObservationsV1;
+  memory?: RealmRuntimeSaveMemoryV1 | RealmRuntimeSaveMemoryV2;
+  domain?: RealmRuntimeSaveDomainV1;
+  siblings?: readonly RealmRuntimeSaveRecordBundleV1[];
+}
+
+export interface RealmRuntimeSaveMemoryObservationOwner {
+  sourceObservationId: string;
+  sourceRecordId: string;
+  sourceCharacterInstanceId: string;
+  sourceObserverContinuityId: string;
+  sourceEventId: string | null;
+  sourceEventRecordId: string | null;
+}
+
+/** Owned detached data, with no target IDs or database capability. Downstream
+ * callers consume this result rather than rereading mutable input after await.
+ */
+export interface ResolvedRealmRuntimeSaveArchiveMemory {
+  sourceFormat: "v2" | "legacy";
+  scope: RealmRuntimeSaveMemoryV2["scope"];
+  worldlineHead: RealmRuntimeSaveMemoryV2["worldlineHead"] | null;
+  conclusions: readonly RealmRuntimeSaveMemoryConclusionV1[];
+  snapshots: readonly RealmRuntimeSaveMemorySnapshotV1[];
+  relationshipStates: readonly RealmRuntimeSaveRelationshipStateV1[];
+  cacheEpochs: RealmRuntimeSaveMemoryV2["cacheEpochs"];
+  supersedesOrder: readonly string[];
+  observationOwners: readonly RealmRuntimeSaveMemoryObservationOwner[];
+  eventOwners: readonly { sourceEventId: string; sourceRecordId: string }[];
 }
 
 /**
@@ -463,10 +529,11 @@ export interface RealmRuntimeSaveTopologyV1 {
   visibilityPolicies: readonly RealmRuntimeSaveVisibilityPolicyV1[];
 }
 
-export interface RealmRuntimeSaveArchive {
+export interface RealmRuntimeSaveArchive<G extends RealmRuntimeSaveGoals = RealmRuntimeSaveGoalsV1> {
+  performanceWitnesses?: RuntimePerformanceWitnessesV1;
   manifest: RealmRuntimeSaveManifestV2;
   record: RealmRuntimeSaveRecordV1;
-  goals: RealmRuntimeSaveGoalsV1;
+  goals: G;
   /** Optional for reading pre-topology v2 saves; new exports always include it. */
   topology?: RealmRuntimeSaveTopologyV1;
   /** Optional for reading pre-ledger v2 saves; new exports always include them. */
@@ -474,7 +541,7 @@ export interface RealmRuntimeSaveArchive {
   characterEffects?: RealmRuntimeSaveCharacterEffectsV1;
   observations?: RealmRuntimeSaveObservationsV1;
   /** Optional for reading pre-memory v2 saves; new exports always include it. */
-  memory?: RealmRuntimeSaveMemoryV1;
+  memory?: RealmRuntimeSaveMemory;
   /** Optional for reading pre-async-runtime v2 saves; new exports always include them. */
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
@@ -496,6 +563,7 @@ const FIRST_NIGHT_ENTRY = "runtime/first-night.json" as const;
 const SELF_PLAY_ENTRY = "runtime/self-play.json" as const;
 const DOMAIN_ENTRY = "runtime/domain.json" as const;
 const KNOWN_ENTRIES: ReadonlySet<string> = new Set([
+  PERFORMANCE_WITNESSES_ENTRY,
   MANIFEST_ENTRY,
   RECORD_ENTRY,
   GOALS_ENTRY,
@@ -510,52 +578,245 @@ const KNOWN_ENTRIES: ReadonlySet<string> = new Set([
   DOMAIN_ENTRY,
 ]);
 const ARCHIVE_ENTRY_RE = /^(realm-save-manifest\.json|runtime\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)$/;
-const SAFE_IDENTITY = /^[A-Za-z0-9._-]+$/;
+
 const SAFE_REFERENCE = /^[A-Za-z0-9._:-]+$/;
 const SAFE_EVENT_ID = /^[A-Za-z0-9._:-]+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ENGINE_API = /^1\./;
-const MAX_RUNTIME_FILE_BYTES = 64 * 1024 * 1024;
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** PostgreSQL17 numeric_out: int16 base-10000 weight and14-bit display
+ * scale => <=131072+16383+sign+point characters. This is the intrinsic
+ * persisted JSONB output bound, NOT a cap on arbitrary incoming JSON text.
+ * See postgresql.org/docs/17/datatype-numeric.html and numeric.c.
+ */
+export const MEMORY_PG_NUMBER_TOKEN_CHARS = 147458;
+
+export const MEMORY_RUNTIME_FILE_BYTES = RUNTIME_SAVE_FILE_BYTES;
+
+
+
+/** Exact JSON.stringify string size, including lone surrogate escaping. */
+export function memoryJsonStringBytes(value: string): number {
+  let bytes = 2;
+  for (let i=0;i<value.length;i++) {
+    const code=value.charCodeAt(i), next=value.charCodeAt(i+1);
+    if(code>=0xd800&&code<=0xdbff&&next>=0xdc00&&next<=0xdfff){bytes+=4;i++;}
+    else bytes+=memoryStringCharacterBytes(code);
+  }
+  return bytes;
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  return isPlainObject(value) && Object.values(value).every(isJsonValue);
+/** Count the existing canonical formatter without constructing its text.
+ * Object key order changes bytes' order, never their count. */
+export function countMemoryCanonicalBytes(value: JsonValue): number {
+  let bytes=0;
+  const pending: JsonValue[]=[value];
+  while(pending.length){
+    const item=pending.pop()!;
+    if(typeof item==="string"){bytes+=memoryJsonStringBytes(item);continue;}
+    if(item===null||typeof item!=="object"){bytes+=JSON.stringify(item).length;continue;}
+    if(Array.isArray(item)){bytes+=2+Math.max(0,item.length-1);for(const child of item)pending.push(child);}
+    else {const keys=Object.keys(item);bytes+=2+Math.max(0,keys.length-1);
+      for(const key of keys){bytes+=memoryJsonStringBytes(key)+1;pending.push((item as {readonly[key:string]:JsonValue})[key]!);}}
+  }
+  return bytes;
 }
 
-function assertExactKeys(value: Record<string, unknown>, allowed: readonly string[], where: string): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
-      throw new RealmRuntimeSaveError("INVALID_SAVE", `unknown save key ${where}.${key}`);
+
+
+
+
+
+/** One actual file, with its formatter and remaining archive allowance. The
+ * caller commits bytes only after exact pre-format admission and verification.
+ */
+export class RuntimeSectionWireLedger {
+  readonly filePath: string;
+  readonly formatter: RuntimeSectionWireFormatter;
+  readonly limitBytes: number;
+  private bytes = 0;
+  constructor(filePath: string, formatter: RuntimeSectionWireFormatter,
+    remainingAggregateBytes = PACK_LIMITS.totalUncompressedMax, limitBytes = MAX_RUNTIME_FILE_BYTES) {
+    if (!Number.isSafeInteger(remainingAggregateBytes) || remainingAggregateBytes < 0
+      || !Number.isSafeInteger(limitBytes) || limitBytes < 0 || limitBytes > MAX_RUNTIME_FILE_BYTES
+      || !["canonical-runtime", "normalized-domain"].includes(formatter)) {
+      throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime section ledger budget is invalid");
+    }
+    this.filePath = filePath;
+    this.formatter = formatter;
+    this.limitBytes = Math.min(limitBytes, remainingAggregateBytes);
+  }
+  get acceptedBytes(): number { return this.bytes; }
+  get remainingBytes(): number { return this.limitBytes - this.bytes; }
+  checkLowerBound(bytes: number): void {
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.remainingBytes) {
+      throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime section ${this.filePath} exceeds its byte budget`);
+    }
+  }
+  addExact(bytes: number): void { this.checkLowerBound(bytes); this.bytes += bytes; }
+  reserve(value: unknown): void {
+    this.addExact(countRuntimeSectionWireBytes(value, this.formatter, this.remainingBytes));
+  }
+  verify(emittedBytes: number): void {
+    if (!Number.isSafeInteger(emittedBytes) || emittedBytes !== this.bytes) {
+      throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime section ${this.filePath} wire ledger mismatch`);
     }
   }
 }
 
-function requireField(value: Record<string, unknown>, key: string, where: string): unknown {
-  if (!Object.prototype.hasOwnProperty.call(value, key)) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `save key ${where}.${key} is required`);
+/** Shared exact memory-file ledger. Candidate parsers get remaining bytes;
+ * rejected candidates are never retained or charged as accepted rows. */
+export class MemoryWireByteLedger {
+  bytes: number;
+  constructor(emptyDocument: RealmRuntimeSaveMemoryV2) {
+    this.bytes=countMemoryCanonicalBytes(emptyDocument as unknown as JsonValue);
+    this.check(0);
   }
-  return value[key];
+  get remaining(): number {return MAX_RUNTIME_FILE_BYTES-this.bytes;}
+  check(extra: number): void {
+    if(extra>this.remaining)invalidMemory("MemoryV2 exceeds the runtime file byte limit.");
+  }
+  add(bytes: number): void {this.check(bytes);this.bytes+=bytes;}
+  verify(document: RealmRuntimeSaveMemoryV2): void {
+    if(countMemoryCanonicalBytes(document as unknown as JsonValue)!==this.bytes)
+      invalidMemory("Memory resource ledger does not match canonical wire bytes.");
+  }
 }
 
-function requireIdentity(value: unknown, where: string): string {
-  if (
-    typeof value !== "string"
-    || value.length === 0
-    || value.trim() !== value
-    || !SAFE_IDENTITY.test(value)
-    || value === "."
-    || value === ".."
-  ) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `save ${where} is not a safe identity`);
+type MemoryJsonFrame = {value:JsonValue[]|{[key:string]:JsonValue};phase:string;key?:string};
+
+/** Incremental normalizer for PostgreSQL JSONB text. SQL whitespace and long
+ * numeric spellings are discarded. Only accepted semantic state is retained,
+ * plus fixed UTF8/escape/numeric buffers. No whole raw row is accumulated.
+ */
+export class MemoryPgJsonStream {
+  bytes=0;
+  private root:JsonValue= null;
+  private hasRoot=false;
+  private stack:MemoryJsonFrame[]=[];
+  private token:"string"|"number"|"literal"|null=null;
+  private raw="";
+  private pieces:string[]=[];
+  private piece="";
+  private escape="";
+  private high="";
+  private stringKey=false;
+  private decoder=new TextDecoder("utf-8",{fatal:true});
+  private readonly limit:number;
+  constructor(limit:number) {this.limit=limit;}
+  private fail():never {return invalidMemory("Invalid bounded PostgreSQL memory JSON.");}
+  private charge(bytes:number):void {
+    if(this.bytes+bytes>this.limit)invalidMemory("MemoryV2 exceeds the runtime file byte limit.");
+    this.bytes+=bytes;
   }
-  return value;
+  private expectValue():void {
+    const parent=this.stack.at(-1);
+    if(parent?!["value","valueOrEnd"].includes(parent.phase):this.hasRoot)this.fail();
+  }
+  private attach(value:JsonValue):void {
+    this.expectValue();const parent=this.stack.at(-1);
+    if(!parent){this.root=value;this.hasRoot=true;return;}
+    if(Array.isArray(parent.value))parent.value.push(value);
+    else Object.defineProperty(parent.value,parent.key!,{value,enumerable:true,writable:true,configurable:true});
+    parent.phase="commaOrEnd";
+  }
+  private stringPart(value:string):void {
+    if(this.high){
+      const code=value.charCodeAt(0);
+      if(code>=0xdc00&&code<=0xdfff){this.charge(4);this.piece+=this.high+value[0];value=value.slice(1);}
+      else {this.charge(6);this.piece+=this.high;}
+      this.high="";
+    }
+    const last=value.charCodeAt(value.length-1);
+    if(last>=0xd800&&last<=0xdbff){this.high=value.at(-1)!;value=value.slice(0,-1);}
+    this.charge(memoryJsonStringBytes(value)-2);this.piece+=value;
+    if(this.piece.length>=8192){
+      // Flatten a bounded decoded piece, never parse an accumulated raw row.
+      this.pieces.push(JSON.parse(JSON.stringify(this.piece)) as string);this.piece="";
+    }
+  }
+  private endString():void {
+    if(this.high){this.charge(6);this.piece+=this.high;this.high="";}
+    this.pieces.push(this.piece);const value=this.pieces.join("");this.pieces=[];this.piece="";this.token=null;
+    if(this.stringKey){const top=this.stack.at(-1)!;
+      if(Object.hasOwn(top.value,value))this.fail();top.key=value;top.phase="colon";
+    }else this.attach(value);
+  }
+  private endScalar():void {
+    let value:JsonValue;
+    if(this.token==="number"){
+      if(!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(this.raw))this.fail();
+      value=JSON.parse(this.raw) as number;if(!Number.isFinite(value))this.fail();
+    }else {
+      if(!["true","false","null"].includes(this.raw))this.fail();value=JSON.parse(this.raw) as JsonValue;
+    }
+    this.charge(JSON.stringify(value).length);this.raw="";this.token=null;this.attach(value);
+  }
+  write(input:string|Uint8Array):void {
+    const text=typeof input==="string"?input:this.decoder.decode(input,{stream:true});
+    for(let i=0;i<text.length;i++){
+      const ch=text[i]!;
+      if(this.token==="string"){
+        if(this.escape){
+          this.escape+=ch;
+          if(this.escape.length===2&&ch!=="u"){
+            if(!'"\\/bfnrt'.includes(ch))this.fail();this.stringPart(JSON.parse('"'+this.escape+'"') as string);this.escape="";
+          }else if(this.escape.length===6){
+            if(!/^\\u[0-9a-fA-F]{4}$/.test(this.escape))this.fail();this.stringPart(JSON.parse('"'+this.escape+'"') as string);this.escape="";
+          }
+        }else if(ch==='"')this.endString();
+        else if(ch==="\\")this.escape="\\";
+        else {
+          if(ch.charCodeAt(0)<32)this.fail();
+          let end=i+1;
+          while(end<text.length&&text[end]!=='"'&&text[end]!=="\\"&&text.charCodeAt(end)>=32)end++;
+          this.stringPart(text.slice(i,end));i=end-1;
+        }
+        continue;
+      }
+      if(this.token){
+        if(/[ \t\r\n,\]}]/.test(ch)){this.endScalar();i--;continue;}
+        this.raw+=ch;
+        if(this.raw.length>(this.token==="number"?MEMORY_PG_NUMBER_TOKEN_CHARS:5))this.fail();
+        continue;
+      }
+      if(/[ \t\r\n]/.test(ch))continue;
+      const top=this.stack.at(-1);
+      if(ch==='"'){
+        this.stringKey=!!top&&!Array.isArray(top.value)&&["key","keyOrEnd"].includes(top.phase);
+        if(!this.stringKey)this.expectValue();this.charge(2);this.token="string";continue;
+      }
+      if(ch==="{"||ch==="["){
+        this.charge(2);const value=ch==="{"?{}:[];this.attach(value);
+        this.stack.push({value,phase:ch==="{"?"keyOrEnd":"valueOrEnd"});continue;
+      }
+      if(ch==="}"||ch==="]"){
+        if(!top||Array.isArray(top.value)!==(ch==="]")||!["commaOrEnd",ch==="]"?"valueOrEnd":"keyOrEnd"].includes(top.phase))this.fail();
+        this.stack.pop();continue;
+      }
+      if(ch===":"){if(top?.phase!=="colon")this.fail();this.charge(1);top.phase="value";continue;}
+      if(ch===","){if(top?.phase!=="commaOrEnd")this.fail();this.charge(1);top.phase=Array.isArray(top.value)?"value":"key";continue;}
+      this.expectValue();this.token=/[-0-9]/.test(ch)?"number":"literal";this.raw=ch;
+    }
+  }
+  finish():JsonValue {
+    const tail=this.decoder.decode();if(tail)this.write(tail);
+    if(this.token==="number"||this.token==="literal")this.endScalar();
+    if(this.token||this.stack.length||!this.hasRoot)this.fail();
+    return this.root;
+  }
 }
+
+
+
+
+
+
+
+
+
+
 
 function requireReference(value: unknown, where: string): string {
   if (
@@ -581,12 +842,7 @@ function requireEventId(value: unknown, where: string): string {
   return value;
 }
 
-function requireInteger(value: unknown, where: string, minimum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `save ${where} must be an integer >= ${minimum}`);
-  }
-  return value as number;
-}
+
 
 function requireHash(value: unknown, where: string): string {
   if (typeof value !== "string" || !SHA256_HEX.test(value)) {
@@ -608,7 +864,7 @@ function normalizeManifest(value: unknown): RealmRuntimeSaveManifestV2 {
   }
   assertExactKeys(
     value,
-    ["format", "formatVersion", "engineApi", "mode", "world", "scope", "snapshot"],
+    ["format", "formatVersion", "engineApi", "mode", "world", "scope", "snapshot", "performanceWitnessesFormat"],
     "manifest",
   );
   if (value.format !== "realm-save") {
@@ -681,7 +937,17 @@ function normalizeManifest(value: unknown): RealmRuntimeSaveManifestV2 {
       "snapshot.runtimeHash",
     ),
   };
+  let performanceWitnessesFormat: RealmRuntimeSaveManifestV2["performanceWitnessesFormat"];
+  if (Object.hasOwn(value, "performanceWitnessesFormat")) {
+    const declaration = value.performanceWitnessesFormat;
+    if (!isPlainObject(declaration) || Object.keys(declaration).length !== 2 || declaration.schemaVersion !== 1) {
+      throw new RealmRuntimeSaveError("INVALID_SAVE", "Performance witness schema version is unsupported.");
+    }
+    assertExactKeys(declaration, ["schemaVersion", "digest"], "manifest.performanceWitnessesFormat");
+    performanceWitnessesFormat = { schemaVersion: 1, digest: requireHash(declaration.digest, "performanceWitnessesFormat.digest") };
+  }
   return {
+    ...(performanceWitnessesFormat ? { performanceWitnessesFormat } : {}),
     format: "realm-save",
     formatVersion: 2,
     engineApi: value.engineApi,
@@ -714,6 +980,7 @@ export function serializeRealmRuntimeSaveManifestV2(
       nextRecordOrdinal: valid.snapshot.nextRecordOrdinal,
       runtimeHash: valid.snapshot.runtimeHash,
     },
+    ...(valid.performanceWitnessesFormat ? { performanceWitnessesFormat: valid.performanceWitnessesFormat } : {}),
   });
 }
 
@@ -796,6 +1063,30 @@ export function serializeRealmRuntimeSaveObservationsV1(
 }
 
 function validateRecord(value: unknown, manifest: RealmRuntimeSaveManifestV2): RealmRuntimeSaveRecordV1 {
+  return validateRecordDocument(value, {
+    scope: {
+      worldId: manifest.world?.worldId ?? null,
+      worldlineId: manifest.scope.worldlineId,
+      recordId: manifest.scope.recordId,
+    },
+    head: {
+      recordVersion: manifest.snapshot.recordVersion,
+      nextRecordOrdinal: manifest.snapshot.nextRecordOrdinal,
+    },
+  });
+}
+
+/**
+ * validateRecord with an explicit expected scope/head instead of a manifest:
+ * shared by the archive entry and by domain-carried sibling Record snapshots.
+ */
+function validateRecordDocument(
+  value: unknown,
+  expected: {
+    scope: { worldId: string | null; worldlineId: string; recordId: string };
+    head: { recordVersion: number; nextRecordOrdinal: number };
+  },
+): RealmRuntimeSaveRecordV1 {
   if (!isPlainObject(value)) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime record must be an object");
   }
@@ -814,9 +1105,9 @@ function validateRecord(value: unknown, manifest: RealmRuntimeSaveManifestV2): R
     recordId: requireIdentity(requireField(scopeRaw, "recordId", "record.scope"), "record.scope.recordId"),
   };
   if (
-    scope.worldlineId !== manifest.scope.worldlineId
-    || scope.recordId !== manifest.scope.recordId
-    || (manifest.world && scope.worldId !== manifest.world.worldId)
+    scope.worldlineId !== expected.scope.worldlineId
+    || scope.recordId !== expected.scope.recordId
+    || (expected.scope.worldId !== null && scope.worldId !== expected.scope.worldId)
   ) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime record scope does not match save manifest");
   }
@@ -834,8 +1125,8 @@ function validateRecord(value: unknown, manifest: RealmRuntimeSaveManifestV2): R
     ),
   };
   if (
-    head.recordVersion !== manifest.snapshot.recordVersion
-    || head.nextRecordOrdinal !== manifest.snapshot.nextRecordOrdinal
+    head.recordVersion !== expected.head.recordVersion
+    || head.nextRecordOrdinal !== expected.head.nextRecordOrdinal
   ) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime record head does not match save snapshot");
   }
@@ -882,95 +1173,11 @@ function validateRecord(value: unknown, manifest: RealmRuntimeSaveManifestV2): R
   };
 }
 
-const RESTORABLE_EVENT_KINDS: ReadonlySet<string> = new Set([
-  "utterance.committed",
-  "narration.committed",
-  "action.transaction.committed",
-  "system.correction.committed",
-  "goal.transition.committed",
-]);
 
-/**
- * Validate the PostgreSQL event projection before any restore transaction is
- * opened. This keeps foreign-key identifiers from the source archive as data,
- * never as target SQL identifiers, and rejects old/minimal fixtures that do
- * not contain enough information for a faithful event-row restore.
- */
-export function normalizeRealmRuntimeSaveEventForRestore(
-  event: RealmRuntimeSaveEventV1,
-  index = 0,
-): RealmRuntimeSaveRestorableEvent {
-  if (!RESTORABLE_EVENT_KINDS.has(event.kind)) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime event ${index} kind is not restorable`);
-  }
-  if (event.recordVersion <= 0) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime event ${index} recordVersion must be > 0 for restore`);
-  }
-  if (!isPlainObject(event.payload)) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime event ${index} payload projection is invalid`);
-  }
-  assertExactKeys(
-    event.payload,
-    [
-      "content",
-      "speakerName",
-      "actorParticipantId",
-      "sceneId",
-      "visibilityPolicyId",
-      "worldTick",
-      "worldOrdinal",
-      "calendarId",
-      "displayTime",
-      "eventPayload",
-    ],
-    `record.events[${index}].payload`,
-  );
-  const content = requireField(event.payload, "content", `record.events[${index}].payload`);
-  const speakerName = requireField(event.payload, "speakerName", `record.events[${index}].payload`);
-  const actorParticipantId = requireField(event.payload, "actorParticipantId", `record.events[${index}].payload`);
-  const sceneId = requireField(event.payload, "sceneId", `record.events[${index}].payload`);
-  const visibilityPolicyId = requireField(event.payload, "visibilityPolicyId", `record.events[${index}].payload`);
-  const worldTick = requireField(event.payload, "worldTick", `record.events[${index}].payload`);
-  const worldOrdinal = requireField(event.payload, "worldOrdinal", `record.events[${index}].payload`);
-  const calendarId = requireField(event.payload, "calendarId", `record.events[${index}].payload`);
-  const displayTime = requireField(event.payload, "displayTime", `record.events[${index}].payload`);
-  const eventPayload = requireField(event.payload, "eventPayload", `record.events[${index}].payload`);
-  if (
-    typeof content !== "string"
-    || typeof speakerName !== "string"
-    || (actorParticipantId !== null && typeof actorParticipantId !== "string")
-    || typeof calendarId !== "string"
-    || typeof displayTime !== "string"
-    || typeof sceneId !== "string"
-    || typeof visibilityPolicyId !== "string"
-    || !isPlainObject(eventPayload)
-    || !isJsonValue(eventPayload)
-  ) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime event ${index} payload fields are invalid`);
-  }
-  if (!calendarId.trim()) {
-    throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime event ${index} calendarId is empty`);
-  }
-  return {
-    eventId: event.eventId,
-    recordVersion: event.recordVersion,
-    ordinal: event.ordinal,
-    kind: event.kind as RealmRuntimeSaveRestorableEventKind,
-    content,
-    speakerName,
-    sourceActorParticipantId: actorParticipantId,
-    sourceSceneId: requireIdentity(sceneId, `record.events[${index}].payload.sceneId`),
-    sourceVisibilityPolicyId: requireIdentity(
-      visibilityPolicyId,
-      `record.events[${index}].payload.visibilityPolicyId`,
-    ),
-    worldTick: requireInteger(worldTick, `record.events[${index}].payload.worldTick`, 0),
-    worldOrdinal: requireInteger(worldOrdinal, `record.events[${index}].payload.worldOrdinal`, 0),
-    calendarId: calendarId.trim(),
-    displayTime,
-    eventPayload,
-  };
-}
+
+
+
+
 
 function validateGoals(value: unknown, expectedScope?: RealmRuntimeSaveRecordScope & {workspaceId:string}): RealmRuntimeSaveGoalsV1 {
   if (!isPlainObject(value)) {
@@ -1467,6 +1674,18 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
   ) {
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime memory sections must be arrays");
   }
+  return { format: "realm-runtime-memory", schemaVersion: 1, ...validateMemoryRows(value, "v1") };
+}
+
+// Shared scalar/row parsing only. V1 keeps its original local membership rules;
+// V2 references are resolved once with complete context by the separate API.
+function validateMemoryRows(
+  value: Record<string, unknown>,
+  mode: "v1" | "v2" | "legacy",
+): Pick<RealmRuntimeSaveMemoryV1, "conclusions" | "snapshots" | "relationshipStates"> {
+  if (!Array.isArray(value.conclusions) || !Array.isArray(value.snapshots) || !Array.isArray(value.relationshipStates)) {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime memory sections must be arrays");
+  }
   const memoryIds = new Set<string>();
   const conclusions = value.conclusions.map((raw, index) => {
     const where = `memory.conclusions[${index}]`;
@@ -1567,7 +1786,7 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
       metadata: requireJsonObject(requireField(raw, "metadata", where), `${where}.metadata`),
     };
   });
-  for (const conclusion of conclusions) {
+  for (const conclusion of mode !== "v2" ? conclusions : []) {
     if (
       conclusion.sourceSupersedesMemoryId !== null
       && !memoryIds.has(conclusion.sourceSupersedesMemoryId)
@@ -1582,7 +1801,7 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
   const supersedesById = new Map(
     conclusions.map((conclusion) => [conclusion.sourceMemoryId, conclusion.sourceSupersedesMemoryId]),
   );
-  for (const conclusion of conclusions) {
+  for (const conclusion of mode === "v1" ? conclusions : []) {
     const seen = new Set<string>([conclusion.sourceMemoryId]);
     let cursor = conclusion.sourceSupersedesMemoryId;
     while (cursor !== null) {
@@ -1628,7 +1847,7 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
       typeof snapshotKind !== "string"
       || !MEMORY_SNAPSHOT_KINDS.has(snapshotKind as RealmRuntimeSaveMemorySnapshotKind)
       || typeof content !== "string"
-      || !content.trim()
+      || (mode !== "v2" && !content.trim())
     ) {
       throw new RealmRuntimeSaveError("INVALID_SAVE", `runtime memory snapshot ${index} shape is invalid`);
     }
@@ -1640,7 +1859,7 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
       item,
       `${where}.sourceItemIds[${itemIndex}]`,
     ));
-    for (const itemId of sourceItemIds) {
+    for (const itemId of mode !== "v2" ? sourceItemIds : []) {
       if (!memoryIds.has(itemId)) {
         throw new RealmRuntimeSaveError(
           "INVALID_SAVE",
@@ -1716,17 +1935,11 @@ function validateMemory(value: unknown): RealmRuntimeSaveMemoryV1 {
       relationKind: relationKind as RealmRuntimeSaveRelationshipKind,
       content,
       fidelity: requireFidelity(requireField(raw, "fidelity", where), `${where}.fidelity`),
-      ...validateNullableSourceObservation(raw, where),
+      ...(mode !== "v2" ? validateNullableSourceObservation(raw, where) : validateMemoryV2RelationshipSource(raw, where)),
       ...validateMemoryCursor(raw, where),
     };
   });
-  return {
-    format: "realm-runtime-memory",
-    schemaVersion: 1,
-    conclusions,
-    snapshots,
-    relationshipStates,
-  };
+  return { conclusions, snapshots, relationshipStates };
 }
 
 /**
@@ -1809,6 +2022,430 @@ export function serializeRealmRuntimeSaveMemoryV1(
   section: RealmRuntimeSaveMemoryV1,
 ): string {
   return canonicalJson(validateMemory(section) as unknown as JsonValue);
+}
+
+function invalidMemory(message: string): never {
+  throw new RealmRuntimeSaveError("INVALID_SAVE", message);
+}
+
+/** Copy JSON data without invoking accessors/toJSON or retaining caller aliases.
+ * Iterative traversal rejects cycles but permits shared, acyclic input objects.
+ */
+function detachMemoryData(value: unknown, optionalRootFields: readonly string[] = []): unknown {
+  const scalar = (item: unknown): boolean => item === null || typeof item === "string"
+    || typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item));
+  const container = (item: unknown): Record<string, unknown> | unknown[] => {
+    if (typeof item !== "object" || item === null
+      || (!Array.isArray(item) && Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null)) {
+      return invalidMemory("Memory input must contain plain JSON data.");
+    }
+    return item as Record<string, unknown> | unknown[];
+  };
+  if (scalar(value)) return value;
+  const source = container(value);
+  const result = Array.isArray(source) ? [] : {};
+  const frame = (input: Record<string, unknown> | unknown[], output: object) => {
+    const keys = Reflect.ownKeys(input).filter((key) => {
+      if (Array.isArray(input) && key === "length") return false;
+      const descriptor = Object.getOwnPropertyDescriptor(input, key)!;
+      return !(input === source && typeof key === "string" && optionalRootFields.includes(key) && "value" in descriptor && descriptor.value === undefined);
+    });
+    if (keys.some((key) => typeof key !== "string")
+      || (Array.isArray(input) && (keys.length !== input.length || keys.some((key, i) => key !== String(i))))) {
+      invalidMemory("Memory input must contain plain JSON data.");
+    }
+    return { input, output, keys: keys as string[], index: 0 };
+  };
+  const stack = [frame(source, result)];
+  const active = new Set<object>([source]);
+  while (stack.length) {
+    const top = stack[stack.length - 1]!;
+    if (top.index === top.keys.length) { active.delete(top.input); stack.pop(); continue; }
+    const key = top.keys[top.index++]!;
+    const descriptor = Object.getOwnPropertyDescriptor(top.input, key)!;
+    if (!("value" in descriptor) || !descriptor.enumerable) invalidMemory("Memory input must contain plain JSON data.");
+    const item: unknown = descriptor.value;
+    if (scalar(item)) {
+      Object.defineProperty(top.output, key, { value: item, enumerable: true, writable: true, configurable: true });
+    } else {
+      const input = container(item);
+      if (active.has(input)) invalidMemory("Memory input must not contain cycles.");
+      const output = Array.isArray(input) ? [] : {};
+      Object.defineProperty(top.output, key, { value: output, enumerable: true, writable: true, configurable: true });
+      active.add(input); stack.push(frame(input, output));
+    }
+  }
+  return result;
+}
+
+function validateMemoryV2RelationshipSource(raw: Record<string, unknown>, where: string) {
+  const record = requireField(raw, "sourceRecordId", where);
+  const observation = requireField(raw, "sourceObservationId", where);
+  if (record === null && observation !== null) invalidMemory("Memory observation requires a source Record.");
+  return {
+    sourceRecordId: record === null ? null : requireIdentity(record, `${where}.sourceRecordId`),
+    sourceObservationId: observation === null ? null : requireReference(observation, `${where}.sourceObservationId`),
+  };
+}
+
+function memoryRelationshipKey(row: RealmRuntimeSaveRelationshipStateV1): string {
+  return JSON.stringify([row.sourceObserverContinuityId, row.targetEntityKey, row.relationKind]);
+}
+
+function memoryInt32(value: unknown, where: string): number {
+  const result = requireInteger(value, where, 0);
+  if (result > 2147483647) invalidMemory(`Memory ${where} exceeds int32.`);
+  return result;
+}
+
+// V2 wire identities/references are literal ASCII IDs, at most 512 bytes.
+// This is an identifier bound, not an archive row-count or payload cap.
+function boundedMemoryId(value: string | null): void {
+  if (value !== null && value.length > 512) invalidMemory("MemoryV2 identifier exceeds 512 bytes.");
+}
+
+function normalizeMemoryV2Document(value: unknown): RealmRuntimeSaveMemoryV2 {
+  const raw = detachMemoryData(value);
+  if (!isPlainObject(raw)) invalidMemory("MemoryV2 must be an object.");
+  const keys = ["format", "schemaVersion", "scope", "worldlineHead", "conclusions", "snapshots", "relationshipStates", "cacheEpochs"];
+  assertExactKeys(raw, keys, "memoryV2");
+  for (const key of keys) requireField(raw, key, "memoryV2");
+  if (raw.format !== "realm-runtime-memory" || raw.schemaVersion !== 2) invalidMemory("MemoryV2 schema is unsupported.");
+  if (!isPlainObject(raw.scope) || !isPlainObject(raw.worldlineHead)) invalidMemory("MemoryV2 scope/head is invalid.");
+  assertExactKeys(raw.scope, ["workspaceId", "worldId", "worldlineId"], "memoryV2.scope");
+  assertExactKeys(raw.worldlineHead, ["tick", "ordinal"], "memoryV2.worldlineHead");
+  const scope = {
+    workspaceId: requireIdentity(requireField(raw.scope, "workspaceId", "memoryV2.scope"), "memoryV2.scope.workspaceId"),
+    worldId: requireIdentity(requireField(raw.scope, "worldId", "memoryV2.scope"), "memoryV2.scope.worldId"),
+    worldlineId: requireIdentity(requireField(raw.scope, "worldlineId", "memoryV2.scope"), "memoryV2.scope.worldlineId"),
+  };
+  const worldlineHead = {
+    tick: requireInteger(requireField(raw.worldlineHead, "tick", "memoryV2.worldlineHead"), "memoryV2.worldlineHead.tick", 0),
+    ordinal: requireInteger(requireField(raw.worldlineHead, "ordinal", "memoryV2.worldlineHead"), "memoryV2.worldlineHead.ordinal", 0),
+  };
+  const rows = validateMemoryRows(raw, "v2");
+  for (const id of Object.values(scope)) boundedMemoryId(id);
+  for (const row of rows.conclusions) {
+    for (const id of [row.sourceMemoryId, row.sourceObserverContinuityId, row.sourceRecordId, row.sourceObservationId, row.sourceSupersedesMemoryId]) boundedMemoryId(id);
+  }
+  for (const row of rows.snapshots) {
+    boundedMemoryId(row.sourceSnapshotId); boundedMemoryId(row.sourceObserverContinuityId);
+    for (const id of row.sourceItemIds) boundedMemoryId(id);
+    memoryInt32(row.cacheEpoch, "snapshot.cacheEpoch"); memoryInt32(row.tokenCount, "snapshot.tokenCount");
+  }
+  for (const row of rows.relationshipStates) {
+    boundedMemoryId(row.sourceObserverContinuityId); boundedMemoryId(row.sourceRecordId); boundedMemoryId(row.sourceObservationId);
+  }
+  if (!Array.isArray(raw.cacheEpochs)) invalidMemory("MemoryV2 cacheEpochs must be an array.");
+  const seen = new Set<string>();
+  const cacheEpochs = raw.cacheEpochs.map((entry) => {
+    if (!isPlainObject(entry)) invalidMemory("MemoryV2 epoch is invalid.");
+    assertExactKeys(entry, ["sourceObserverContinuityId", "epoch"], "memoryV2.cacheEpochs");
+    const sourceObserverContinuityId = requireIdentity(requireField(entry, "sourceObserverContinuityId", "epoch"), "epoch.observer");
+    if (seen.has(sourceObserverContinuityId)) invalidMemory("MemoryV2 epoch observers must be unique.");
+    seen.add(sourceObserverContinuityId);
+    boundedMemoryId(sourceObserverContinuityId);
+    return { sourceObserverContinuityId, epoch: memoryInt32(requireField(entry, "epoch", "epoch"), "epoch.epoch") };
+  });
+  return {
+    format: "realm-runtime-memory", schemaVersion: 2, scope, worldlineHead,
+    conclusions: [...rows.conclusions].sort((a, b) => a.occurredTick - b.occurredTick || a.occurredOrdinal - b.occurredOrdinal || compareUtf8(a.sourceMemoryId, b.sourceMemoryId)),
+    snapshots: [...rows.snapshots].sort((a, b) => a.cursorTick - b.cursorTick || a.cursorOrdinal - b.cursorOrdinal || compareUtf8(a.sourceSnapshotId, b.sourceSnapshotId)),
+    relationshipStates: [...rows.relationshipStates].sort((a, b) => compareUtf8(a.sourceObserverContinuityId, b.sourceObserverContinuityId) || compareUtf8(a.targetEntityKey, b.targetEntityKey) || compareUtf8(a.relationKind, b.relationKind)),
+    cacheEpochs: cacheEpochs.sort((a, b) => compareUtf8(a.sourceObserverContinuityId, b.sourceObserverContinuityId)),
+  };
+}
+
+function encodeMemoryV2(document: RealmRuntimeSaveMemoryV2): string {
+  const text = canonicalJson(document as unknown as JsonValue);
+  const emittedBytes=Buffer.byteLength(text,"utf8");
+  if(emittedBytes!==countMemoryCanonicalBytes(document as unknown as JsonValue))invalidMemory("Memory resource ledger does not match canonical wire bytes.");
+  if (emittedBytes > MAX_RUNTIME_FILE_BYTES) invalidMemory("MemoryV2 exceeds the runtime file byte limit.");
+  return text;
+}
+
+/** Strict structural normalization only; call the complete-context resolver
+ * before consuming references. Returned data is detached from the input.
+ */
+export function normalizeRealmRuntimeSaveMemoryV2(value: unknown): RealmRuntimeSaveMemoryV2 {
+  const document = normalizeMemoryV2Document(value);
+  encodeMemoryV2(document);
+  return document;
+}
+
+/** Same canonical formatter and 64 MiB file boundary as runtime archive JSON. */
+export function serializeRealmRuntimeSaveMemoryV2(section: RealmRuntimeSaveMemoryV2): string {
+  return encodeMemoryV2(normalizeMemoryV2Document(section));
+}
+
+/** Stable Kahn order using a min heap: O((rows + edges) log rows), never a
+ * repeated all-map scan or per-chain recursive traversal.
+ */
+function orderGlobalMemory(conclusions: readonly RealmRuntimeSaveMemoryConclusionV1[]): string[] {
+  const byId = new Map(conclusions.map((row) => [row.sourceMemoryId, row]));
+  const children = new Map<string, string[]>();
+  const heap: string[] = [];
+  const push = (id: string): void => {
+    heap.push(id); let index = heap.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (compareUtf8(heap[parent]!, id) <= 0) break;
+      heap[index] = heap[parent]!; index = parent;
+    }
+    heap[index] = id;
+  };
+  const pop = (): string => {
+    const first = heap[0]!, last = heap.pop()!;
+    if (heap.length) {
+      let index = 0;
+      while (index * 2 + 1 < heap.length) {
+        let child = index * 2 + 1;
+        if (child + 1 < heap.length && compareUtf8(heap[child + 1]!, heap[child]!) < 0) child++;
+        if (compareUtf8(last, heap[child]!) <= 0) break;
+        heap[index] = heap[child]!; index = child;
+      }
+      heap[index] = last;
+    }
+    return first;
+  };
+  for (const row of conclusions) {
+    const parentId = row.sourceSupersedesMemoryId;
+    if (parentId === null) { push(row.sourceMemoryId); continue; }
+    const parent = byId.get(parentId);
+    if (!parent || parent.sourceObserverContinuityId !== row.sourceObserverContinuityId) invalidMemory("Memory supersedes reference is missing or has another observer.");
+    const list = children.get(parentId) ?? [];
+    list.push(row.sourceMemoryId); children.set(parentId, list);
+  }
+  const order: string[] = [];
+  while (heap.length) {
+    const id = pop(); order.push(id);
+    for (const child of children.get(id) ?? []) push(child);
+  }
+  if (order.length !== conclusions.length) invalidMemory("Memory supersedes chain is cyclic.");
+  return order;
+}
+
+function normalizeLegacyMemoryDocument(value: unknown): RealmRuntimeSaveMemoryV1 {
+  if (!isPlainObject(value)) invalidMemory("Legacy memory must be an object.");
+  assertExactKeys(value, ["format", "schemaVersion", "conclusions", "snapshots", "relationshipStates"], "legacy memory");
+  if (value.format !== "realm-runtime-memory" || value.schemaVersion !== 1) invalidMemory("Legacy memory schema is unsupported.");
+  const document: RealmRuntimeSaveMemoryV1 = { format: "realm-runtime-memory", schemaVersion: 1, ...validateMemoryRows(value, "legacy") };
+  for (const snapshot of document.snapshots) {
+    memoryInt32(snapshot.cacheEpoch, "snapshot.cacheEpoch"); memoryInt32(snapshot.tokenCount, "snapshot.tokenCount");
+  }
+  if (Buffer.byteLength(canonicalJson(document as unknown as JsonValue)) > MAX_RUNTIME_FILE_BYTES) invalidMemory("Legacy memory exceeds the runtime file byte limit.");
+  return document;
+}
+
+function collectLegacyMemory(documents: readonly RealmRuntimeSaveMemoryV1[]) {
+  const conclusions = new Map<string, RealmRuntimeSaveMemoryConclusionV1>();
+  const snapshots = new Map<string, RealmRuntimeSaveMemorySnapshotV1>();
+  const relationships = new Map<string, RealmRuntimeSaveRelationshipStateV1>();
+  const insert = <T>(map: Map<string, T>, key: string, row: T): void => {
+    if (map.has(key)) {
+      if (canonicalJson(map.get(key) as unknown as JsonValue) !== canonicalJson(row as unknown as JsonValue)) invalidMemory("Legacy memory representations conflict.");
+      return;
+    }
+    map.set(key, row);
+  };
+  for (const document of documents) {
+    for (const row of document.conclusions) insert(conclusions, row.sourceMemoryId, row);
+    for (const row of document.snapshots) insert(snapshots, row.sourceSnapshotId, row);
+    for (const row of document.relationshipStates) insert(relationships, memoryRelationshipKey(row), row);
+  }
+  return { conclusions: [...conclusions.values()], snapshots: [...snapshots.values()], relationshipStates: [...relationships.values()] };
+}
+
+function legacyMemoryEpochs(snapshots: readonly RealmRuntimeSaveMemorySnapshotV1[], observers: Iterable<string>): RealmRuntimeSaveMemoryV2["cacheEpochs"] {
+  const maxima = new Map([...observers].map((id) => [id, -1]));
+  for (const snapshot of snapshots) {
+    if (!maxima.has(snapshot.sourceObserverContinuityId)) invalidMemory("Legacy snapshot observer is not carried.");
+    maxima.set(snapshot.sourceObserverContinuityId, Math.max(maxima.get(snapshot.sourceObserverContinuityId)!, snapshot.cacheEpoch));
+  }
+  return [...maxima].sort(([a], [b]) => compareUtf8(a, b)).map(([sourceObserverContinuityId, maximum]) => {
+    if (maximum === 2147483647) invalidMemory("Legacy memory cache epoch is exhausted.");
+    // MAX-1 -> MAX is representable, with zero remaining successful revisions.
+    return { sourceObserverContinuityId, epoch: maximum + 1 };
+  });
+}
+
+function normalizeMemoryContextBundle(bundle: RealmRuntimeSaveRecordBundleV1, scope: RealmRuntimeSaveMemoryV2["scope"]): RealmRuntimeSaveRecordBundleV1 {
+  if (!isPlainObject(bundle) || !isPlainObject(bundle.record) || !isPlainObject(bundle.record.scope)) invalidMemory("Memory sibling Record is invalid.");
+  // Keep active bundle/V1 behavior unchanged. The pure resolver parses memory
+  // separately so its DAG is checked once globally, not by V1's per-chain walk.
+  const sections = { ...bundle }; delete sections.memory;
+  const context = validateRealmRuntimeSaveRecordBundle(sections, {
+    worldId: scope.worldId, worldlineId: scope.worldlineId,
+    recordId: requireIdentity(bundle.record.scope.recordId, "memory sibling Record"),
+  });
+  if (bundle.memory !== undefined) {
+    context.memory = normalizeLegacyMemoryDocument(bundle.memory);
+    validateMemoryReferences(context.memory, context);
+  }
+  return context;
+}
+
+/** Complete-context pure validation. Structural V2 success alone does not
+ * establish ownership. This API neither allocates target IDs nor authorizes
+ * export/restore, and is deliberately not wired into the active V1 wrappers.
+ */
+export function resolveRealmRuntimeSaveArchiveMemory(
+  input: RealmRuntimeSaveArchiveMemoryInput,
+): ResolvedRealmRuntimeSaveArchiveMemory {
+  const detached = detachMemoryData(input, ["memory", "topology", "observations", "domain", "siblings"]);
+  if (!isPlainObject(detached)) invalidMemory("Memory context must be an object.");
+  const source = detached as unknown as RealmRuntimeSaveArchiveMemoryInput;
+  let manifest: RealmRuntimeSaveManifestV2;
+  try { manifest = normalizeManifest(source.manifest); }
+  catch (error) {
+    if (error instanceof RealmRuntimeSaveError) return invalidMemory(error.message);
+    throw error;
+  }
+  const record = validateRecord(source.record, manifest);
+  const scope = { workspaceId: manifest.scope.workspaceId, worldId: record.scope.worldId, worldlineId: record.scope.worldlineId };
+  const root = {
+    record,
+    topology: source.topology === undefined ? undefined : validateTopology(source.topology),
+    observations: source.observations === undefined ? undefined : validateObservations(source.observations),
+  };
+  if (source.siblings !== undefined && !Array.isArray(source.siblings)) invalidMemory("Memory siblings must be complete bundles.");
+  const bundles = [...(source.siblings ?? [])];
+  const domainCursors: { tick: number; ordinal: number }[] = [];
+  if (source.domain !== undefined) {
+    let domain: RealmRuntimeSaveDomainV1;
+    const memoryByRecord = new Map<string, RealmRuntimeSaveMemoryV1>();
+    try {
+      const domainInput = { ...source.domain, ...(source.domain.records === undefined ? {} : { records: source.domain.records.map((row) => {
+        const bundle = { ...row.bundle };
+        if (bundle.memory !== undefined) memoryByRecord.set(row.recordId, normalizeLegacyMemoryDocument(bundle.memory));
+        delete bundle.memory;
+        return { ...row, bundle };
+      }) }) };
+      domain = normalizeRealmRuntimeSaveDomainV1(domainInput);
+      for (const row of (domain.records ?? [])) {
+        const memory = memoryByRecord.get(row.recordId);
+        if (memory !== undefined) row.bundle.memory = memory;
+      }
+      // Reattaching normalized legacy rows preserves the exact existing domain
+      // envelope. JSON object key ordering cannot alter this byte count.
+      if (countRuntimeSectionWireBytes(domain, "normalized-domain") > REPLAY_LINEAGE_MAX_BYTES) invalidMemory("Memory domain exceeds its byte limit.");
+    }
+    catch { return invalidMemory("Memory domain context is invalid."); }
+    if (domain.source.worldId !== scope.worldId || domain.source.worldlineId !== scope.worldlineId || domain.source.recordId !== record.scope.recordId) invalidMemory("Memory domain source scope does not match.");
+    for (const row of (domain.records ?? [])) {
+      bundles.push(row.bundle);
+      domainCursors.push({ tick: row.startTick, ordinal: row.startOrdinal });
+      if (row.lastWorldTick !== null && row.lastWorldOrdinal !== null) domainCursors.push({ tick: row.lastWorldTick, ordinal: row.lastWorldOrdinal });
+    }
+  }
+  const contexts = [root, ...bundles.map((bundle) => normalizeMemoryContextBundle(bundle, scope))];
+  const records = new Set<string>();
+  const events = new Map<string, string>();
+  const continuities = new Map<string, string>();
+  const definitions = new Map<string, string>();
+  const instances = new Map<string, { recordId: string; continuityId: string; representation: string }>();
+  const participants = new Map<string, string>();
+  for (const context of contexts) {
+    const recordId = context.record.scope.recordId;
+    if (records.has(recordId)) invalidMemory("Memory context repeats a Record.");
+    records.add(recordId);
+    for (const event of context.record.events) {
+      if (events.has(event.eventId)) invalidMemory("Memory event has multiple owners.");
+      events.set(event.eventId, recordId);
+    }
+    for (const participant of context.topology?.participants ?? []) {
+      if (participants.has(participant.sourceParticipantId)) invalidMemory("Memory participant has multiple owners.");
+      participants.set(participant.sourceParticipantId, recordId);
+      const character = participant.character;
+      if (!character) continue;
+      const continuity = canonicalJson({ sourceDefinitionId: character.sourceDefinitionId, continuity: character.continuity } as unknown as JsonValue);
+      if (continuities.has(character.sourceContinuityId) && continuities.get(character.sourceContinuityId) !== continuity) invalidMemory("Memory continuity representations conflict.");
+      continuities.set(character.sourceContinuityId, continuity);
+      const definition = canonicalJson(character.definition as unknown as JsonValue);
+      if (definitions.has(character.sourceDefinitionId) && definitions.get(character.sourceDefinitionId) !== definition) invalidMemory("Memory definition representations conflict.");
+      definitions.set(character.sourceDefinitionId, definition);
+      const representation = canonicalJson(character as unknown as JsonValue);
+      const old = instances.get(character.sourceCharacterInstanceId);
+      if (old && (old.recordId !== recordId || old.representation !== representation)) invalidMemory("Memory instance representations conflict.");
+      instances.set(character.sourceCharacterInstanceId, { recordId, continuityId: character.sourceContinuityId, representation });
+    }
+  }
+  const observations = new Map<string, RealmRuntimeSaveMemoryObservationOwner>();
+  for (const context of contexts) {
+    for (const row of context.observations?.observations ?? []) {
+      const instance = instances.get(row.sourceObserverCharacterInstanceId);
+      const recordId = context.record.scope.recordId;
+      if (!instance || instance.recordId !== recordId) invalidMemory("Memory observation instance does not belong to its Record.");
+      if (observations.has(row.sourceObservationId)) invalidMemory("Memory observation has multiple owners.");
+      const eventRecordId = row.sourceEventId === null ? null : events.get(row.sourceEventId);
+      if (eventRecordId === undefined) invalidMemory("Memory observation source event is not carried.");
+      observations.set(row.sourceObservationId, {
+        sourceObservationId: row.sourceObservationId, sourceRecordId: recordId,
+        sourceCharacterInstanceId: row.sourceObserverCharacterInstanceId, sourceObserverContinuityId: instance.continuityId,
+        sourceEventId: row.sourceEventId, sourceEventRecordId: eventRecordId,
+      });
+    }
+  }
+  const v2 = source.memory?.schemaVersion === 2 ? normalizeRealmRuntimeSaveMemoryV2(source.memory) : undefined;
+  if (v2 && contexts.slice(1).some((context) => "memory" in context && context.memory !== undefined)) invalidMemory("MemoryV2 cannot be mixed with sibling legacy memory.");
+  if (v2 && Object.keys(scope).some((key) => scope[key as keyof typeof scope] !== v2.scope[key as keyof typeof scope])) invalidMemory("Memory source scope does not match the archive.");
+  const legacy: RealmRuntimeSaveMemoryV1[] = [];
+  if (!v2 && source.memory !== undefined) {
+    const document = normalizeLegacyMemoryDocument(source.memory);
+    validateMemoryReferences(document, root); legacy.push(document);
+  }
+  if (!v2) for (const context of contexts.slice(1)) {
+    if ("memory" in context && context.memory !== undefined) legacy.push(normalizeLegacyMemoryDocument(context.memory));
+  }
+  const document = v2 ?? collectLegacyMemory(legacy);
+  if (v2) {
+    const checkHead = (tick: number, ordinal: number): void => {
+      if (tick > v2.worldlineHead.tick || (tick === v2.worldlineHead.tick && ordinal > v2.worldlineHead.ordinal)) invalidMemory("Memory source head precedes a recorded cursor.");
+    };
+    for (const cursor of domainCursors) checkHead(cursor.tick, cursor.ordinal);
+    for (const row of [...document.conclusions, ...document.relationshipStates]) checkHead(row.occurredTick, row.occurredOrdinal);
+    for (const row of document.snapshots) checkHead(row.cursorTick, row.cursorOrdinal);
+    for (const context of contexts) {
+      for (const row of context.observations?.observations ?? []) checkHead(row.occurredTick, row.occurredOrdinal);
+      for (const event of context.record.events) {
+        if (isPlainObject(event.payload) && ("worldTick" in event.payload || "worldOrdinal" in event.payload)) {
+          checkHead(requireInteger(event.payload.worldTick, "event.worldTick", 0), requireInteger(event.payload.worldOrdinal, "event.worldOrdinal", 0));
+        }
+      }
+    }
+  }
+  const checkSource = (row: RealmRuntimeSaveMemoryConclusionV1 | RealmRuntimeSaveRelationshipStateV1): void => {
+    if (!continuities.has(row.sourceObserverContinuityId)) invalidMemory("Memory observer is outside carried topology.");
+    if (row.sourceRecordId === null) return;
+    if (!records.has(row.sourceRecordId)) invalidMemory("Memory source Record is not carried.");
+    if (row.sourceObservationId === null) return;
+    const owner = observations.get(row.sourceObservationId);
+    if (!owner || owner.sourceRecordId !== row.sourceRecordId || owner.sourceObserverContinuityId !== row.sourceObserverContinuityId) invalidMemory("Memory source observation ownership does not match.");
+  };
+  for (const row of document.conclusions) checkSource(row);
+  for (const row of document.relationshipStates) checkSource(row);
+  const memoryIds = new Map(document.conclusions.map((row) => [row.sourceMemoryId, row]));
+  for (const snapshot of document.snapshots) {
+    if (!continuities.has(snapshot.sourceObserverContinuityId)) invalidMemory("Memory snapshot observer is outside carried topology.");
+    for (const id of snapshot.sourceItemIds) {
+      const item = memoryIds.get(id);
+      if (!item) invalidMemory("Memory snapshot item is not carried.");
+      if (item.sourceObserverContinuityId !== snapshot.sourceObserverContinuityId) invalidMemory("Memory snapshot item observer does not match.");
+    }
+  }
+  const effectiveEpochs = v2?.cacheEpochs ?? legacyMemoryEpochs(document.snapshots, continuities.keys());
+  const epochs = new Map(effectiveEpochs.map((row) => [row.sourceObserverContinuityId, row.epoch]));
+  if (epochs.size !== continuities.size || [...continuities.keys()].some((id) => !epochs.has(id))) invalidMemory("Memory current epoch observers do not match carried topology.");
+  for (const snapshot of document.snapshots) {
+    if (epochs.get(snapshot.sourceObserverContinuityId)! < snapshot.cacheEpoch) invalidMemory("Memory cache epoch precedes a retained snapshot.");
+  }
+  return {
+    sourceFormat: v2 ? "v2" : "legacy", scope, worldlineHead: v2?.worldlineHead ?? null,
+    conclusions: document.conclusions, snapshots: document.snapshots, relationshipStates: document.relationshipStates,
+    cacheEpochs: effectiveEpochs, supersedesOrder: orderGlobalMemory(document.conclusions),
+    observationOwners: [...observations.values()].sort((a, b) => compareUtf8(a.sourceObservationId, b.sourceObservationId)),
+    eventOwners: [...events].sort(([a], [b]) => compareUtf8(a, b)).map(([sourceEventId, sourceRecordId]) => ({ sourceEventId, sourceRecordId })),
+  };
 }
 
 function requireTrimmedText(value: unknown, where: string, maxLength: number): string {
@@ -2435,7 +3072,7 @@ function validateTopology(value: unknown): RealmRuntimeSaveTopologyV1 {
         requireField(characterRaw, "sourceDefinitionId", `topology.participants[${index}].character`),
         `topology.participants[${index}].character.sourceDefinitionId`,
       );
-      if (characterIds.has(sourceCharacterInstanceId) || continuityIds.has(sourceContinuityId)) {
+      if (!characterIds.has(sourceCharacterInstanceId) && continuityIds.has(sourceContinuityId)) {
         throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime topology character identities must be unique");
       }
       characterIds.add(sourceCharacterInstanceId);
@@ -2602,6 +3239,12 @@ function validateTopology(value: unknown): RealmRuntimeSaveTopologyV1 {
         },
       };
     }
+    if(character) {
+      const prior=participants.find(p=>p.character?.sourceCharacterInstanceId===character.sourceCharacterInstanceId)?.character;
+      if(prior && canonicalJson(prior as unknown as JsonValue)!==canonicalJson(character as unknown as JsonValue)) {
+        throw new RealmRuntimeSaveError("INVALID_SAVE","runtime topology character representations conflict");
+      }
+    }
     participants.push({
       sourceParticipantId,
       participantKind: participantKind as RealmRuntimeSaveParticipantKind,
@@ -2637,72 +3280,136 @@ export function serializeRealmRuntimeSaveTopologyV1(topology: RealmRuntimeSaveTo
   return canonicalJson(validateTopology(topology) as unknown as JsonValue);
 }
 
+/** V2 is a single global section. Nested bundles keep their original V1
+ * contract, and cannot hide a second copy of any Goal fact. */
+function validateArchiveGoals(value: unknown, manifest: RealmRuntimeSaveManifestV2,
+  record: RealmRuntimeSaveRecordV1, domain?: RealmRuntimeSaveDomainV1): RealmRuntimeSaveGoals {
+  if (!isPlainObject(value) || value.schemaVersion !== 2) return validateGoals(value, { ...record.scope, workspaceId: manifest.scope.workspaceId });
+  const goals = decodeRealmRuntimeSaveGoalsV2(value);
+  const invalid = (): never => { throw new RealmRuntimeSaveError("INVALID_SAVE", "Global Goal owner or event closure is incomplete."); };
+  if (goals.workspaceId !== manifest.scope.workspaceId) invalid();
+  const records = [record, ...(domain?.records ?? []).map(r => r.bundle.record)];
+  const recordByOwner = new Map(records.map(r => [JSON.stringify([r.scope.worldId,r.scope.worldlineId,r.scope.recordId]), r]));
+  const worldlines = new Set(records.map(r => JSON.stringify([r.scope.worldId,r.scope.worldlineId])));
+  const stories = new Set(domain ? [domain.source.storyId, ...(domain.stories ?? []).map(s => s.id)] : []);
+  for (const snapshot of domain?.records ?? []) {
+    const legacy = validateGoals(snapshot.bundle.goals);
+    if (legacy.instances.length || legacy.assessments.length || legacy.definitions?.length) invalid();
+  }
+  for (const root of goals.roots) {
+    const owner = root.owner;
+    if (!worldlines.has(JSON.stringify([owner.worldId,owner.worldlineId]))) invalid();
+    if (owner.scopeKind === "record" && !recordByOwner.has(JSON.stringify([owner.worldId,owner.worldlineId,owner.recordId]))) invalid();
+    if (owner.scopeKind === "story" && (!domain || owner.worldId !== domain.source.worldId
+      || owner.worldlineId !== domain.source.worldlineId || !stories.has(owner.storyId))) invalid();
+    for (const instance of root.instances) {
+      if (instance.definition.kind !== "content") continue;
+      const source = instance.definition.binding.source;
+      if (source.sourceKind === "installed" && (!manifest.world || source.sourceWorldId !== manifest.world.worldId
+        || source.sourceWorldVersion !== manifest.world.worldVersion)) invalid();
+    }
+  }
+  const requireEvent = (ref: {worldId:string;worldlineId:string;recordId:string;eventId:string}) => {
+    const owner = recordByOwner.get(JSON.stringify([ref.worldId,ref.worldlineId,ref.recordId]));
+    if (!owner || !owner.events.some(e => e.eventId === ref.eventId)) invalid();
+  };
+  for (const assessment of goals.assessments) {
+    requireEvent(assessment.sourceEvent);
+    assessment.evidenceEvents.forEach(requireEvent);
+  }
+  return goals;
+}
+
 function buildRuntimeFiles(
+  manifest: RealmRuntimeSaveManifestV2,
   record: RealmRuntimeSaveRecordV1,
-  goals: RealmRuntimeSaveGoalsV1,
+  goals: RealmRuntimeSaveGoals,
   topology?: RealmRuntimeSaveTopologyV1,
   actionReceipts?: RealmRuntimeSaveActionReceiptsV1,
   characterEffects?: RealmRuntimeSaveCharacterEffectsV1,
   observations?: RealmRuntimeSaveObservationsV1,
-  memory?: RealmRuntimeSaveMemoryV1,
+  memory?: RealmRuntimeSaveMemory,
   outbox?: RealmRuntimeSaveOutboxV1,
   firstNight?: RealmRuntimeSaveFirstNightV1,
   selfPlay?: RealmRuntimeSaveSelfPlayV1,
   domain?: RealmRuntimeSaveDomainV1,
+  performanceWitnesses?: RuntimePerformanceWitnessesV1,
 ): ReadonlyMap<string, Uint8Array> {
-  const files: [string, Uint8Array][] = [
-    [RECORD_ENTRY, Buffer.from(serializeRealmRuntimeSaveRecordV1(record), "utf8")],
-    [GOALS_ENTRY, Buffer.from(serializeRealmRuntimeSaveGoalsV1(goals), "utf8")],
-  ];
-  if (topology) files.push([TOPOLOGY_ENTRY, Buffer.from(serializeRealmRuntimeSaveTopologyV1(topology), "utf8")]);
-  if (actionReceipts) {
-    files.push([ACTION_RECEIPTS_ENTRY, Buffer.from(serializeRealmRuntimeSaveActionReceiptsV1(actionReceipts), "utf8")]);
-  }
-  if (characterEffects) {
-    files.push([
-      CHARACTER_EFFECTS_ENTRY,
-      Buffer.from(serializeRealmRuntimeSaveCharacterEffectsV1(characterEffects), "utf8"),
-    ]);
-  }
-  if (observations) {
-    files.push([OBSERVATIONS_ENTRY, Buffer.from(serializeRealmRuntimeSaveObservationsV1(observations), "utf8")]);
-  }
+  // Include the manifest in the existing 256 MiB uncompressed ZIP allowance.
+  // Its zero/final hash has the same 64 ASCII bytes, so both producers agree.
+  const manifestLedger = new RuntimeSectionWireLedger(MANIFEST_ENTRY, "canonical-runtime");
+  manifestLedger.reserve(normalizeManifest(manifest));
+  let remainingAggregateBytes = PACK_LIMITS.totalUncompressedMax - manifestLedger.acceptedBytes;
+  const files: [string, Uint8Array][] = [];
+  const append = (path: string, normalized: unknown): void => {
+    const ledger = new RuntimeSectionWireLedger(path, "canonical-runtime", remainingAggregateBytes);
+    ledger.reserve(normalized);
+    const text = canonicalJson(normalized as JsonValue);
+    ledger.verify(Buffer.byteLength(text, "utf8"));
+    files.push([path, Buffer.from(text, "utf8")]);
+    remainingAggregateBytes -= ledger.acceptedBytes;
+  };
+  append(RECORD_ENTRY, validateRecord(record, manifest));
+  append(GOALS_ENTRY, validateArchiveGoals(goals, manifest, record, domain));
+  if (topology) append(TOPOLOGY_ENTRY, validateTopology(topology));
+  if (actionReceipts) append(ACTION_RECEIPTS_ENTRY, validateActionReceipts(actionReceipts));
+  if (characterEffects) append(CHARACTER_EFFECTS_ENTRY, validateCharacterEffects(characterEffects));
+  if (observations) append(OBSERVATIONS_ENTRY, validateObservations(observations));
   if (memory) {
-    files.push([MEMORY_ENTRY, Buffer.from(serializeRealmRuntimeSaveMemoryV1(memory), "utf8")]);
+    // Retain the audited MemoryV2 formatter and its emitted-byte verification.
+    const normalized = memory.schemaVersion === 2 ? normalizeMemoryV2Document(memory) : validateMemory(memory);
+    const ledger = new RuntimeSectionWireLedger(MEMORY_ENTRY, "canonical-runtime", remainingAggregateBytes);
+    ledger.reserve(normalized);
+    const text = normalized.schemaVersion === 2 ? encodeMemoryV2(normalized) : canonicalJson(normalized as unknown as JsonValue);
+    ledger.verify(Buffer.byteLength(text, "utf8"));
+    files.push([MEMORY_ENTRY, Buffer.from(text, "utf8")]);
+    remainingAggregateBytes -= ledger.acceptedBytes;
   }
-  if (outbox) {
-    files.push([OUTBOX_ENTRY, Buffer.from(serializeRealmRuntimeSaveOutboxV1(outbox), "utf8")]);
-  }
-  if (firstNight) {
-    files.push([FIRST_NIGHT_ENTRY, Buffer.from(serializeRealmRuntimeSaveFirstNightV1(firstNight), "utf8")]);
-  }
-  if (selfPlay) {
-    files.push([SELF_PLAY_ENTRY, Buffer.from(serializeRealmRuntimeSaveSelfPlayV1(selfPlay), "utf8")]);
-  }
+  if (outbox) append(OUTBOX_ENTRY, validateOutbox(outbox));
+  if (firstNight) append(FIRST_NIGHT_ENTRY, validateFirstNight(firstNight));
+  if (selfPlay) append(SELF_PLAY_ENTRY, validateSelfPlay(selfPlay));
   if (domain) {
-    files.push([DOMAIN_ENTRY, Buffer.from(serializeRealmRuntimeSaveDomainV1(domain), "utf8")]);
+    const ledger = new RuntimeSectionWireLedger(DOMAIN_ENTRY, "normalized-domain", remainingAggregateBytes);
+    const text = serializeNormalizedRealmRuntimeSaveDomainV1ForArchive(domain, ledger);
+    files.push([DOMAIN_ENTRY, Buffer.from(text, "utf8")]);
+    remainingAggregateBytes -= ledger.acceptedBytes;
   }
+  validateRuntimePerformanceWitnessClosure({ manifest, record, topology, domain, performanceWitnesses });
+  if (performanceWitnesses) append(PERFORMANCE_WITNESSES_ENTRY, normalizeRuntimePerformanceWitnesses(performanceWitnesses));
   return new Map(files);
 }
 
 export function realmRuntimeSaveManifestFromData(input: {
+  performanceWitnesses?: RuntimePerformanceWitnessesV1;
   engineApi: string;
   mode: RealmRuntimeSaveMode;
   world: RealmRuntimeSaveWorldRef | null;
   scope: RealmRuntimeSaveScope;
   record: RealmRuntimeSaveRecordV1;
-  goals: RealmRuntimeSaveGoalsV1;
+  goals: RealmRuntimeSaveGoals;
   topology?: RealmRuntimeSaveTopologyV1;
   actionReceipts?: RealmRuntimeSaveActionReceiptsV1;
   characterEffects?: RealmRuntimeSaveCharacterEffectsV1;
   observations?: RealmRuntimeSaveObservationsV1;
-  memory?: RealmRuntimeSaveMemoryV1;
+  memory?: RealmRuntimeSaveMemory;
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
   selfPlay?: RealmRuntimeSaveSelfPlayV1;
   domain?: RealmRuntimeSaveDomainV1;
 }): RealmRuntimeSaveManifestV2 {
+  if (Object.hasOwn(input, "siblings")) throw new RealmRuntimeSaveError("INVALID_SAVE", "unknown save key archive.siblings");
+  const manifest: RealmRuntimeSaveManifestV2 = {
+    ...(input.performanceWitnesses ? { performanceWitnessesFormat: { schemaVersion: 1 as const, digest: runtimePerformanceWitnessesDigest(input.performanceWitnesses) } } : {}),
+    format: "realm-save", formatVersion: 2,
+    engineApi: input.engineApi, mode: input.mode, world: input.world, scope: input.scope,
+    snapshot: { recordVersion: input.record.head.recordVersion,
+      nextRecordOrdinal: input.record.head.nextRecordOrdinal, runtimeHash: "0".repeat(64) },
+  };
+  resolveRealmRuntimeSaveArchiveMemory({ manifest, record: input.record,
+    topology: input.topology, observations: input.observations, memory: input.memory, domain: input.domain });
+  const domain = input.domain === undefined ? undefined : normalizeRealmRuntimeSaveDomainV1(input.domain);
   const files = buildRuntimeFiles(
+    manifest,
     input.record,
     input.goals,
     input.topology,
@@ -2713,9 +3420,11 @@ export function realmRuntimeSaveManifestFromData(input: {
     input.outbox,
     input.firstNight,
     input.selfPlay,
-    input.domain,
+    domain,
+    input.performanceWitnesses,
   );
   return {
+    ...(manifest.performanceWitnessesFormat ? { performanceWitnessesFormat: manifest.performanceWitnessesFormat } : {}),
     format: "realm-save",
     formatVersion: 2,
     engineApi: input.engineApi,
@@ -2730,23 +3439,242 @@ export function realmRuntimeSaveManifestFromData(input: {
   };
 }
 
+/** Actual typed identities carried by this archive, never imported map claims. */
+export function runtimeFactReplayClosure(
+  record: RealmRuntimeSaveRecordV1,
+  domain: RealmRuntimeSaveDomainV1,
+  topology?: RealmRuntimeSaveTopologyV1,
+): ReplayClosure {
+  const records = [record, ...(domain.records ?? []).map((snapshot) => snapshot.bundle.record)];
+  const topologies = [topology, ...(domain.records ?? []).map((snapshot) => snapshot.bundle.topology)];
+  const unique = (values: readonly string[]) => [...new Set(values)].sort();
+  return {
+    record: unique(records.map((item) => item.scope.recordId)),
+    event: unique(records.flatMap((item) => item.events.map((event) => event.eventId))),
+    characterInstance: unique(topologies.flatMap((item) => (item?.participants ?? []).flatMap((participant) =>
+      participant.character ? [participant.character.sourceCharacterInstanceId] : []))),
+    assetDefinition: unique([...domain.characterAssets.map((asset) => asset.assetDefinitionId),
+      ...domain.committedFactCommands.flatMap((command) =>
+        (command.kind === "inventory_granted" || command.kind === "inventory_adjusted")
+        && typeof command.request?.assetDefinitionId === "string" ? [command.request.assetDefinitionId] : [])]),
+    scene: [], project: [], financeAccount: [], milestone: [], obligation: [],
+  };
+}
+
+/** The same source scene selection used by restore, including old archives without topology. */
+export function runtimeReplaySourceSceneIds(
+  scenes: readonly { sourceSceneId: string }[] | undefined,
+  eventSceneIds: readonly string[],
+): readonly string[] {
+  if (scenes?.length) return scenes.map((scene) => scene.sourceSceneId);
+  const ids = [...new Set(eventSceneIds)];
+  return ids.length ? ids : ["legacy-scene"];
+}
+
+export function runtimeFinanceReplayClosure(
+  record: RealmRuntimeSaveRecordV1,
+  domain: RealmRuntimeSaveDomainV1,
+  topology?: RealmRuntimeSaveTopologyV1,
+): ReplayClosure {
+  const bundles = [{ record, topology }, ...(domain.records ?? []).map((snapshot) => snapshot.bundle)];
+  const unique = (values: readonly string[]) => [...new Set(values)].sort();
+  return {
+    record: unique(bundles.map((bundle) => bundle.record.scope.recordId)),
+    scene: unique(bundles.flatMap((bundle) => runtimeReplaySourceSceneIds(bundle.topology?.scenes,
+      bundle.topology?.scenes.length ? [] : bundle.record.events.map((event, index) => normalizeRealmRuntimeSaveEventForRestore(event, index).sourceSceneId)))),
+    project: unique(domain.projects.map((project) => project.id)),
+    financeAccount: unique(domain.financeAccounts.map((account) => account.id)),
+    milestone: unique(domain.milestones.map((milestone) => milestone.id)),
+    obligation: unique(domain.obligations.map((obligation) => obligation.id)),
+    event: [], characterInstance: [], assetDefinition: [],
+  };
+}
+
+/**
+ * Cross-section closure: every Record/Event identity referenced by the domain
+ * section must resolve to the saved Record section or to an explicitly carried
+ * sibling Record snapshot (whose bundle carries its full event log), and the
+ * domain source scope must match the Record. Runs on both build and parse so
+ * hand-built archives fail closed too.
+ */
+export function validateDomainRecordClosure(
+  record: RealmRuntimeSaveRecordV1,
+  domain: RealmRuntimeSaveDomainV1,
+  topology?: RealmRuntimeSaveTopologyV1,
+  workspaceId?: string,
+  performanceWitnesses?: RuntimePerformanceWitnessesV1,
+): void {
+  const invalid = (message: string): never => {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", message);
+  };
+  if (domain.commandMaterializations) {
+    for (const row of domain.commandMaterializations.rows) {
+      const source = row.recordId === record.scope.recordId ? record : domain.records?.find(r => r.recordId === row.recordId)?.bundle.record;
+      if (!source) invalid("command materialization Record closure is missing");
+    }
+  }
+  if (
+    domain.source.worldId !== record.scope.worldId
+    || domain.source.worldlineId !== record.scope.worldlineId
+    || domain.source.recordId !== record.scope.recordId
+  ) {
+    invalid("runtime domain scope does not match the saved Record");
+  }
+  if (domain.commandReplayContexts !== undefined || domain.committedFactCommands.some((command) => command.replayLineage !== undefined)
+    || domain.financeCommandGroups.some((group) => group.replayLineage !== undefined)) {
+    if (!workspaceId) invalid("runtime lineage requires the manifest workspace");
+    try {
+      const factClosure = runtimeFactReplayClosure(record, domain, topology);
+      const financeClosure = domain.commandReplayContexts?.some((context) => context.family === "finance")
+        ? runtimeFinanceReplayClosure(record, domain, topology) : undefined;
+      const actualClosure = financeClosure ? { ...factClosure, scene: financeClosure.scene, project: financeClosure.project,
+        financeAccount: financeClosure.financeAccount, milestone: financeClosure.milestone, obligation: financeClosure.obligation } : factClosure;
+      validateReplayBundle(domain.commandReplayContexts ?? [], [
+        ...domain.committedFactCommands.filter((command) => command.replayLineage !== undefined)
+          .map((command) => ({ id: command.id, family: "fact", requestFingerprint: command.requestFingerprint, replayLineage: command.replayLineage })),
+        ...domain.financeCommandGroups.filter((group) => group.replayLineage !== undefined)
+          .map((group) => ({ id: group.id, family: "finance", requestFingerprint: group.requestFingerprint, replayLineage: group.replayLineage })),
+      ], { workspaceId: workspaceId!, worldId: record.scope.worldId, worldlineId: record.scope.worldlineId }, actualClosure);
+    } catch { invalid("runtime lineage does not match the actual archive scope and closure"); }
+  }
+  const recordEventIds = new Set(record.events.map((event) => event.eventId));
+  const eventScope = new Set(recordEventIds);
+  const eventOwners = new Map(record.events.map((event) => [event.eventId, record.scope.recordId]));
+  for (const snapshot of (domain.records ?? [])) {
+    validateGoals(snapshot.bundle.goals, workspaceId === undefined ? undefined : {
+      ...snapshot.bundle.record.scope, workspaceId,
+    });
+    if (snapshot.bundle.record.scope.recordId !== snapshot.recordId) {
+      invalid("runtime domain sibling Record bundle scope does not match its snapshot");
+    }
+    for (const event of snapshot.bundle.record.events) {
+      if (eventScope.has(event.eventId)) invalid("runtime domain sibling Record event duplicates another Record event");
+      eventScope.add(event.eventId);
+      eventOwners.set(event.eventId, snapshot.recordId);
+    }
+  }
+  const requireEvent = (value: string | null) => {
+    if (value !== null && !eventScope.has(value)) invalid("runtime domain references an unknown event");
+  };
+  for (const milestone of domain.milestones) {
+    requireEvent(milestone.completionEventId);
+  }
+  for (const entry of domain.ledgerEntries) {
+    requireEvent(entry.sourceEventId);
+  }
+  for (const node of domain.storyNodes) {
+    node.unlockEvidenceEventIds.forEach((id) => requireEvent(id));
+  }
+  for (const unlock of domain.storyUnlockLedger) {
+    unlock.evidenceEventIds.forEach((id) => requireEvent(id));
+  }
+  for (const assessment of domain.performanceAssessments) {
+    assessment.evidenceEventIds.forEach((id) => requireEvent(id));
+    if (assessment.evidenceEventIds.some((id) => eventOwners.get(id) !== assessment.recordId)) {
+      invalid("runtime domain assessment evidence belongs to another Record");
+    }
+  }
+  for (const revision of domain.memberRelationshipRevisions) {
+    requireEvent(revision.sourceEventId);
+  }
+  try {
+    validatePerformanceSourceConsistency(record, domain, runtimeFactReplayClosure(record, domain, topology), workspaceId, performanceWitnesses);
+  } catch (error) {
+    invalid(error instanceof Error ? error.message : "Runtime performance source facts are inconsistent.");
+  }
+  // Record-level references are closed inside the domain parser against the
+  // carried stories/records; character assets additionally resolve their
+  // character instance against the owning Record's carried topology (the
+  // saved Record's archive topology or the sibling's bundle topology).
+  const characterTopology = new Map<string, Set<string>>([
+    [
+      record.scope.recordId,
+      new Set(
+        (topology?.participants ?? [])
+          .flatMap((participant) => participant.character ? [participant.character.sourceCharacterInstanceId] : []),
+      ),
+    ],
+  ]);
+  for (const snapshot of (domain.records ?? [])) {
+    characterTopology.set(
+      snapshot.recordId,
+      new Set(
+        (snapshot.bundle.topology?.participants ?? [])
+          .flatMap((participant) => participant.character ? [participant.character.sourceCharacterInstanceId] : []),
+      ),
+    );
+  }
+  for (const asset of domain.characterAssets) {
+    const instances = characterTopology.get(asset.recordId);
+    if (instances === undefined) {
+      invalid("runtime domain character assets reference an unknown Record");
+      continue;
+    }
+    if (!instances.has(asset.characterInstanceId)) {
+      invalid("runtime domain character assets reference an unknown character instance");
+    }
+  }
+}
+
+/** Finalize zipSync-owned ZIP32 only; NOT an untrusted-input ZIP validator.
+ * Enforce the consumer's compressed payload sum without inflation or counting
+ * ZIP framing. Include any MemoryV2 ratio padding before allocating it.
+ * Prefixing empty non-final DEFLATE blocks leaves decoded bytes/CRC/hash intact;
+ * V1/small V2 archive bytes remain unchanged when already within budget.
+ */
+export function finalizeRealmRuntimeSaveZip(bytes:Uint8Array,padMemoryV2:boolean):Uint8Array {
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const end=bytes.length-22,central=view.getUint32(end+16,true),count=view.getUint16(end+10,true);
+  const entries:{at:number;local:number;compressed:number;uncompressed:number;name:string}[]=[];
+  for(let at=central,index=0;index<count;index++){
+    const nameLength=view.getUint16(at+28,true),extra=view.getUint16(at+30,true),comment=view.getUint16(at+32,true);
+    entries.push({at,local:view.getUint32(at+42,true),compressed:view.getUint32(at+20,true),uncompressed:view.getUint32(at+24,true),
+      name:new TextDecoder().decode(bytes.subarray(at+46,at+46+nameLength))});
+    at+=46+nameLength+extra+comment;
+  }
+  const memory=padMemoryV2?entries.find(entry=>entry.name===MEMORY_ENTRY):undefined;
+  const padding=memory&&memory.uncompressed/memory.compressed>PACK_LIMITS.ratioMax
+    ?5*Math.ceil((memory.uncompressed/PACK_LIMITS.ratioMax-memory.compressed)/5):0;
+  const totalCompressed=entries.reduce((sum,entry)=>sum+entry.compressed,0)+padding;
+  if(totalCompressed>PACK_LIMITS.entryCompressedMax){
+    throw new RealmRuntimeSaveError("INVALID_SAVE","runtime save total compressed size exceeds limit");
+  }
+  if(!memory||padding===0)return bytes;
+  const start=memory.local+30+view.getUint16(memory.local+26,true)+view.getUint16(memory.local+28,true);
+  const output=new Uint8Array(bytes.length+padding);output.set(bytes.subarray(0,start));
+  for(let at=start;at<start+padding;at+=5)output.set([0,0,0,255,255],at);
+  output.set(bytes.subarray(start),start+padding);
+  const result=new DataView(output.buffer);
+  result.setUint32(memory.local+18,memory.compressed+padding,true);
+  for(const entry of entries){
+    const at=entry.at+padding;
+    if(entry===memory)result.setUint32(at+20,entry.compressed+padding,true);
+    if(entry.local>=start)result.setUint32(at+42,entry.local+padding,true);
+  }
+  result.setUint32(end+padding+16,central+padding,true);
+  return output;
+}
+
 export function buildRealmRuntimeSaveArchive(input: {
+  performanceWitnesses?: RuntimePerformanceWitnessesV1;
   manifest: RealmRuntimeSaveManifestV2;
   record: RealmRuntimeSaveRecordV1;
-  goals: RealmRuntimeSaveGoalsV1;
+  goals: RealmRuntimeSaveGoals;
   topology?: RealmRuntimeSaveTopologyV1;
   actionReceipts?: RealmRuntimeSaveActionReceiptsV1;
   characterEffects?: RealmRuntimeSaveCharacterEffectsV1;
   observations?: RealmRuntimeSaveObservationsV1;
-  memory?: RealmRuntimeSaveMemoryV1;
+  memory?: RealmRuntimeSaveMemory;
   outbox?: RealmRuntimeSaveOutboxV1;
   firstNight?: RealmRuntimeSaveFirstNightV1;
   selfPlay?: RealmRuntimeSaveSelfPlayV1;
   domain?: RealmRuntimeSaveDomainV1;
 }): Uint8Array {
+  if (Object.hasOwn(input, "siblings")) throw new RealmRuntimeSaveError("INVALID_SAVE", "unknown save key archive.siblings");
   const manifest = normalizeManifest(input.manifest);
   const record = validateRecord(input.record, manifest);
-  const goals = validateGoals(input.goals,{...record.scope,workspaceId:manifest.scope.workspaceId});
+  const goals = input.goals.schemaVersion === 2 ? decodeRealmRuntimeSaveGoalsV2(input.goals)
+    : validateGoals(input.goals,{...record.scope,workspaceId:manifest.scope.workspaceId});
   const topology = input.topology === undefined ? undefined : validateTopology(input.topology);
   const actionReceipts = input.actionReceipts === undefined
     ? undefined
@@ -2757,9 +3685,14 @@ export function buildRealmRuntimeSaveArchive(input: {
   const observations = input.observations === undefined
     ? undefined
     : validateObservations(input.observations);
-  const memory = input.memory === undefined ? undefined : validateMemory(input.memory);
-  if (memory) {
-    validateMemoryReferences(memory, { record, topology, observations });
+  const memoryV2Input = input.memory?.schemaVersion === 2
+    ? normalizeRealmRuntimeSaveMemoryV2(input.memory)
+    : undefined;
+  const memoryV1 = input.memory !== undefined && memoryV2Input === undefined
+    ? validateMemory(input.memory)
+    : undefined;
+  if (memoryV1) {
+    validateMemoryReferences(memoryV1, { record, topology, observations });
   }
   const outbox = input.outbox === undefined ? undefined : validateOutbox(input.outbox);
   if (outbox) {
@@ -2768,9 +3701,28 @@ export function buildRealmRuntimeSaveArchive(input: {
   const firstNight = input.firstNight === undefined ? undefined : validateFirstNight(input.firstNight);
   const selfPlay = input.selfPlay === undefined ? undefined : validateSelfPlay(input.selfPlay);
   const domain = input.domain === undefined ? undefined : normalizeRealmRuntimeSaveDomainV1(input.domain);
+  if (domain?.commandMaterializations && (!manifest.world || manifest.world.worldVersion !== domain.commandMaterializations.worldVersion)) {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", "command materializations require the exact package binding");
+  }
+  const performanceWitnesses = input.performanceWitnesses === undefined ? undefined : normalizeRuntimePerformanceWitnesses(input.performanceWitnesses);
+  validateRuntimePerformanceWitnessClosure({ manifest, record, topology, domain, performanceWitnesses });
+  if (domain) validateDomainRecordClosure(record, domain, topology, manifest.scope.workspaceId, performanceWitnesses);
+  const resolvedMemory = resolveRealmRuntimeSaveArchiveMemory({
+    manifest, record, topology, observations, memory: memoryV2Input ?? memoryV1, domain,
+  });
+  const memory: RealmRuntimeSaveMemory | undefined = memoryV1 ?? (memoryV2Input !== undefined ? {
+    format: "realm-runtime-memory",
+    schemaVersion: 2,
+    scope: resolvedMemory.scope,
+    worldlineHead: resolvedMemory.worldlineHead!,
+    conclusions: resolvedMemory.conclusions,
+    snapshots: resolvedMemory.snapshots,
+    relationshipStates: resolvedMemory.relationshipStates,
+    cacheEpochs: resolvedMemory.cacheEpochs,
+  } as RealmRuntimeSaveMemoryV2 : undefined);
   const files = buildRuntimeFiles(
-    record, goals, topology, actionReceipts, characterEffects, observations, memory,
-    outbox, firstNight, selfPlay, domain,
+    manifest, record, goals, topology, actionReceipts, characterEffects, observations, memory,
+    outbox, firstNight, selfPlay, domain, performanceWitnesses,
   );
   if (computeRealmRuntimeSaveContentHash(files) !== manifest.snapshot.runtimeHash) {
     throw new RealmRuntimeSaveError("RUNTIME_HASH_MISMATCH", "runtime save content hash mismatch");
@@ -2810,10 +3762,14 @@ export function buildRealmRuntimeSaveArchive(input: {
   if (domain) {
     entries[DOMAIN_ENTRY] = [files.get(DOMAIN_ENTRY)!, { level: 6, mtime: new Date(1980, 0, 1) }];
   }
-  return zipSync(entries);
+  if (performanceWitnesses) entries[PERFORMANCE_WITNESSES_ENTRY] = [files.get(PERFORMANCE_WITNESSES_ENTRY)!, { level: 6, mtime: new Date(1980, 0, 1) }];
+  const bytes=zipSync(entries);
+  return finalizeRealmRuntimeSaveZip(bytes,memory?.schemaVersion===2);
 }
 
-export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSaveArchive {
+export function parseRealmRuntimeSaveArchive(bytes: Uint8Array, options: { goalsSchemaVersion: 2 }): RealmRuntimeSaveArchive<RealmRuntimeSaveGoals>;
+export function parseRealmRuntimeSaveArchive(bytes: Uint8Array, options?: { goalsSchemaVersion?: 1 }): RealmRuntimeSaveArchive;
+export function parseRealmRuntimeSaveArchive(bytes: Uint8Array, options?: { goalsSchemaVersion?: 1 | 2 }): RealmRuntimeSaveArchive<RealmRuntimeSaveGoals> {
   let decoded: ReadonlyMap<string, Uint8Array>;
   try {
     decoded = validateStrictZipArchive(bytes, {
@@ -2888,14 +3844,24 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
     throw new RealmRuntimeSaveError("INVALID_SAVE", "runtime save JSON is invalid");
   }
   const record = validateRecord(recordRaw, manifest);
-  const goals = validateGoals(goalsRaw,{...record.scope,workspaceId:manifest.scope.workspaceId});
+  // Existing consumers retain V1 until they explicitly support typed globals.
+  // A legacy caller must never consume a V2 archive through a V1 return type.
+  const isGoalsV2 = isPlainObject(goalsRaw) && goalsRaw.schemaVersion === 2;
+  if (isGoalsV2 && options?.goalsSchemaVersion !== 2) throw new RealmRuntimeSaveError("INVALID_SAVE", "Goal schema version is unsupported by this consumer");
+  const goals = isGoalsV2 ? decodeRealmRuntimeSaveGoalsV2(goalsRaw)
+    : validateGoals(goalsRaw,{...record.scope,workspaceId:manifest.scope.workspaceId});
   const topology = topologyRaw === undefined ? undefined : validateTopology(topologyRaw);
   const actionReceipts = actionReceiptsRaw === undefined ? undefined : validateActionReceipts(actionReceiptsRaw);
   const characterEffects = characterEffectsRaw === undefined ? undefined : validateCharacterEffects(characterEffectsRaw);
   const observations = observationsRaw === undefined ? undefined : validateObservations(observationsRaw);
-  const memory = memoryRaw === undefined ? undefined : validateMemory(memoryRaw);
-  if (memory) {
-    validateMemoryReferences(memory, { record, topology, observations });
+  const memoryV2Input = isPlainObject(memoryRaw) && memoryRaw.schemaVersion === 2
+    ? normalizeRealmRuntimeSaveMemoryV2(memoryRaw)
+    : undefined;
+  const memoryV1 = memoryRaw !== undefined && memoryV2Input === undefined
+    ? validateMemory(memoryRaw)
+    : undefined;
+  if (memoryV1) {
+    validateMemoryReferences(memoryV1, { record, topology, observations });
   }
   const outbox = outboxRaw === undefined ? undefined : validateOutbox(outboxRaw);
   if (outbox) {
@@ -2906,6 +3872,30 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
   const domain = domainRaw === undefined
     ? undefined
     : parseRealmRuntimeSaveDomainV1(domainRaw as Uint8Array);
+  let performanceWitnesses: RuntimePerformanceWitnessesV1 | undefined;
+  if (files.has(PERFORMANCE_WITNESSES_ENTRY)) {
+    try { performanceWitnesses = normalizeRuntimePerformanceWitnesses(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(files.get(PERFORMANCE_WITNESSES_ENTRY)!))); }
+    catch { throw new RealmRuntimeSaveError("INVALID_SAVE", "Private performance witness family is invalid."); }
+  }
+  validateRuntimePerformanceWitnessClosure({ manifest, record, topology, domain, performanceWitnesses });
+  if (goals.schemaVersion === 2) validateArchiveGoals(goals, manifest, record, domain);
+  if (domain?.commandMaterializations && (!manifest.world || manifest.world.worldVersion !== domain.commandMaterializations.worldVersion)) {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", "command materializations require the exact package binding");
+  }
+  if (domain) validateDomainRecordClosure(record, domain, topology, manifest.scope.workspaceId, performanceWitnesses);
+  const resolvedMemory = resolveRealmRuntimeSaveArchiveMemory({
+    manifest, record, topology, observations, memory: memoryV2Input ?? memoryV1, domain,
+  });
+  const memory: RealmRuntimeSaveMemory | undefined = memoryV1 ?? (memoryV2Input !== undefined ? {
+    format: "realm-runtime-memory",
+    schemaVersion: 2,
+    scope: resolvedMemory.scope,
+    worldlineHead: resolvedMemory.worldlineHead!,
+    conclusions: resolvedMemory.conclusions,
+    snapshots: resolvedMemory.snapshots,
+    relationshipStates: resolvedMemory.relationshipStates,
+    cacheEpochs: resolvedMemory.cacheEpochs,
+  } as RealmRuntimeSaveMemoryV2 : undefined);
   return {
     manifest,
     record,
@@ -2919,5 +3909,89 @@ export function parseRealmRuntimeSaveArchive(bytes: Uint8Array): RealmRuntimeSav
     ...(firstNight ? { firstNight } : {}),
     ...(selfPlay ? { selfPlay } : {}),
     ...(domain ? { domain } : {}),
+    ...(performanceWitnesses ? { performanceWitnesses } : {}),
+  };
+}
+
+/**
+ * A complete Record bundle carried inside a runtime-save domain section: the
+ * same per-section documents the archive itself stores, validated by the same
+ * production validators. Used for sibling Record snapshots (multi-Record
+ * Story/worldline closure) — never an evidence-only stub.
+ */
+export interface RealmRuntimeSaveRecordBundleV1 {
+  record: RealmRuntimeSaveRecordV1;
+  goals: RealmRuntimeSaveGoalsV1;
+  topology?: RealmRuntimeSaveTopologyV1;
+  actionReceipts?: RealmRuntimeSaveActionReceiptsV1;
+  characterEffects?: RealmRuntimeSaveCharacterEffectsV1;
+  observations?: RealmRuntimeSaveObservationsV1;
+  memory?: RealmRuntimeSaveMemoryV1;
+  outbox?: RealmRuntimeSaveOutboxV1;
+  firstNight?: RealmRuntimeSaveFirstNightV1;
+  selfPlay?: RealmRuntimeSaveSelfPlayV1;
+}
+
+/**
+ * Validate a domain-carried sibling Record bundle against its declared source
+ * scope. The bundle's record.head is authoritative (no manifest snapshot);
+ * every section runs through the same validators as the archive entries.
+ */
+export function validateRealmRuntimeSaveRecordBundle(
+  value: unknown,
+  scope: { worldId: string; worldlineId: string; recordId: string },
+): RealmRuntimeSaveRecordBundleV1 {
+  if (!isPlainObject(value)) {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", "domain record bundle must be an object");
+  }
+  assertExactKeys(
+    value,
+    ["record", "goals", "topology", "actionReceipts", "characterEffects", "observations", "memory", "outbox", "firstNight", "selfPlay"],
+    "domain record bundle",
+  );
+  const recordRaw = requireField(value, "record", "domain record bundle");
+  if (!isPlainObject(recordRaw) || !isPlainObject(recordRaw.head)) {
+    throw new RealmRuntimeSaveError("INVALID_SAVE", "domain record bundle record is invalid");
+  }
+  const head = {
+    recordVersion: requireInteger(
+      requireField(recordRaw.head, "recordVersion", "domain record bundle record.head"),
+      "domain record bundle record.head.recordVersion",
+      0,
+    ),
+    nextRecordOrdinal: requireInteger(
+      requireField(recordRaw.head, "nextRecordOrdinal", "domain record bundle record.head"),
+      "domain record bundle record.head.nextRecordOrdinal",
+      0,
+    ),
+  };
+  const record = validateRecordDocument(recordRaw, { scope: { ...scope }, head });
+  const goalsRaw = requireField(value, "goals", "domain record bundle");
+  const goals = validateGoals(goalsRaw);
+  const topology = value.topology === undefined ? undefined : validateTopology(value.topology);
+  const actionReceipts = value.actionReceipts === undefined ? undefined : validateActionReceipts(value.actionReceipts);
+  const characterEffects = value.characterEffects === undefined ? undefined : validateCharacterEffects(value.characterEffects);
+  const observations = value.observations === undefined ? undefined : validateObservations(value.observations);
+  const memory = value.memory === undefined ? undefined : validateMemory(value.memory);
+  if (memory) {
+    validateMemoryReferences(memory, { record, topology, observations });
+  }
+  const outbox = value.outbox === undefined ? undefined : validateOutbox(value.outbox);
+  if (outbox) {
+    validateOutboxReferences(outbox, record);
+  }
+  const firstNight = value.firstNight === undefined ? undefined : validateFirstNight(value.firstNight);
+  const selfPlay = value.selfPlay === undefined ? undefined : validateSelfPlay(value.selfPlay);
+  return {
+    record,
+    goals,
+    ...(topology ? { topology } : {}),
+    ...(actionReceipts ? { actionReceipts } : {}),
+    ...(characterEffects ? { characterEffects } : {}),
+    ...(observations ? { observations } : {}),
+    ...(memory ? { memory } : {}),
+    ...(outbox ? { outbox } : {}),
+    ...(firstNight ? { firstNight } : {}),
+    ...(selfPlay ? { selfPlay } : {}),
   };
 }

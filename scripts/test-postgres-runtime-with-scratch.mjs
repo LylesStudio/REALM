@@ -26,6 +26,20 @@ const require0 = createRequire(import.meta.url);
 const pg = require0("pg");
 
 const DEFAULT_TEST_FILES = [
+  "tests/postgres-goal-content-binding.test.ts",
+  "tests/postgres-goal-scoped-transport.test.ts",
+  "tests/postgres-performance-evidence-admission.test.ts",
+  "tests/postgres-runtime-performance-witness-transport.test.ts",
+  "tests/postgres-performance-evidence-transport-schema.test.ts",
+  "tests/postgres-runtime-performance-transport.test.ts",
+  "tests/postgres-parallel-evidence-runtime-resources.test.ts",
+  "tests/postgres-parallel-topology-runtime-resources.test.ts",
+  "tests/postgres-atomic-command-continuation.test.ts",
+  "tests/postgres-bridge-worldline-scope.test.ts",
+  "tests/postgres-story-definition-bindings.test.ts",
+  "tests/postgres-story-binding-fresh-process.test.ts",
+  "tests/postgres-runtime-save-reconciliation.test.ts",
+
   "tests/postgres-pool-lifecycle.test.mjs",
   "tests/postgres-runtime-migration-hardening.test.ts",
   "tests/postgres-runtime-repository.test.ts",
@@ -127,6 +141,18 @@ const DEFAULT_TEST_FILES = [
   "tests/realm-transfer-cli.test.ts",
   "tests/postgres-article-qualification-migration.test.mjs",
   "tests/article-qualification-design.test.mjs",
+  "tests/postgres-parallel-d-genesis-fingerprint.test.ts",
+  "tests/postgres-parallel-a-runtime-resources.test.ts",
+  "tests/postgres-parallel-b-runtime-identities.test.ts",
+  "tests/postgres-parallel-c-command-security.test.ts",
+  "tests/postgres-parallel-command-authority-regression.test.ts",
+  "tests/postgres-parallel-outbox-resources.test.ts",
+  "tests/postgres-parallel-character-export-closure.test.ts",
+  "tests/postgres-parallel-outbox-transport.test.ts",
+  "tests/postgres-parallel-goal-event-transport.test.ts",
+  "tests/postgres-parallel-participant-event-transport.test.ts",
+  "tests/postgres-parallel-performance-source-consistency.test.ts",
+  "tests/postgres-restored-outbox-delivery.test.ts",
 ];
 
 function fail(message) {

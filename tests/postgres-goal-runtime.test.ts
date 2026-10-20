@@ -17,6 +17,8 @@ import {
 } from "../modules/goals/assessment-worker.ts";
 import type { GoalDefinition } from "../modules/goals/public.ts";
 
+import { cloneGoalRecordFixture, trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
+
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
 const skipReason = "requires the isolated PostgreSQL runtime runner";
@@ -41,78 +43,62 @@ function goalDefinition(goalKey: string): GoalDefinition {
   };
 }
 
-async function insertGoalInstance(
-  ownerPool: pg.Pool,
-  goalInstanceId: string,
-  goalKey: string,
-): Promise<void> {
-  await ownerPool.query(
-    `INSERT INTO goal_instances (
-       workspace_id, world_id, worldline_id, record_id, id, goal_key,
-       state, revision, progress, outcome, policy_version
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, '{}'::jsonb, NULL, 'v1')`,
-    [
-      POSTGRES_DEMO_IDS.workspace,
-      POSTGRES_DEMO_IDS.world,
-      POSTGRES_DEMO_IDS.worldline,
-      POSTGRES_DEMO_IDS.record,
-      goalInstanceId,
-      goalKey,
-    ],
-  );
+async function prepareGoalInstance(
+  t: test.TestContext, ownerPool: pg.Pool, runtimePool: pg.Pool, definition: GoalDefinition,
+) {
+  const ids = await cloneGoalRecordFixture(ownerPool);
+  const trusted = await trustedGoalFixture(t, { worldId: ids.world, worldVersion: "1.0.0", goals: [definition] });
+  const [goalInstanceId] = await trusted.materialize(ownerPool, runtimePool, {
+    kind: "record", workspaceId: ids.workspace, worldId: ids.world, worldlineId: ids.worldline, recordId: ids.record,
+  });
+  assert.ok(goalInstanceId);
+  return { ids, goalInstanceId, resolveDefinition: trusted.resolveDefinition };
 }
 
 function enqueueInput(
   goalInstanceId: string,
   jobId: string,
-  sourceEventId = POSTGRES_DEMO_IDS.openingEvent,
+  goalKey: string,
+  ids: Awaited<ReturnType<typeof cloneGoalRecordFixture>>,
+  sourceEventId = ids.openingEvent,
 ): GoalAssessmentEnqueueInput {
   return {
     jobId,
-    workspaceId: POSTGRES_DEMO_IDS.workspace,
-    worldId: POSTGRES_DEMO_IDS.world,
-    worldlineId: POSTGRES_DEMO_IDS.worldline,
-    recordId: POSTGRES_DEMO_IDS.record,
+    workspaceId: ids.workspace,
+    worldId: ids.world,
+    worldlineId: ids.worldline,
+    recordId: ids.record,
     goalInstanceId,
-    goalKey: goalInstanceId,
+    goalKey,
     sourceEventId,
     input: { trigger: "test" },
     availableAt: now(),
   };
 }
 
-async function cleanup(ownerPool: pg.Pool, goalInstanceId: string): Promise<void> {
-  await ownerPool.query(
-    `DELETE FROM goal_instances
-     WHERE workspace_id = $1 AND id = $2`,
-    [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
-  );
-}
 
 test(
   "Goal queue claims with a lease, loads committed evidence, and fences a second claim",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_${suffix}`;
+    const goalKey = `goal_${suffix}`;
     const jobId = `goal_job_${suffix}`;
-    const goalKey = goalInstanceId;
-    t.after(async () => {
-      await cleanup(ownerPool, goalInstanceId);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
 
-    await insertGoalInstance(ownerPool, goalInstanceId, goalKey);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId } = await prepareGoalInstance(t, ownerPool, runtimePool, goalDefinition(goalKey));
     const queue = createPostgresGoalAssessmentJobQueue({
       pool: runtimePool,
       workspaceId: POSTGRES_DEMO_IDS.workspace,
       leaseOwner: `test-worker-${suffix}`,
       leaseDurationMs: 30_000,
     });
-    assert.equal(await queue.enqueue(enqueueInput(goalInstanceId, jobId)), "inserted");
+    assert.equal(await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS)), "inserted");
 
     const claimed = await queue.claimNext({ now: now() });
     assert.ok(claimed);
@@ -133,30 +119,29 @@ test(
   "Goal worker settles a deterministic transition as a formal event and immutable assessment",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_${suffix}`;
+    const goalKey = `goal_${suffix}`;
     const jobId = `goal_job_${suffix}`;
-    const definition = goalDefinition(goalInstanceId);
-    t.after(async () => {
-      await cleanup(ownerPool, goalInstanceId);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+    const definition = goalDefinition(goalKey);
 
-    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
     const queue = createPostgresGoalAssessmentJobQueue({
       pool: runtimePool,
       workspaceId: POSTGRES_DEMO_IDS.workspace,
       leaseOwner: `test-worker-${suffix}`,
       leaseDurationMs: 30_000,
     });
-    assert.equal(await queue.enqueue(enqueueInput(goalInstanceId, jobId)), "inserted");
+    assert.equal(await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS)), "inserted");
 
     const report = await runGoalAssessmentOnce({
       repository: queue,
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       now: now(),
     });
     assert.deepEqual(report, { kind: "settled", status: "accepted" });
@@ -206,18 +191,17 @@ test(
   "a stale Goal lease cannot settle after another worker reclaims the job",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_${suffix}`;
+    const goalKey = `goal_${suffix}`;
     const jobId = `goal_job_${suffix}`;
-    t.after(async () => {
-      await cleanup(ownerPool, goalInstanceId);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
 
-    await insertGoalInstance(ownerPool, goalInstanceId, goalInstanceId);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId } = await prepareGoalInstance(t, ownerPool, runtimePool, goalDefinition(goalKey));
     const first = createPostgresGoalAssessmentJobQueue({
       pool: runtimePool,
       workspaceId: POSTGRES_DEMO_IDS.workspace,
@@ -230,7 +214,7 @@ test(
       leaseOwner: `second-${suffix}`,
       leaseDurationMs: 30_000,
     });
-    assert.equal(await first.enqueue(enqueueInput(goalInstanceId, jobId)), "inserted");
+    assert.equal(await first.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS)), "inserted");
     const firstClaim = await first.claimNext({ now: now() });
     assert.ok(firstClaim);
     const reclaimAt = new Date(Date.parse(firstClaim.leaseExpiresAt) + 10).toISOString();
@@ -274,12 +258,11 @@ test(
   "Goal assessment worker runtime holds its advisory lock through the shared host and stops cleanly",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const installRoot = await mkdtemp(join(tmpdir(), "goal-worker-host-"));
-    t.after(async () => {
-      await ownerPool.end();
-      await rm(installRoot, { recursive: true, force: true });
-    });
+    close(() => rm(installRoot, { recursive: true, force: true }));
 
     const logs: string[] = [];
     const runtime = createGoalAssessmentWorkerRuntime({
@@ -295,9 +278,7 @@ test(
     const started = runtime.start().catch((error: unknown) => {
       startError = error;
     });
-    t.after(async () => {
-      await runtime.stop().catch(() => undefined);
-    });
+    close(() => runtime.stop());
 
     const deadline = Date.now() + 30_000;
     while (!logs.includes("advisory lock acquired")) {
@@ -320,6 +301,7 @@ test(
       idleMaxMs: 40,
       logger: () => {},
     });
+    close(() => competitor.stop());
     await assert.rejects(
       competitor.start(),
       (error: unknown) => (error as { code?: string }).code === "GOAL_WORKER_ALREADY_RUNNING",

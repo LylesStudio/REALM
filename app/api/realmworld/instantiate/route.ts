@@ -1,3 +1,4 @@
+import { CommandPolicyError, createInstalledRealmWorldCommandPolicyResolver } from "../../../../modules/world-transfer/realmworld-command-policy.ts";
 import {
   LibraryServiceError,
   createPostgresLibraryService,
@@ -115,7 +116,9 @@ export async function POST(request: Request): Promise<Response> {
     if (!plan) {
       return errorResponse("REALMWORLD_CONTENT_UNAVAILABLE", "RealmWorld content is unavailable.", 503);
     }
-    const service = createPostgresLibraryService(getSharedRuntimePool(runtimeUrl));
+    const service = createPostgresLibraryService(getSharedRuntimePool(runtimeUrl), undefined, {
+      resolveCommandPolicy: createInstalledRealmWorldCommandPolicyResolver(verifier),
+    });
     const result = await service.instantiateRealmWorld(
       {
         workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
@@ -133,6 +136,7 @@ export async function POST(request: Request): Promise<Response> {
       },
     );
   } catch (error) {
+    if (error instanceof CommandPolicyError) return errorResponse("REALMWORLD_CONTENT_INVALID", "RealmWorld policy is unavailable or invalid.", 422);
     if (error instanceof RealmWorldLoaderError) {
       if (error.code === "BASE_VERSION_INCOMPATIBLE") {
         return errorResponse("BASE_VERSION_INCOMPATIBLE", "RealmWorld package is not compatible with the active engine base version.", 409);

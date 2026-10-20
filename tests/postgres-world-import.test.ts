@@ -11,7 +11,7 @@
  * - MIGRATION_REQUIRED 缺 0042/0043；jobs 列表 operator 边界。
  */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
@@ -27,6 +27,11 @@ import {
   WorldImportError,
   createWorldImportService,
 } from "../modules/application/world-import-service.ts";
+
+import {
+  packRowToInsertRow, validateRealmPack, type PackColumnSpec,
+} from "../modules/world-transfer/realm-pack.ts";
+import { declaredSemanticEventsFromWorldSettings } from "../modules/world-transfer/semantic-events.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 
@@ -646,7 +651,7 @@ test(
     });
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
     for (const filename of (await readdir(migrationDir)).sort()) {
-      if (!filename.endsWith(".sql") || /^004[23]_/.test(filename)) continue;
+      if (!filename.endsWith(".sql") || /^(004[23]|0086)_/.test(filename)) continue;
       await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
     }
     await ownerPool.query("INSERT INTO workspaces (id, name) VALUES ($1, '目标')", [WS]);
@@ -666,6 +671,7 @@ test(
           [
             "0042_realm_transfer_and_import_jobs.sql",
             "0043_propagation_node_audience_archived_guard.sql",
+            "0086_unsigned_import_declaration_guard.sql",
           ],
         );
         return true;
@@ -673,3 +679,123 @@ test(
     );
   },
 );
+
+for (const importMode of ["preserve", "copy"] as const) {
+  test(`A1 ${importMode}: unsigned declarations are reported and never persisted as authority`,
+    { skip: !adminConnectionString, timeout: 300_000 }, async (t) => {
+      const source = await seedSource(t, `a1_${importMode}`);
+      const target = await seedTarget(t, `a1_${importMode}`);
+      const settings = { style: "modern", language: "ja", declaredEvents: ["example.completed"], custom: { note: "ordinary backup" } };
+      await source.ownerPool.query("UPDATE worlds SET settings = $1::jsonb WHERE workspace_id = $2 AND id = $3", [JSON.stringify(settings), WS, WORLD]);
+      const pack = await exportSvc(source).exportWorld({ worldId: WORLD, mode: "full" }, OWNER);
+      const original = Buffer.from(pack.bytes);
+      const svc = importSvc(target);
+      const dry = await svc.dryRun({ bytes: pack.bytes, importMode, ...(importMode === "copy" ? { copyKey: "a1-copy" } : {}), operatorPrincipal: OWNER });
+      assert.ok(dry.report.redactions.some((r) => r.table === "worlds" && r.columns.includes("settings.declaredEvents")));
+      assert.ok(dry.report.warnings.some((w) => w.includes("declaredEvents was removed")));
+      const done = await svc.execute({ bytes: pack.bytes, jobId: dry.jobId, operatorPrincipal: OWNER });
+      assert.equal(done.alreadyImported, false);
+      assert.ok(done.worldId);
+      const row = await target.ownerPool.query("SELECT settings FROM worlds WHERE workspace_id = $1 AND id = $2", [WS, done.worldId]);
+      assert.deepEqual(row.rows[0]?.settings, { style: "modern", language: "ja", custom: settings.custom });
+      assert.equal(declaredSemanticEventsFromWorldSettings(row.rows[0]?.settings).size, 0);
+      assert.deepEqual(Buffer.from(pack.bytes), original);
+      const sourceRow = await source.ownerPool.query("SELECT settings FROM worlds WHERE workspace_id = $1 AND id = $2", [WS, WORLD]);
+      assert.deepEqual(sourceRow.rows[0]?.settings, settings);
+      const again = await svc.execute({ bytes: pack.bytes, jobId: dry.jobId, operatorPrincipal: OWNER });
+      assert.equal(again.alreadyImported, true);
+      assert.equal(again.worldId, done.worldId);
+    });
+}
+
+test("A1 bootstrap rejects raw declaration-bearing world rows before target writes and preserves ACL on replay",
+  { skip: !adminConnectionString, timeout: 300_000 }, async (t) => {
+    const source = await seedSource(t, "a1_raw");
+    const target = await seedTarget(t, "a1_raw");
+    const pack = await exportSvc(source).exportWorld({ worldId: WORLD, mode: "full" }, OWNER);
+    const dry = await importSvc(target).dryRun({ bytes: pack.bytes, importMode: "preserve", operatorPrincipal: OWNER });
+    const columns = await target.ownerPool.query<{ name: string; type: PackColumnSpec["type"] }>(
+      `SELECT column_name AS name, udt_name AS type FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'worlds' AND is_generated = 'NEVER' AND is_identity = 'NO' ORDER BY ordinal_position`);
+    const parsed = validateRealmPack(pack.bytes);
+    const world = JSON.parse(Buffer.from(parsed.tables.get("worlds")!).toString("utf8").trim()) as Record<string, unknown>;
+    const clean = packRowToInsertRow(columns.rows, world, () => { throw Error("world has no file reference"); });
+    assert.equal(Object.hasOwn(JSON.parse(clean.settings as string), "declaredEvents"), false);
+    const catalogSql = `SELECT proowner::text, proacl::text, prosecdef, proconfig,
+      has_function_privilege('realm_transfer', oid, 'EXECUTE') AS transfer_execute,
+      has_function_privilege('realm_runtime', oid, 'EXECUTE') AS runtime_execute
+      FROM pg_proc WHERE oid = 'public.realm_import_begin_bootstrap(text,text,bigint,text,jsonb)'::regprocedure`;
+    const before = await target.ownerPool.query(catalogSql);
+    await target.ownerPool.query(await readFile(new URL("../database/postgres/migrations/0086_unsigned_import_declaration_guard.sql", import.meta.url), "utf8"));
+    assert.deepEqual((await target.ownerPool.query(catalogSql)).rows, before.rows);
+    assert.equal(before.rows[0]?.transfer_execute, true);
+    assert.equal(before.rows[0]?.runtime_execute, false);
+    assert.equal(before.rows[0]?.prosecdef, true);
+    const client = await target.transferPool.connect();
+    const bootstrapSql = "SELECT realm_import_begin_bootstrap($1, $2, $3, $4, $5::jsonb)";
+    const zero = async () => {
+      const result = await target.ownerPool.query(`SELECT
+        (SELECT count(*)::text FROM worlds WHERE workspace_id = $1 AND id = $2) AS worlds,
+        (SELECT count(*)::text FROM realm_import_bootstrap WHERE workspace_id = $1 AND job_id = $3) AS bootstrap,
+        (SELECT count(*)::text FROM realm_import_content_log WHERE workspace_id = $1 AND job_id = $3) AS content,
+        (SELECT count(*)::text FROM player_world_memberships WHERE workspace_id = $1 AND world_id = $2) AS memberships`, [WS, WORLD, dry.jobId]);
+      assert.deepEqual(result.rows[0], { worlds: "0", bootstrap: "0", content: "0", memberships: "0" });
+    };
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('realm.workspace_id', $1, true)", [WS]);
+      const claim = await client.query<{ realm_import_job_begin_execute: string }>("SELECT realm_import_job_begin_execute($1, $2)", [WS, dry.jobId]);
+      const attempt = claim.rows[0]!.realm_import_job_begin_execute;
+      await client.query("COMMIT");
+      for (const [label, settings] of [
+        ["encoded declaration", JSON.stringify({ declaredEvents: ["example.completed"] })],
+        ["direct object", { declaredEvents: ["example.completed"] }],
+        ["empty reserved list", JSON.stringify({ declaredEvents: [] })],
+      ] as const) {
+        await client.query("BEGIN");
+        await client.query("SELECT set_config('realm.workspace_id', $1, true)", [WS]);
+        try {
+          await assert.rejects(client.query(bootstrapSql, [WS, dry.jobId, attempt, WORLD, JSON.stringify({ ...clean, settings })]), (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.equal((error as Error & { code?: string }).code, "23514");
+            assert.equal(error.message, "IMPORT_DECLARATION_METADATA_UNTRUSTED");
+            t.diagnostic(JSON.stringify({ label, sqlSha256: createHash("sha256").update(bootstrapSql).digest("hex"), sqlstate: "23514" }));
+            return true;
+          });
+        } finally { await client.query("ROLLBACK"); }
+        await zero();
+      }
+      // Same genuine job and complete row: normal settings still enter the narrow
+      // bootstrap successfully. Roll back this probe instead of deleting history.
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('realm.workspace_id', $1, true)", [WS]);
+      await client.query(bootstrapSql, [WS, dry.jobId, attempt, WORLD, JSON.stringify(clean)]);
+      const admitted = await client.query("SELECT settings FROM worlds WHERE workspace_id = $1 AND id = $2", [WS, WORLD]);
+      assert.deepEqual(admitted.rows[0]?.settings, JSON.parse(clean.settings as string));
+      await client.query("ROLLBACK");
+      await zero();
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  });
+
+test("A1 missing guard cannot be hidden by an old manifest's migration list",
+  { skip: !adminConnectionString, timeout: 300_000 }, async (t) => {
+    const source = await seedSource(t, "a1_missing");
+    const target = await seedTarget(t, "a1_missing");
+    const pack = await exportSvc(source).exportWorld({ worldId: WORLD, mode: "full" }, OWNER);
+    // Simulate a pre-guard target ONLY inside this disposable fixture. Preserve ACL
+    // and all other migrations; the uploaded manifest cannot omit this engine gate.
+    const oldSql = await readFile(new URL("../database/postgres/migrations/0042_realm_transfer_and_import_jobs.sql", import.meta.url), "utf8");
+    const oldBody = oldSql.match(/CREATE OR REPLACE FUNCTION realm_import_begin_bootstrap\([\s\S]*?\$realm_import_begin_bootstrap\$;/)?.[0];
+    assert.ok(oldBody);
+    await target.ownerPool.query(oldBody);
+    await assert.rejects(importSvc(target).dryRun({ bytes: pack.bytes, importMode: "preserve", operatorPrincipal: OWNER }), (error: unknown) => {
+      assert.ok(error instanceof WorldImportError);
+      assert.equal(error.code, "MIGRATION_REQUIRED");
+      assert.deepEqual(error.details, { missing: ["0086_unsigned_import_declaration_guard.sql"] });
+      return true;
+    });
+    assert.equal((await target.ownerPool.query("SELECT count(*)::text AS n FROM realm_import_jobs WHERE workspace_id = $1", [WS])).rows[0]?.n, "0");
+  });

@@ -25,7 +25,7 @@ type Plan = { objective: string };
 type Candidate = { text: string };
 type Validation = { accepted: boolean };
 type EventPayload = { content: string };
-type OutboxPayload = { eventId: string };
+type OutboxPayload = { recordId: string; eventIds: string[] };
 
 interface DeliveryRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -149,7 +149,7 @@ function runtimeDependencies(
             messageId: `${context.turnId}:delivery`,
             topic: "record.events.committed",
             dedupeKey: `${context.turnId}:delivery:v1`,
-            payload: { eventId },
+            payload: { recordId: POSTGRES_DEMO_IDS.record, eventIds: [eventId] },
           }],
         };
       },
@@ -274,7 +274,8 @@ test(
     assert.equal(requests[0]?.headers["idempotency-key"], `${completed.turnId}:delivery:v1`);
     assert.equal(requests[1]?.headers["idempotency-key"], `${completed.turnId}:delivery:v1`);
     assert.deepEqual((requests[1]?.body as { payload?: unknown }).payload, {
-      eventId: `${completed.turnId}:event`,
+      recordId: POSTGRES_DEMO_IDS.record,
+      eventIds: [`${completed.turnId}:event`],
     });
 
     child.kill("SIGTERM");

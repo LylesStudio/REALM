@@ -154,6 +154,8 @@ export interface Enrichment {
   blockingFields: { table: string; column: string; hit: string }[];
   /** 导入侧 worlds status 重写登记（archive 世界只读封存不经导入恢复）。 */
   worldStatusRedacted: boolean;
+  /** Unsigned row snapshots never grant semantic-event declaration authority. */
+  worldDeclarationMetadataRedacted: boolean;
 }
 
 export function enrichPack(
@@ -188,6 +190,7 @@ export function enrichPack(
 
   const blockingFields: { table: string; column: string; hit: string }[] = [];
   const tables = new Map<string, InsertRow[]>();
+  let worldDeclarationMetadataRedacted = false;
 
   for (const [table, bytes] of pack.tables) {
     const columns = columnsByTable.get(table);
@@ -294,6 +297,17 @@ export function enrichPack(
           "record binding requires migration 0057 (records.world_version)",
         );
       }
+      // An unsigned .realm row is data, not an installed/signed content capability.
+      // Normalize BEFORE insert encoding, copy eligibility and wire-digest construction;
+      // both dry-run and execute call this same enrichment over unchanged source bytes.
+      if (table === "worlds" && typeof remapped.settings === "object"
+        && remapped.settings !== null && !Array.isArray(remapped.settings)
+        && Object.hasOwn(remapped.settings, "declaredEvents")) {
+        const settings = { ...remapped.settings } as Record<string, unknown>;
+        delete settings.declaredEvents;
+        remapped.settings = settings;
+        worldDeclarationMetadataRedacted = true;
+      }
       let converted: InsertRow;
       try {
         converted = packRowToInsertRow(columns, remapped, (fileId) => {
@@ -384,7 +398,7 @@ export function enrichPack(
     sha256: entry.sha256,
     wireDigest: tableWireDigest(tables.get(entry.name) ?? []),
   }));
-  return { newWorldId, tables, transferEntries, blockingFields, worldStatusRedacted };
+  return { newWorldId, tables, transferEntries, blockingFields, worldStatusRedacted, worldDeclarationMetadataRedacted };
 }
 
 /** JSON Pointer 常量重写（列内路径；"@columnIsArray" 后缀 = 列值为数组）。 */
@@ -442,6 +456,11 @@ function rewritePointerValue(
 
 /** 迁移台账探针（无 ledger 授权的角色可读的对象级等值证据）。 */
 const MIGRATION_PROBES: Readonly<Record<string, string>> = {
+  "0086_unsigned_import_declaration_guard.sql":
+    `SELECT CASE WHEN prosecdef AND prosrc LIKE '%IMPORT_DECLARATION_METADATA_UNTRUSTED%'
+       THEN 'unsigned_import_declaration_guard' ELSE NULL END AS probe
+     FROM pg_proc
+     WHERE oid = to_regprocedure('public.realm_import_begin_bootstrap(text,text,bigint,text,jsonb)')`,
   "0041_article_qualification_and_import_entries.sql":
     "SELECT to_regclass('public.article_qualifications') AS probe",
   "0042_realm_transfer_and_import_jobs.sql":
@@ -483,10 +502,11 @@ export function createWorldImportService(options: {
     }
   }
 
-  /** 台账探针：缺 0041/0042/0043 → 503 MIGRATION_REQUIRED（missing 列完整名）。 */
+  /** Required pack capabilities plus unsigned-import guard; missing → MIGRATION_REQUIRED. */
   async function assertMigrations(client: PoolClient, required: readonly string[]) {
     const missing: string[] = [];
-    for (const filename of required) {
+    // The unsigned-import guard is engine-required, not chosen by the uploaded manifest.
+    for (const filename of new Set([...required, "0086_unsigned_import_declaration_guard.sql"])) {
       const probe = MIGRATION_PROBES[filename];
       if (!probe) {
         missing.push(filename);
@@ -804,6 +824,13 @@ export function createWorldImportService(options: {
           files: manifest.files.length,
           redactions: [
             ...manifest.redactions,
+            ...(enrichment.worldDeclarationMetadataRedacted
+              ? [{
+                table: "worlds",
+                columns: ["settings.declaredEvents"],
+                reason: "unsigned snapshots do not grant semantic-event declaration authority",
+              }]
+              : []),
             ...(enrichment.worldStatusRedacted
               ? [{
                 table: "worlds",
@@ -813,6 +840,9 @@ export function createWorldImportService(options: {
               : []),
           ],
           warnings: [
+            ...(enrichment.worldDeclarationMetadataRedacted
+              ? ["worlds.settings.declaredEvents was removed; declarations require trusted engine-owned content installation"]
+              : []),
             ...(manifest.memberships !== undefined
               ? ["memberships are informational only and were not imported"]
               : []),
@@ -929,8 +959,10 @@ export function createWorldImportService(options: {
         );
       }
 
-      const columns = await inTx((client) =>
-        loadColumns(client, manifest.tables.map((entry) => entry.name)));
+      const columns = await inTx(async (client) => {
+        await assertMigrations(client, manifest.requiresMigrations);
+        return loadColumns(client, manifest.tables.map((entry) => entry.name));
+      });
       const enrichment = enrichPack(pack, columns, {
         workspaceId,
         copyKey: job.copy_key,

@@ -2,11 +2,10 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { createLocalPostgresPool } from "../../database/postgres/workspace-transaction.ts";
 import {
-  createPostgresRuntimeRepository,
+  createPostgresOutboxDeliveryRepository,
 } from "../../database/postgres/public.ts";
 import {
   createOutboxDispatcher,
-  type OutboxDispatcherRepository,
   type OutboxPublishSink,
 } from "./outbox-dispatcher.ts";
 import {
@@ -14,6 +13,7 @@ import {
   safeWorkerErrorCode,
 } from "./durable-worker-host.ts";
 import { createHttpOutboxDeliverySink } from "./outbox-delivery-sink.ts";
+import { normalizeRestoreDelivery, type RestoreDelivery } from "./outbox-delivery-contract.ts";
 import type { JsonValue } from "../runtime/public.ts";
 import { RuntimeInvariantError } from "../runtime/public.ts";
 
@@ -40,6 +40,7 @@ export function createOutboxWorkerRuntime(options: {
   deliveryUrl: string;
   workspaces: readonly string[];
   topics?: readonly string[];
+  restoreDelivery?: RestoreDelivery;
   maxAttempts?: number;
   leaseDurationMs?: number;
   batchLimit?: number;
@@ -54,6 +55,7 @@ export function createOutboxWorkerRuntime(options: {
   start(): Promise<void>;
   stop(): Promise<void>;
 } {
+  const restoreDelivery = normalizeRestoreDelivery(options.restoreDelivery);
   const connectionString = requireNonEmpty(
     options.connectionString,
     "OUTBOX_WORKER_DATABASE_URL_INVALID",
@@ -112,6 +114,7 @@ export function createOutboxWorkerRuntime(options: {
       "OUTBOX_WORKER_DELIVERY_URL_INVALID",
     ),
     timeoutMs: deliveryTimeoutMs,
+    restoreDelivery,
   });
 
   // createLocalPostgresPool enforces the loopback-only runtime boundary before
@@ -119,23 +122,12 @@ export function createOutboxWorkerRuntime(options: {
   const pool = createLocalPostgresPool(connectionString, { max: 8 });
   pool.on("error", () => {});
   const leaseOwner = `outbox-worker:${process.pid}:${randomUUID()}`;
-  const topicSet = new Set(topics);
+  let invalidMessages = 0;
   const dispatchers = workspaces.map((workspaceId) => {
-    const repository = createTopicScopedRepository(
-      createPostgresRuntimeRepository({
-        pool,
-        workspaceId,
-        // This worker only consumes the already-persisted Outbox surface.
-        // Formal-event mapping is intentionally unreachable.
-        mapFormalEvent() {
-          throw new RuntimeInvariantError(
-            "OUTBOX_WORKER_FORMAL_EVENT_UNSUPPORTED",
-            "The Outbox worker cannot map formal events.",
-          );
-        },
-      }),
-      topicSet,
-    );
+    const repository = createPostgresOutboxDeliveryRepository({
+      pool, workspaceId, topics, restoreDelivery, batchLimit,
+      onInvalidMessage() { invalidMessages++; },
+    });
     return {
       workspaceId,
       dispatcher: createOutboxDispatcher({
@@ -155,7 +147,9 @@ export function createOutboxWorkerRuntime(options: {
     let didWork = false;
     for (const { workspaceId, dispatcher } of dispatchers) {
       try {
+        invalidMessages = 0;
         const report = await dispatcher.runOnce();
+        if (invalidMessages > 0) log(`workspace=${workspaceId} invalid=${invalidMessages} code=OUTBOX_DELIVERY_MESSAGE_INVALID`);
         if (report.claimed > 0) {
           didWork = true;
           log(
@@ -219,6 +213,13 @@ export function createOutboxWorkerRuntime(options: {
         if (!health.rows[0]?.outbox || !health.rows[0]?.turnRuns) {
           throw new Error("Outbox worker requires the Runtime schema");
         }
+        if (restoreDelivery === "record-events-v2") {
+          try {
+            await pool.query("SELECT restore_delivery_kind FROM public.outbox WHERE false", []);
+          } catch {
+            throw new RuntimeInvariantError("OUTBOX_RESTORE_DELIVERY_SCHEMA_REQUIRED", "Restore delivery requires the Outbox delivery schema.");
+          }
+        }
       },
       runCycle,
       async close() {
@@ -230,20 +231,6 @@ export function createOutboxWorkerRuntime(options: {
   return {
     start: () => host.start(),
     stop: () => host.stop(),
-  };
-}
-
-function createTopicScopedRepository(
-  repository: OutboxDispatcherRepository,
-  topics: ReadonlySet<string>,
-): OutboxDispatcherRepository {
-  return {
-    listOutboxMessages: async () => {
-      const messages = await repository.listOutboxMessages();
-      return messages.filter((message) => topics.has(message.topic));
-    },
-    claimOutbox: (input) => repository.claimOutbox(input),
-    settleOutbox: (input) => repository.settleOutbox(input),
   };
 }
 

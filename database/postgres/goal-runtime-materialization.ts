@@ -1,4 +1,8 @@
 import type { PoolClient } from "pg";
+import { bindGoalContentWitness, verifyGoalContentBinding } from "../../modules/application/goal-content-binding-source.ts";
+import { goalOwnerKey } from "../../modules/goals/content-binding.ts";
+import { bindGoalContentWrites, goalOwnerForScope, loadGoalContentBinding, lockGoalContentWorld, prepareGoalContentWrites,
+  type GoalContentWriteContext } from "./goal-content-binding-repository.ts";
 import {
   GoalRuntimeRepositoryError,
 } from "./goal-assessment-job-queue.ts";
@@ -44,6 +48,7 @@ export interface GoalCommittedEventScope extends GoalRuntimeScope {
  * terminal state 与 completed_at 同真同假，缺一角即约束冲突、整事务回滚。
  */
 export interface GoalBranchCloneSource {
+  instanceId?: string;
   definitionSource?: 'record';
   goalKey: string;
   state: GoalState;
@@ -75,6 +80,7 @@ export async function lockGoalInstancesForBranch(
   sourceRecordId: string,
 ): Promise<readonly GoalBranchCloneSource[]> {
   const result = await client.query<{
+    id: string;
     goal_key: string;
     definition_source: string;
     state: GoalState;
@@ -85,7 +91,7 @@ export async function lockGoalInstancesForBranch(
     completed_at: Date | null;
     attempt: number;
   }>(
-    `SELECT goal_key, state, revision::text AS revision,
+    `SELECT id, goal_key, state, revision::text AS revision,
             progress, outcome, policy_version, completed_at, attempt,
             COALESCE(to_jsonb(goal)->>'definition_source','content') AS definition_source
      FROM goal_instances goal
@@ -95,6 +101,7 @@ export async function lockGoalInstancesForBranch(
     [workspaceId, sourceRecordId],
   );
   return result.rows.map((row) => ({
+    instanceId: row.id,
     ...(row.definition_source==='record'?{definitionSource:'record' as const}:{}),
     goalKey: row.goal_key,
     state: row.state,
@@ -127,7 +134,25 @@ export async function cloneGoalInstancesForBranch(
   client: PoolClient,
   target: GoalRuntimeScope,
   goals: readonly GoalBranchCloneSource[],
+  context?: GoalContentWriteContext,
 ): Promise<readonly string[]> {
+  if (!goals.length) return [];
+  if (!context?.sessionProof || !context.source) throw new GoalRuntimeRepositoryError("GOAL_CONTENT_PROOF_REQUIRED", "Branch Goals require source/head/session proof.");
+  const bindings = [];
+  for (const goal of goals) {
+    if (!goal.instanceId || goal.definitionSource === "record" || goal.attempt !== 1) {
+      throw new GoalRuntimeRepositoryError("GOAL_BRANCH_HISTORY_REQUIRED", "Goal branch requires complete typed predecessor history.");
+    }
+    const previous = await loadGoalContentBinding(client, target.workspaceId, goal.instanceId);
+    if (previous.owner.scopeKind !== "record" || previous.owner.recordId !== context.source.recordId
+      || previous.owner.worldId !== target.worldId || previous.goalKey !== goal.goalKey || previous.policyVersion !== goal.policyVersion) {
+      throw new GoalRuntimeRepositoryError("GOAL_SCOPE_MISMATCH", "Goal branch source does not match its immutable binding.");
+    }
+    const witness = await verifyGoalContentBinding(previous, context.resolveSource);
+    bindings.push(bindGoalContentWitness(witness, target.workspaceId, goalOwnerForScope(target), goalInstanceIdFor(target, goal.goalKey, goal.attempt)));
+  }
+  const admission = await prepareGoalContentWrites(client, { workspaceId: target.workspaceId, sessionProof: context.sessionProof,
+    operation: "clone", bindings, body: { target, goals: goals.map(g => ({ ...g, completedAt: g.completedAt?.toISOString() ?? null })) }, source: context.source });
   const ids: string[] = [];
   for (const goal of goals) {
     const id = goalInstanceIdFor(target, goal.goalKey, goal.attempt);
@@ -157,6 +182,7 @@ export async function cloneGoalInstancesForBranch(
     );
     ids.push(id);
   }
+  await bindGoalContentWrites(client, { workspaceId: target.workspaceId, sessionProof: context.sessionProof, ...admission, bindings });
   return ids;
 }
 
@@ -174,7 +200,19 @@ export async function materializeGoalInstances(
   client: PoolClient,
   scope: GoalScope,
   goals: readonly GoalMaterializationDeclaration[],
+  context?: GoalContentWriteContext,
 ): Promise<readonly string[]> {
+  if (!goals.length) return [];
+  if (!context?.sessionProof) throw new GoalRuntimeRepositoryError("GOAL_CONTENT_PROOF_REQUIRED", "Goal materialization requires trusted source and session proof.");
+  const owner = goalOwnerForScope(scope);
+  const bindings = [];
+  for (const goal of goals) {
+    const witness = await context.resolveSource({ worldId: scope.worldId, worldVersion: context.worldVersion,
+      goalKey: goal.goalKey, policyVersion: goal.policyVersion, expectedSource: context.expectedSource });
+    bindings.push(bindGoalContentWitness(witness, scope.workspaceId, owner, goalInstanceIdFor(scope, goal.goalKey)));
+  }
+  const admission = await prepareGoalContentWrites(client, { workspaceId: scope.workspaceId, sessionProof: context.sessionProof,
+    operation: "materialize", bindings, body: { scope, goals } });
   const scopeKind = goalScopeKind(scope);
   const recordId = scopeKind === "record"
     ? (scope as GoalRuntimeScope).recordId
@@ -206,6 +244,7 @@ export async function materializeGoalInstances(
     );
     ids.push(id);
   }
+  await bindGoalContentWrites(client, { workspaceId: scope.workspaceId, sessionProof: context.sessionProof, ...admission, bindings });
   return ids;
 }
 
@@ -233,14 +272,23 @@ export async function retryGoalInstance(
   client: PoolClient,
   scope: GoalScope,
   goal: GoalRetryDeclaration,
+  context?: GoalContentWriteContext,
 ): Promise<string> {
+  if (!context?.sessionProof) throw new GoalRuntimeRepositoryError("GOAL_CONTENT_PROOF_REQUIRED", "Goal retry requires trusted source and session proof.");
   if (goal.retryable !== true) {
     throw new GoalRuntimeRepositoryError(
       "GOAL_RETRY_NOT_ALLOWED",
       "Goal content does not allow retrying this terminal instance.",
     );
   }
+  // Same World-first gate as genesis and BOTH Library branch paths. Taking
+  // it only in prepare would invert Record/worldline/Goal against branches.
+  await lockGoalContentWorld(client, scope.workspaceId, scope.worldId);
   const scopeKind = goalScopeKind(scope);
+  if (scopeKind === "record") await client.query(`SELECT id FROM records WHERE workspace_id=$1 AND world_id=$2 AND worldline_id=$3 AND id=$4 FOR UPDATE`,
+    [scope.workspaceId,scope.worldId,scope.worldlineId,(scope as GoalRuntimeScope).recordId]);
+  await client.query(`SELECT id FROM worldlines WHERE workspace_id=$1 AND world_id=$2 AND id=$3 FOR UPDATE`,
+    [scope.workspaceId,scope.worldId,scope.worldlineId]);
   const scopeFilter = scopeKind === "record"
     ? "scope_kind = 'record' AND record_id = $4"
     : scopeKind === "story"
@@ -261,8 +309,10 @@ export async function retryGoalInstance(
     id: string;
     state: GoalState;
     attempt: number;
+    resolution_kind: string;
+    policy_version: string;
   }>(
-    `SELECT id, state, attempt
+    `SELECT id, state, attempt, resolution_kind, policy_version
      FROM goal_instances
      WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
        AND ${scopeFilter}
@@ -285,8 +335,19 @@ export async function retryGoalInstance(
       "Goal retry is refused while an active attempt exists.",
     );
   }
+  if (previous.resolution_kind !== "natural" || previous.policy_version !== goal.policyVersion) {
+    throw new GoalRuntimeRepositoryError("GOAL_RETRY_NOT_ALLOWED", "Goal retry requires the same naturally terminal definition.");
+  }
+  const binding = await loadGoalContentBinding(client, scope.workspaceId, previous.id);
+  if (goalOwnerKey(binding.owner) !== goalOwnerKey(goalOwnerForScope(scope)) || binding.goalKey !== goal.goalKey
+    || binding.policyVersion !== goal.policyVersion) throw new GoalRuntimeRepositoryError("GOAL_SCOPE_MISMATCH", "Goal retry binding does not match the source.");
+  const witness = await verifyGoalContentBinding(binding, context.resolveSource);
+  if (witness.definition.retryable !== true) throw new GoalRuntimeRepositoryError("GOAL_RETRY_NOT_ALLOWED", "Historical Goal content does not allow retry.");
   const attempt = previous.attempt + 1;
   const id = goalInstanceIdFor(scope, goal.goalKey, attempt);
+  const bindings = [bindGoalContentWitness(witness, scope.workspaceId, goalOwnerForScope(scope), id)];
+  const admission = await prepareGoalContentWrites(client, { workspaceId: scope.workspaceId, sessionProof: context.sessionProof,
+    operation: "retry", bindings, predecessors: new Map([[id,previous.id]]), body: { scope, goal, predecessor: binding } });
   await client.query(
     `INSERT INTO goal_instances (
        workspace_id, world_id, worldline_id, record_id, story_id,
@@ -309,6 +370,7 @@ export async function retryGoalInstance(
       previous.id,
     ],
   );
+  await bindGoalContentWrites(client, { workspaceId: scope.workspaceId, sessionProof: context.sessionProof, ...admission, bindings });
   return id;
 }
 

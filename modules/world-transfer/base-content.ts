@@ -1,6 +1,6 @@
 import type { GoalDefinition } from "../goals/public.ts";
 import type { JsonValue } from "../runtime/public.ts";
-import { ENGINE_BASE_WORLD } from "./engine-base.ts";
+import { ENGINE_BASE_WORLD, ENGINE_BASE_CONTENT_VERSION } from "./engine-base.ts";
 
 export interface BaseGoalDefinitionRequest {
   worldId: string;
@@ -13,7 +13,14 @@ export interface BaseGoalDefinitionRequest {
  * their own definitions; these definitions are deliberately small and generic
  * so base mode can dogfood the same resolver without requiring an install.
  */
-export const BUILTIN_BASE_GOAL_DEFINITIONS: readonly GoalDefinition[] = Object.freeze([
+function freezeContent<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeContent(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+export const BUILTIN_BASE_GOAL_DEFINITIONS: readonly GoalDefinition[] = freezeContent([
   {
     goalKey: "base.first-narration",
     policyVersion: "base-v1",
@@ -31,6 +38,17 @@ export const BUILTIN_BASE_GOAL_DEFINITIONS: readonly GoalDefinition[] = Object.f
     },
   },
 ]);
+
+/** Append revisions here on an engine content change; retain historical bytes.
+ * The pinned complete-set hash prevents changing a revision in place. */
+export const ENGINE_BASE_GOAL_REVISIONS = freezeContent({
+  "1.0.0": { revision: "1.0.0", definitions: BUILTIN_BASE_GOAL_DEFINITIONS,
+    contentHash: "4c9053595939b6a146a2230363c8cc8a3211740ce2502f3b5123edd90e98f261" },
+});
+export function resolveBaseGoalRevision(revision = ENGINE_BASE_CONTENT_VERSION) {
+  return Object.hasOwn(ENGINE_BASE_GOAL_REVISIONS, revision)
+    ? ENGINE_BASE_GOAL_REVISIONS[revision as keyof typeof ENGINE_BASE_GOAL_REVISIONS] : null;
+}
 
 export function createBaseGoalDefinitionResolver(
   definitions: readonly GoalDefinition[] = BUILTIN_BASE_GOAL_DEFINITIONS,

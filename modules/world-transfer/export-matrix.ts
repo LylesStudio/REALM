@@ -1,5 +1,5 @@
 /**
- * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；91 行，另有 2 张 durable 台账不进矩阵）。
+ * v37 §D.7 逐表逐字段矩阵（代码常量单一来源；98 行，另有 2 张 durable 台账不进矩阵）。
  *
  * 档位：T=template / F=full / A=archive(selection)；派生=trigger 重建不进包；
  * flag=仅 includeMemberships 展示形态；excluded=不出包。
@@ -67,8 +67,11 @@ function row(
   };
 }
 
-/** D.7 矩阵全量（91 行；声明序 = 包内 tables/* 序）。 */
+/** D.7 矩阵全量（98 行；声明序 = 包内 tables/* 序）。 */
 export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
+  row("goal_content_instance_bindings", "excluded", null),
+  row("goal_content_write_admissions", "excluded", null),
+  row("realmworld_command_materializations", "excluded", null),
   row("workspaces", "excluded", null),
   row("worlds", "bootstrap", "A"),
   row("worldlines", "TFA", "A", {
@@ -137,21 +140,22 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   // 自动模式请求队列同样是运行时意图台账，不进 .realm 包。
   row("scene_image_requests", "excluded", null),
   row("outbox", "excluded", null),
-  // Goal runtime facts remain database-scoped until the dedicated `.realm`
-  // runtime-save route is implemented; they are never content-package rows.
+  // Goal runtime facts travel through the constrained `.realm` runtime save
+  // and restore path; they never become World content-package rows.
   row("goal_instances", "excluded", null),
   row("goal_assessment_jobs", "excluded", null),
   row("goal_assessments", "excluded", null),
-  // Authoring history and command replay require dedicated runtime-save remapping.
+  // Authored definitions are rebased per Record by runtime-save capabilities.
+  // Operational commands and admissions never grant authority after transport.
   row("record_goal_definitions", "excluded", null),
   row("record_goal_commands", "excluded", null),
   row("record_goal_restore_admissions", "excluded", null),
   row("record_narrative_state", "derived", "A", { rewriteColumns: ["record_id", "source_event_id"], semanticColumns: ["document"] }),
-  // Story Graph runtime projections and unlock evidence are server-owned
-  // state; they stay out of .realm packages until a dedicated runtime-save
-  // route can preserve their replay/evidence invariants.
+  // Story Graph bindings, projections and unlock evidence use the privileged
+  // runtime backup path; World content packs do not carry runtime authority.
   row("story_node_instances", "excluded", null),
   row("story_unlock_ledger", "excluded", null),
+  row("story_definition_bindings", "excluded", null),
   // 0057 版本切换审计是控制面台账（谁何时把哪条 Record 切到哪个
   // RealmWorld 版本），不是世界内容；绑定真相随 records.world_version
   // 走，审计行不进 .realm 包。
@@ -178,6 +182,8 @@ export const EXPORT_MATRIX: readonly ExportMatrixRow[] = [
   row("obligation_settlements", "excluded", null),
   row("committed_fact_commands", "excluded", null),
   row("performance_assessments", "excluded", null),
+  row("performance_evidence_snapshots", "excluded", null),
+  row("performance_evidence_transport_provenance", "excluded", null),
   row("member_relationship_revisions", "excluded", null),
   row("memory_conclusions", "F", "A", {
     rewriteColumns: [

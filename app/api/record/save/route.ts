@@ -42,7 +42,11 @@ function saveError(error: unknown): Response {
 
 export async function POST(request: Request): Promise<Response> {
   const principalId = resolveRequestPrincipal(request, LOCAL_RECORD_SCOPE.principalId);
-  if (!principalId) return unauthorizedResponse();
+  if (!principalId) {
+    const response = unauthorizedResponse();
+    response.headers.set("Cache-Control", "no-store");
+    return response;
+  }
   let body: unknown;
   try {
     body = await request.json();
@@ -79,11 +83,12 @@ export async function POST(request: Request): Promise<Response> {
         { status: 404, headers: { "Cache-Control": "no-store" } },
       );
     }
-    const reader = createPostgresRealmRuntimeSaveReader(pool);
+    const reader = createPostgresRealmRuntimeSaveReader(pool, { goalsSchemaVersion: 2 });
     const bytes = await buildRealmRuntimeSaveBytes(reader, {
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       recordId: input.recordId,
       principalId,
+      purpose: "record-export",
     });
     if (!bytes) {
       return Response.json(

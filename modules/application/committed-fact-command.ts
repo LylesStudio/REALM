@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { compareReplay, type FactKind, type ResolvedReplayProofV1 } from "./command-replay-lineage.ts";
 
 import { readScope, type ProjectScope } from "../projects/public.ts";
 
@@ -59,7 +60,12 @@ export interface PerformanceAssessmentResult {
 export interface CommittedFactCommandStore {
   loadCommand(scope: ProjectScope, idempotencyKey: string): Promise<{
     requestFingerprint: string;
-    result: InventoryAdjustmentResult | RelationshipRevisionResult | PerformanceAssessmentResult;
+    kind?: FactKind;
+    provenance?: "request-result-v1" | "legacy-result-v1";
+    replayProof?: ResolvedReplayProofV1;
+    result: InventoryAdjustmentResult | InventoryGrantResult | RelationshipRevisionResult | PerformanceAssessmentResult;
+    /** Canonical request payload persisted at commit; null only for pre-provenance rows. */
+    request: Readonly<Record<string, unknown>> | null;
   } | null>;
   adjustInventory(input: {
     scope: ProjectScope;
@@ -72,6 +78,7 @@ export interface CommittedFactCommandStore {
     delta: number;
     sourceEventId: string;
     expectedRevision: number;
+    request: Readonly<Record<string, unknown>>;
   }): Promise<InventoryAdjustmentResult>;
   grantInventory(input: {
     scope: ProjectScope;
@@ -83,6 +90,7 @@ export interface CommittedFactCommandStore {
     assetDefinitionId: string;
     quantity: number;
     sourceEventId: string;
+    request: Readonly<Record<string, unknown>>;
   }): Promise<InventoryGrantResult>;
   reviseRelationship(input: {
     scope: ProjectScope;
@@ -93,6 +101,7 @@ export interface CommittedFactCommandStore {
     objectEntityKey: string;
     relationKind: string;
     sourceEventId: string;
+    request: Readonly<Record<string, unknown>>;
   }): Promise<RelationshipRevisionResult>;
   loadPerformanceFacts(input: {
     scope: ProjectScope;
@@ -109,10 +118,15 @@ export interface CommittedFactCommandStore {
     score: number;
     evidenceEventIds: readonly string[];
     evidenceSnapshotHash: string;
+    request: Readonly<Record<string, unknown>>;
   }): Promise<PerformanceAssessmentResult>;
 }
 
-export function createCommittedFactCommandService(options: { store: CommittedFactCommandStore }) {
+export function createCommittedFactCommandService(options: {
+  store: CommittedFactCommandStore;
+  /** Trusted atomic adapter. Callers requiring Story metadata use the executor's full wrapper. */
+  atomicPerformanceExecutor?: (scope: ProjectScope, intent: { recordId: string; policyVersion: "structured-factors:v1"; evidenceEventIds: readonly string[]; idempotencyKey: string }) => Promise<PerformanceAssessmentResult>;
+}) {
   return {
     async adjustInventory(command: {
       scope: ProjectScope;
@@ -130,7 +144,7 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
       rejectClientAuthority(command, ["possession", "quantity", "owned", "balanceMinor"]);
       const scope = readScope(command.scope);
       const delta = nonzeroInteger(command.delta, "delta");
-      const requestFingerprint = fingerprint(scope, {
+      const request = {
         command: "inventory.adjusted",
         recordId: required(command.recordId, "recordId"),
         characterInstanceId: required(command.characterInstanceId, "characterInstanceId"),
@@ -138,19 +152,21 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
         delta,
         sourceEventId: required(command.sourceEventId, "sourceEventId"),
         expectedRevision: revision(command.expectedRevision),
-      });
-      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, (commandId) => (
+      };
+      const requestFingerprint = committedFactRequestFingerprintFor(scope, request);
+      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, request, (commandId) => (
         options.store.adjustInventory({
           scope,
           commandId,
           idempotencyKey: required(command.idempotencyKey, "idempotencyKey"),
           requestFingerprint,
-          recordId: required(command.recordId, "recordId"),
-          characterInstanceId: required(command.characterInstanceId, "characterInstanceId"),
-          assetDefinitionId: required(command.assetDefinitionId, "assetDefinitionId"),
+          recordId: request.recordId,
+          characterInstanceId: request.characterInstanceId,
+          assetDefinitionId: request.assetDefinitionId,
           delta,
-          sourceEventId: required(command.sourceEventId, "sourceEventId"),
-          expectedRevision: revision(command.expectedRevision),
+          sourceEventId: request.sourceEventId,
+          expectedRevision: request.expectedRevision,
+          request,
         })
       ));
     },
@@ -169,25 +185,27 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
       rejectClientAuthority(command, ["possession", "owned", "delta", "balanceMinor"]);
       const scope = readScope(command.scope);
       const quantity = positiveInteger(command.quantity, "quantity");
-      const requestFingerprint = fingerprint(scope, {
+      const request = {
         command: "inventory.granted",
         recordId: required(command.recordId, "recordId"),
         characterInstanceId: required(command.characterInstanceId, "characterInstanceId"),
         assetDefinitionId: required(command.assetDefinitionId, "assetDefinitionId"),
         quantity,
         sourceEventId: required(command.sourceEventId, "sourceEventId"),
-      });
-      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, (commandId) => (
+      };
+      const requestFingerprint = committedFactRequestFingerprintFor(scope, request);
+      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, request, (commandId) => (
         options.store.grantInventory({
           scope,
           commandId,
           idempotencyKey: required(command.idempotencyKey, "idempotencyKey"),
           requestFingerprint,
-          recordId: required(command.recordId, "recordId"),
-          characterInstanceId: required(command.characterInstanceId, "characterInstanceId"),
-          assetDefinitionId: required(command.assetDefinitionId, "assetDefinitionId"),
+          recordId: request.recordId,
+          characterInstanceId: request.characterInstanceId,
+          assetDefinitionId: request.assetDefinitionId,
           quantity,
-          sourceEventId: required(command.sourceEventId, "sourceEventId"),
+          sourceEventId: request.sourceEventId,
+          request,
         })
       ));
     },
@@ -219,14 +237,15 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
         throw new CommittedFactCommandError("COMMAND_INVALID", "subjectEntityKey and objectEntityKey must differ.");
       }
       const relationKind = readRelationKind(command.relationKind);
-      const requestFingerprint = fingerprint(scope, {
+      const request = {
         command: "relationship.revised",
         subjectEntityKey,
         objectEntityKey,
         relationKind,
         sourceEventId: required(command.sourceEventId, "sourceEventId"),
-      });
-      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, (commandId) => (
+      };
+      const requestFingerprint = committedFactRequestFingerprintFor(scope, request);
+      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, request, (commandId) => (
         options.store.reviseRelationship({
           scope,
           commandId,
@@ -235,7 +254,8 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
           subjectEntityKey,
           objectEntityKey,
           relationKind,
-          sourceEventId: required(command.sourceEventId, "sourceEventId"),
+          sourceEventId: request.sourceEventId,
+          request,
         })
       ));
     },
@@ -260,28 +280,29 @@ export function createCommittedFactCommandService(options: { store: CommittedFac
       }
       const evidenceEventIds = readEvidenceIds(command.evidenceEventIds);
       const recordId = required(command.recordId, "recordId");
-      const facts = await options.store.loadPerformanceFacts({ scope, recordId, evidenceEventIds });
-      const score = scoreFromCommittedFacts(facts);
-      const requestFingerprint = fingerprint(scope, {
+      const key = required(command.idempotencyKey, "idempotencyKey");
+      if (options.atomicPerformanceExecutor) {
+        return options.atomicPerformanceExecutor(scope, { recordId, policyVersion: STRUCTURED_FACTOR_POLICY, evidenceEventIds, idempotencyKey: key });
+      }
+      const existing = await options.store.loadCommand(scope, key);
+      // A replay compares the original accepted request. Runtime facts may have
+      // changed or become unavailable since that commit; they cannot replace
+      // the saved score. The full candidate is still checked by compareReplay.
+      const savedScore = existing?.request?.score
+        ?? (existing?.result as Partial<PerformanceAssessmentResult> | undefined)?.score;
+      if (!existing) throw new CommittedFactCommandError("COMMAND_INVALID", "An atomic performance executor is required for a new assessment.");
+      if (!Number.isSafeInteger(savedScore)) throw new CommittedFactCommandError("IDEMPOTENCY_KEY_REUSE", "The performance receipt cannot be replayed.");
+      const score = boundedScore(savedScore as number);
+      const request = {
         command: "performance.assessed",
         recordId,
         policyVersion,
         score,
         evidenceEventIds,
-      });
-      return replayOrCommit(options.store, scope, command.idempotencyKey, requestFingerprint, (commandId) => (
-        options.store.recordPerformanceAssessment({
-          scope,
-          commandId,
-          idempotencyKey: required(command.idempotencyKey, "idempotencyKey"),
-          requestFingerprint,
-          recordId,
-          policyVersion,
-          score,
-          evidenceEventIds,
-          evidenceSnapshotHash: evidenceHash(evidenceEventIds),
-        })
-      ));
+      };
+      const requestFingerprint = committedFactRequestFingerprintFor(scope, request);
+      return replayOrCommit(options.store, scope, key, requestFingerprint, request,
+        async () => { throw new CommittedFactCommandError("COMMAND_INVALID", "An atomic performance executor is required."); }, existing);
     },
   };
 }
@@ -290,6 +311,13 @@ export function evidenceHash(evidenceEventIds: readonly string[]): string {
   return createHash("sha256")
     .update(["performance-assessment:v1", ...evidenceEventIds].join("\0"))
     .digest("hex");
+}
+
+/** Shared normalization keeps the original request ordering and fingerprint bytes intact. */
+export function normalizePerformanceAssessmentIntent(command: { scope: ProjectScope; recordId: string; policyVersion: string; evidenceEventIds: readonly string[]; idempotencyKey: string }) {
+  rejectClientAuthority(command, ["score", "factors", "unlocked", "goalCompleted", "decision", "failed", "balanceMinor"]);
+  if (required(command.policyVersion, "policyVersion") !== STRUCTURED_FACTOR_POLICY) throw new CommittedFactCommandError("COMMAND_INVALID", "policyVersion is invalid.");
+  return { scope: readScope(command.scope), intent: { recordId: required(command.recordId, "recordId"), policyVersion: STRUCTURED_FACTOR_POLICY as "structured-factors:v1", evidenceEventIds: readEvidenceIds(command.evidenceEventIds), idempotencyKey: required(command.idempotencyKey, "idempotencyKey") } };
 }
 
 export function readAssessmentFactors(payload: unknown): Record<string, number> {
@@ -336,25 +364,51 @@ async function replayOrCommit<T extends { status: "committed" | "replayed" }>(
   scope: ProjectScope,
   idempotencyKey: string,
   requestFingerprint: string,
+  request: Readonly<Record<string, unknown>>,
   commit: (commandId: string) => Promise<T>,
+  loaded?: Awaited<ReturnType<CommittedFactCommandStore["loadCommand"]>>,
 ): Promise<T> {
   const key = required(idempotencyKey, "idempotencyKey");
-  const existing = await store.loadCommand(scope, key);
+  const existing = loaded === undefined ? await store.loadCommand(scope, key) : loaded;
   if (existing) {
-    if (existing.requestFingerprint !== requestFingerprint) {
+    const { result, ...receipt } = existing;
+    if (!compareReplay({
+      family: "fact", trustedScope: scope, candidate: request, expectedOperation: request.command,
+      existing: receipt, factFingerprint: committedFactRequestFingerprintFor,
+      suppliedTargetFingerprint: requestFingerprint,
+    })) {
       throw new CommittedFactCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
     }
-    return { ...existing.result, status: "replayed" } as unknown as T;
+    return { ...result, status: "replayed" } as unknown as T;
   }
-  const commandId = createHash("sha256")
-    .update(["committed-fact-command:v1", scope.workspaceId, scope.worldId, scope.worldlineId, key, requestFingerprint].join("\0"))
-    .digest("hex")
-    .slice(0, 24);
-  return commit(`fact_${commandId}`);
+  return commit(committedFactCommandIdFor(scope, key, requestFingerprint));
 }
 
-function fingerprint(scope: ProjectScope, request: Record<string, unknown>): string {
-  return createHash("sha256").update(`committed-fact-command:v1\0${stable({ scope, request })}`).digest("hex");
+/**
+ * Canonical request fingerprint for a committed-fact command. The scope and
+ * the full normalized request are hashed together, so a fingerprint is only
+ * meaningful inside one worldline; runtime-save restore recomputes it against
+ * the remapped target scope instead of copying the source hash.
+ */
+export function committedFactRequestFingerprintFor(
+  scope: ProjectScope,
+  request: Readonly<Record<string, unknown>>,
+): string {
+  return createHash("sha256").update(`committed-fact-command:v1\0${stable({ scope: readScope(scope), request })}`).digest("hex");
+}
+
+/** Deterministic command id derived from scope + idempotency key + fingerprint. */
+export function committedFactCommandIdFor(
+  scope: ProjectScope,
+  idempotencyKey: string,
+  requestFingerprint: string,
+): string {
+  const normalized = readScope(scope);
+  const commandId = createHash("sha256")
+    .update(["committed-fact-command:v1", normalized.workspaceId, normalized.worldId, normalized.worldlineId, idempotencyKey, requestFingerprint].join("\0"))
+    .digest("hex")
+    .slice(0, 24);
+  return `fact_${commandId}`;
 }
 
 function rejectClientAuthority(command: object, fields: readonly string[]): void {

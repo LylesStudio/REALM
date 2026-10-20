@@ -1,7 +1,7 @@
 import type { GoalDefinition } from "../goals/public.ts";
 import type { LoadedRealmWorldDirectory, RealmWorldSignatureVerifier } from "./realmworld-loader.ts";
 import { mountRealmWorld } from "./realmworld-loader.ts";
-import { createRealmWorldContentStore, type RealmWorldContentStore } from "./realmworld-content.ts";
+import { createRealmWorldContentStore } from "./realmworld-content.ts";
 import { LOCAL_WORLD_VERSION } from "./realm-save.ts";
 
 export interface RealmWorldDefinitionResolutionJob {
@@ -26,28 +26,20 @@ export type RealmWorldMount = (input: {
   worldVersion: string;
 }) => Promise<RealmWorldMountedContent>;
 
-function identityKey(worldId: string, worldVersion: string): string {
-  return `${worldId}\u0000${worldVersion}`;
-}
-
 /**
  * Resolve Goal definitions from the exact WorldBinding carried by an
- * assessment job. The mounted package is cached by identity only; a package
- * with a different manifest identity can never satisfy the job.
+ * assessment job. Each request remounts so revoked trust or replaced bytes
+ * cannot be authorized by an identity-only cache.
  */
 export function createRealmWorldDefinitionResolver(input: {
   mount: RealmWorldMount;
   baseResolver?: (job: RealmWorldDefinitionResolutionJob) => GoalDefinition | null | Promise<GoalDefinition | null>;
 }): (job: RealmWorldDefinitionResolutionJob) => Promise<GoalDefinition | null> {
-  const stores = new Map<string, RealmWorldContentStore>();
   return async (job) => {
     if (job.worldVersion === LOCAL_WORLD_VERSION) {
       return input.baseResolver ? await input.baseResolver(job) : null;
     }
-    const key = identityKey(job.worldId, job.worldVersion);
-    let store = stores.get(key);
-    if (!store) {
-      const mounted = await input.mount({
+    const mounted = await input.mount({
         worldId: job.worldId,
         worldVersion: job.worldVersion,
       });
@@ -59,9 +51,7 @@ export function createRealmWorldDefinitionResolver(input: {
           "Mounted RealmWorld identity does not match the assessment job.",
         );
       }
-      store = createRealmWorldContentStore(mounted);
-      stores.set(key, store);
-    }
+    const store = createRealmWorldContentStore(mounted);
     return store.resolveGoalDefinition(job.goalKey);
   };
 }

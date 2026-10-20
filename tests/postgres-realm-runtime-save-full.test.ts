@@ -63,6 +63,12 @@ import {
   parseRealmRuntimeSaveArchive,
   realmRuntimeSaveManifestFromData,
   serializeRealmRuntimeSaveManifestV2,
+  serializeRealmRuntimeSaveRecordV1,
+  serializeRealmRuntimeSaveGoalsV1,
+  serializeRealmRuntimeSaveTopologyV1,
+  serializeRealmRuntimeSaveActionReceiptsV1,
+  serializeRealmRuntimeSaveCharacterEffectsV1,
+  serializeRealmRuntimeSaveObservationsV1,
   RealmRuntimeSaveError,
   type RealmRuntimeSaveArchive,
   type RealmRuntimeSaveActionReceiptsV1,
@@ -350,7 +356,7 @@ test(
 
     // ---- save：三段运行态进入存档 -------------------------------------
     const reader = createPostgresRealmRuntimeSaveReader(runtimePool);
-    const archive = await reader.load({
+    const archive = await reader.load({ principalId: POSTGRES_DEMO_IDS.principal, purpose: "record-export",
       workspaceId: WORLD_SCOPE.workspaceId,
       recordId: RECORD_SCOPE.recordId,
     });
@@ -519,18 +525,18 @@ test(
       const actionReceipts = overrides.actionReceipts ?? archive.actionReceipts!;
       const characterEffects = overrides.characterEffects ?? archive.characterEffects!;
       const observations = overrides.observations ?? archive.observations!;
-      const manifest = realmRuntimeSaveManifestFromData({
-        engineApi: archive.manifest.engineApi,
-        mode: archive.manifest.mode,
-        world: archive.manifest.world,
-        scope: archive.manifest.scope,
-        record: archive.record,
-        goals: archive.goals,
-        topology: archive.topology,
-        actionReceipts,
-        characterEffects,
-        observations,
-      });
+      // TEST ONLY: hash the actual transported sections, including malformed
+      // observations. The high-level manifest/build must refuse this fixture.
+      const files = new Map<string, Uint8Array>([
+        ["runtime/record.json", Buffer.from(serializeRealmRuntimeSaveRecordV1(archive.record))],
+        ["runtime/goals.json", Buffer.from(serializeRealmRuntimeSaveGoalsV1(archive.goals))],
+        ["runtime/action-receipts.json", Buffer.from(serializeRealmRuntimeSaveActionReceiptsV1(actionReceipts))],
+        ["runtime/character-effects.json", Buffer.from(serializeRealmRuntimeSaveCharacterEffectsV1(characterEffects))],
+        ["runtime/observations.json", Buffer.from(serializeRealmRuntimeSaveObservationsV1(observations))],
+      ]);
+      if (archive.topology) files.set("runtime/topology.json", Buffer.from(serializeRealmRuntimeSaveTopologyV1(archive.topology)));
+      const manifest = { ...archive.manifest, snapshot: { ...archive.manifest.snapshot,
+        runtimeHash: computeRealmRuntimeSaveContentHash(files) } };
       return {
         manifest,
         record: archive.record,
@@ -545,11 +551,12 @@ test(
       badArchive: RealmRuntimeSaveArchive,
       idempotencyKey: string,
       code: RealmRuntimeSaveRepositoryError["code"],
+      message?: string,
     ) => {
       await assert.rejects(
         restorer.restore({ ...restoreInput, archive: badArchive, idempotencyKey }),
         (error: unknown) => error instanceof RealmRuntimeSaveRepositoryError
-          && error.code === code,
+          && error.code === code && (message === undefined || error.message === message),
       );
       assert.deepEqual(
         await restoreArtifactCounts(ownerPool),
@@ -572,6 +579,17 @@ test(
       "RUNTIME_SAVE_INVALID",
     );
 
+    // Independent manifest boundary, separate from hash-correct direct input.
+    const badObservations = { ...archive.observations!, observations:
+      archive.observations!.observations.map((row, index) => index === 0
+        ? { ...row, sourceEventId: "event_never_restored" } : row) };
+    assert.throws(() => realmRuntimeSaveManifestFromData({
+      ...archive.manifest, record: archive.record, goals: archive.goals,
+      topology: archive.topology, observations: badObservations,
+    }), (error: unknown) => error instanceof RealmRuntimeSaveError
+      && error.code === "INVALID_SAVE" && error.message === "Memory observation source event is not carried.");
+    assert.ok(buildRealmRuntimeSaveArchive(rebuildArchive({})).length > 0);
+
     // F2：observation 指向未恢复事件。
     await expectRestoreFailure(
       rebuildArchive({
@@ -584,6 +602,7 @@ test(
       }),
       "save-full-bad-observation-event",
       "RUNTIME_SAVE_INVALID",
+      "Memory observation source event is not carried.",
     );
 
     // F3：目标 World 缺少 effect definition（事务内 fail-closed 回滚）。

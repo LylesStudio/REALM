@@ -78,7 +78,7 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
   if (!isPlainObject(value)) {
     throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where} must be an object`);
   }
-  assertExactKeys(value, ["goalKey", "policyVersion", "mode", "visible", "rubric", "outcome"], where);
+  assertExactKeys(value, ["goalKey", "policyVersion", "mode", "visible", "rubric", "outcome", "terminals", "retryable"], where);
   const goalKey = requireText(requireField(value, "goalKey", where), `${where}.goalKey`, MAX_GOAL_KEY_LENGTH);
   const policyVersion = requireText(
     requireField(value, "policyVersion", where),
@@ -98,7 +98,7 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
   }
   let rubric: GoalDefinition["rubric"];
   if (rubricRaw.kind === "event_count") {
-    assertExactKeys(rubricRaw, ["kind", "eventKind", "progressKey", "threshold"], `${where}.rubric`);
+    assertExactKeys(rubricRaw, ["kind", "eventKind", "progressKey", "threshold", "failure"], `${where}.rubric`);
     if (
       typeof rubricRaw.eventKind !== "string"
       || rubricRaw.eventKind.trim() !== rubricRaw.eventKind
@@ -117,6 +117,29 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
       progressKey: rubricRaw.progressKey,
       threshold: rubricRaw.threshold as number,
     } satisfies GoalEventCountRubric;
+    if (Object.hasOwn(rubricRaw, "failure")) {
+      const failure = rubricRaw.failure;
+      if (!isPlainObject(failure)) {
+        throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.rubric.failure is invalid`);
+      }
+      assertExactKeys(failure, ["eventKind", "progressKey", "threshold"], `${where}.rubric.failure`);
+      if (
+        typeof failure.eventKind !== "string"
+        || failure.eventKind.trim() !== failure.eventKind
+        || failure.eventKind.length === 0
+        || failure.eventKind === rubric.eventKind
+        || typeof failure.progressKey !== "string"
+        || failure.progressKey.trim() !== failure.progressKey
+        || failure.progressKey.length === 0
+        || failure.progressKey === rubric.progressKey
+        || !Number.isSafeInteger(failure.threshold)
+        || (failure.threshold as number) <= 0
+      ) {
+        throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.rubric.failure is invalid`);
+      }
+      rubric.failure = { eventKind: failure.eventKind, progressKey: failure.progressKey,
+        threshold: failure.threshold as number };
+    }
   } else if (rubricRaw.kind === "semantic") {
     assertExactKeys(rubricRaw, ["kind", "promptKey", "criteria"], `${where}.rubric`);
     rubric = {
@@ -134,6 +157,22 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
   if (!isPlainObject(outcome) || !isJsonValue(outcome)) {
     throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.outcome is invalid`);
   }
+  const extensions: Pick<GoalDefinition, "terminals" | "retryable"> = {};
+  if (Object.hasOwn(value, "terminals")) {
+    const terminals = value.terminals;
+    if (!Array.isArray(terminals) || terminals.length === 0
+      || new Set(terminals).size !== terminals.length
+      || terminals.some(terminal => terminal !== "completed" && terminal !== "failed" && terminal !== "settled")) {
+      throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.terminals is invalid`);
+    }
+    extensions.terminals = [...terminals];
+  }
+  if (Object.hasOwn(value, "retryable")) {
+    if (typeof value.retryable !== "boolean") {
+      throw new RealmWorldContentError("GOALS_INVALID", `RealmWorld ${where}.retryable is invalid`);
+    }
+    extensions.retryable = value.retryable;
+  }
   return {
     goalKey,
     policyVersion,
@@ -141,6 +180,7 @@ function parseGoalDefinition(value: unknown, index: number): GoalDefinition {
     visible: value.visible,
     rubric,
     outcome: outcome as Readonly<Record<string, JsonValue>>,
+    ...extensions,
   };
 }
 

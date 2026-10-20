@@ -6,11 +6,13 @@ import pg from "pg";
 import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { createPostgresCommittedFactCommandStore } from "../database/postgres/committed-fact-command-repository.ts";
 import { createCommittedFactCommandService } from "../modules/application/committed-fact-command.ts";
+import { createPerformanceCommandTrust, executePerformanceAssessmentCommand } from "../modules/application/performance-command-executor.ts";
+import { POSTGRES_DEMO_IDS, seedPostgresDemo } from "../database/postgres/public.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
 const skipReason = "requires the isolated PostgreSQL runtime runner";
-const SCOPE = {
+const DEMO_SCOPE = {
   workspaceId: "ws_demo",
   worldId: "world_ember_coast",
   worldlineId: "worldline_origin",
@@ -20,9 +22,19 @@ test(
   "inventory update, member relationship revision, and structured score read back from PostgreSQL",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    assert.ok(process.env.REALM_SCRATCH_POSTGRES_CONTAINER?.startsWith("realm"), "disposable runtime runner required before pool allocation");
     const admin = new pg.Pool({ connectionString: adminConnectionString!, max: 1 });
     const runtime = new pg.Pool({ connectionString: runtimeConnectionString!, max: 1 });
+    t.after(async () => {
+      // Immutable facts and their private witnesses belong to cluster teardown.
+      // Close resources even when setup fails; never disable history/FK triggers.
+      await endSharedRuntimePools();
+      await Promise.all([admin.end(), runtime.end()]);
+    });
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    // Retained immutable rows must not change another file's demo/default scope.
+    const SCOPE = { ...DEMO_SCOPE, workspaceId: `ws_fact_${suffix}` };
+    await seedPostgresDemo(admin, { workspaceId: SCOPE.workspaceId, principalId: POSTGRES_DEMO_IDS.principal });
     const storyId = `story_fact_${suffix}`;
     const recordId = `record_fact_${suffix}`;
     const sceneId = `scene_fact_${suffix}`;
@@ -50,45 +62,7 @@ test(
     const nextOrdinal = cursor.rows[0]?.next_ordinal;
     assert.ok(calendarId && nextOrdinal);
 
-    t.after(async () => {
-      await endSharedRuntimePools();
-      const cleanup = await admin.connect();
-      try {
-        await cleanup.query("BEGIN");
-        await cleanup.query("SET LOCAL session_replication_role = replica");
-        await cleanup.query(
-          `DELETE FROM member_relationship_revisions WHERE workspace_id = $1 AND source_record_id = $2`,
-          [SCOPE.workspaceId, recordId],
-        );
-        await cleanup.query(
-          `DELETE FROM performance_assessments WHERE workspace_id = $1 AND record_id = $2`,
-          [SCOPE.workspaceId, recordId],
-        );
-        await cleanup.query(
-          `DELETE FROM committed_fact_commands WHERE workspace_id = $1 AND id LIKE $2`,
-          [SCOPE.workspaceId, "fact_%"],
-        );
-        await cleanup.query(`DELETE FROM events WHERE workspace_id = $1 AND record_id = $2`, [SCOPE.workspaceId, recordId]);
-        await cleanup.query(`DELETE FROM character_assets WHERE workspace_id = $1 AND record_id = $2`, [SCOPE.workspaceId, recordId]);
-        await cleanup.query(`DELETE FROM project_milestones WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, milestoneId]);
-        await cleanup.query(`DELETE FROM projects WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, projectId]);
-        await cleanup.query(`DELETE FROM character_instances WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, instanceId]);
-        await cleanup.query(`DELETE FROM character_continuities WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, continuityId]);
-        await cleanup.query(`DELETE FROM asset_definitions WHERE workspace_id = $1 AND id = ANY($2::text[])`, [SCOPE.workspaceId, [assetId, grantAssetId]]);
-        await cleanup.query(`DELETE FROM record_heads WHERE workspace_id = $1 AND record_id = $2`, [SCOPE.workspaceId, recordId]);
-        await cleanup.query(`DELETE FROM visibility_policies WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, policyId]);
-        await cleanup.query(`DELETE FROM scenes WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, sceneId]);
-        await cleanup.query(`DELETE FROM records WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, recordId]);
-        await cleanup.query(`DELETE FROM stories WHERE workspace_id = $1 AND id = $2`, [SCOPE.workspaceId, storyId]);
-        await cleanup.query("COMMIT");
-      } catch (error) {
-        await cleanup.query("ROLLBACK");
-        throw error;
-      } finally {
-        cleanup.release();
-      }
-      await Promise.all([admin.end(), runtime.end()]);
-    });
+
 
     await admin.query(
       `INSERT INTO stories (
@@ -181,8 +155,24 @@ test(
       ],
     );
 
+    // Keep the source head coherent with the actually inserted opening fact.
+    await admin.query(
+      `UPDATE record_heads SET last_event_id=$3,last_world_tick=9,last_world_ordinal=$4::bigint
+       WHERE workspace_id=$1 AND record_id=$2`,
+      [SCOPE.workspaceId, recordId, eventId, nextOrdinal],
+    );
+    await admin.query(
+      `UPDATE worldlines SET head_tick=9,head_ordinal=$4::bigint
+       WHERE workspace_id=$1 AND world_id=$2 AND id=$3`,
+      [SCOPE.workspaceId, SCOPE.worldId, SCOPE.worldlineId, nextOrdinal],
+    );
     const service = createCommittedFactCommandService({
       store: createPostgresCommittedFactCommandStore(runtime),
+      // Explicit test-owned enablement; production remains durableTransport:false.
+      atomicPerformanceExecutor: async (scope, intent) => (await executePerformanceAssessmentCommand(runtime, {
+        ...createPerformanceCommandTrust(scope, POSTGRES_DEMO_IDS.principal),
+        enablement: { schema: true, durableTransport: true },
+      }, intent)).result,
     });
     const adjusted = await service.adjustInventory({
       scope: SCOPE,
@@ -272,5 +262,11 @@ test(
       [SCOPE.workspaceId, recordId],
     );
     assert.equal(stored.rows[0]?.score, "30");
+    const witness = await admin.query<{ command_id: string; assessment_id: string }>(
+      `SELECT command_id,assessment_id FROM performance_evidence_snapshots
+       WHERE workspace_id=$1 AND assessment_id=$2`,
+      [SCOPE.workspaceId, assessed.assessmentId],
+    );
+    assert.deepEqual(witness.rows, [{ command_id: assessed.commandId, assessment_id: assessed.assessmentId }]);
   },
 );

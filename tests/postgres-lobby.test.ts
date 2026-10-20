@@ -25,6 +25,29 @@ import {
 } from "../modules/application/lobby-service.ts";
 import { createPostgresLibraryService } from "../modules/application/library-service.ts";
 
+
+// pg-pool removes idle clients before its end() promise resolves. Wait for
+// their actual end events before dropping the fixture database; FORCE would
+// otherwise race graceful Terminate and emit an asynchronous 57P01.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 
 const WS = "ws_demo";
@@ -53,11 +76,11 @@ test(
     await maintenance.query(`CREATE DATABASE "${databaseName}"`);
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
     let cleanupPool = ownerPool;
     t.after(async () => {
-      await cleanupPool.end();
-      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      await endFixturePool(cleanupPool);
+      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
       await maintenance.end();
     });
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
@@ -215,8 +238,8 @@ test(
     );
 
     // ---- 重启策略：关闭旧连接池，再用新连接池读回长期状态行 ----
-    await ownerPool.end();
-    const reopenedPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    await endFixturePool(ownerPool);
+    const reopenedPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
     cleanupPool = reopenedPool;
     const restartedLobby = createLobbyService(reopenedPool);
     const persisted = await restartedLobby.listRooms(asHost);
@@ -237,10 +260,10 @@ test(
     await maintenance.query(`CREATE DATABASE "${databaseName}"`);
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
     t.after(async () => {
-      await ownerPool.end();
-      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      await endFixturePool(ownerPool);
+      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
       await maintenance.end();
     });
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
@@ -344,10 +367,10 @@ test(
     await maintenance.query(`CREATE DATABASE "${databaseName}"`);
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 8 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 8 });
     t.after(async () => {
-      await ownerPool.end();
-      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      await endFixturePool(ownerPool);
+      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
       await maintenance.end();
     });
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
@@ -425,11 +448,11 @@ test(
     await maintenance.query(`CREATE DATABASE "${databaseName}"`);
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 8 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 8 });
     let cleanupPool = ownerPool;
     t.after(async () => {
-      await cleanupPool.end();
-      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      await endFixturePool(cleanupPool);
+      await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
       await maintenance.end();
     });
     const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
@@ -576,8 +599,8 @@ test(
        WHERE workspace_id = $1 AND id = $2`,
       [WS, restartRoom.roomId],
     );
-    await ownerPool.end();
-    const reopenedPool = new pg.Pool({ connectionString: ownerUrl.href, max: 8 });
+    await endFixturePool(ownerPool);
+    const reopenedPool = createFixturePool({ connectionString: ownerUrl.href, max: 8 });
     cleanupPool = reopenedPool;
     const restarted = createLobbyService(reopenedPool, { leaseTtlMs: 1500 });
     const afterRestart = await restarted.listRooms(asHost);

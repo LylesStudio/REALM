@@ -13,6 +13,7 @@ import test from "node:test";
 import pg from "pg";
 import {
   POSTGRES_DEMO_IDS,
+  createArticleQualificationRepository,
   createPostgresActionAffordanceCatalog,
   createPostgresDeliveryProjectionRepository,
   createPostgresRecordRuntimeScopeRepository,
@@ -38,6 +39,7 @@ import { createWorldKnowledgeService } from "../modules/world-knowledge/public.t
 import { createLocalM2TurnOrchestrator } from "../modules/orchestration/public.ts";
 import {
   endSharedRuntimePools,
+  getSharedRuntimePool,
   resolveWorldScopeForMember,
 } from "../app/api/world-scope.ts";
 import {
@@ -66,6 +68,30 @@ installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
+
+
+// pg-pool removes idle clients before its end() promise resolves. Wait for
+// their actual end events before dropping the fixture database; FORCE would
+// otherwise race graceful Terminate and emit an asynchronous 57P01.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("error", error => { throw error; });
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -111,6 +137,7 @@ const MIGRATIONS = [
   "0038_remove_base_skill_hidden_clue.sql",
   "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
+  "0041_article_qualification_and_import_entries.sql",
   "0053_membership_capability.sql",
   // Phase 1B：library list 读模型显式 SELECT worlds.world_version（0054 列）。
   "0054_world_version_identity.sql",
@@ -143,19 +170,21 @@ async function createMigratedDatabase(t: test.TestContext) {
 
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
-  const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+  const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
   const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
   runtimeUrl.pathname = `/${databaseName}`;
-  const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 2 });
+  const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 2 });
 
   const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
   process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
+  const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
   // 路由级调用走本地回落身份：测试进程摘除门禁（用后还原）。
   const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
   delete process.env.REALM_ACCESS_TOKEN;
 
   t.after(async () => {
     await endSharedRuntimePools();
+    await Promise.all(fixtureShutdowns.get(routePool) ?? []);
     if (previousAccessToken === undefined) {
       delete process.env.REALM_ACCESS_TOKEN;
     } else {
@@ -166,10 +195,15 @@ async function createMigratedDatabase(t: test.TestContext) {
     } else {
       process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeUrl;
     }
-    await ownerPool.end();
-    await runtimePool.end();
+    await endFixturePool(ownerPool);
+    await endFixturePool(runtimePool);
+    const backends = await maintenance.query(
+      "SELECT pid, state FROM pg_stat_activity WHERE datname = $1",
+      [databaseName],
+    );
+    assert.deepEqual(backends.rows, [], "fixture backends must be gone before DROP");
     await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+      `DROP DATABASE ${quoteIdentifier(databaseName)}`,
     );
     await maintenance.end();
   });
@@ -494,6 +528,47 @@ test(
     assert.ok(
       proposals.some((item) => item.rationale === "异邦灯塔已点亮应入正史。"),
     );
+
+    // The real restricted knowledge GET must read a nonempty qualification
+    // ledger, rather than silently treating a missing 0041 schema as pending.
+    const articleId = "article_t9_qualified";
+    const articleBody = "C6 qualified lighthouse body";
+    const articleScope = (await resolveWorldScopeForMember(ownerPool, {
+      workspaceId: scope.workspaceId,
+      principalId: scope.principalId,
+      worldId: world.id,
+    }))!;
+    await ownerPool.query(
+      `INSERT INTO world_articles (workspace_id, world_id, worldline_id, id, title, body)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [articleScope.workspaceId, articleScope.worldId, articleScope.worldlineId,
+        articleId, "C6 qualified lighthouse", articleBody],
+    );
+    const attested = await createArticleQualificationRepository(
+      getSharedRuntimePool(process.env.REALM_RUNTIME_DATABASE_URL!),
+    ).qualify(articleScope, {
+      articleId, decision: "attest", attestedBy: scope.principalId,
+    });
+    const qualifiedResponse = await knowledgeGET(new Request(
+      `http://localhost/api/world-knowledge?worldId=${encodeURIComponent(world.id)}`,
+      { headers: { cookie: sessionCookie } },
+    ));
+    assert.equal(qualifiedResponse.status, 200);
+    const qualifiedGraph = await qualifiedResponse.json() as {
+      articles: { id: string; body: string; qualificationStatus: string;
+        availableFromTick: number; availableFromOrdinal: number }[];
+    };
+    const qualifiedArticle = qualifiedGraph.articles.find(article => article.id === articleId);
+    assert.ok(qualifiedArticle, "restricted knowledge GET returns the real eligible article");
+    assert.equal(qualifiedArticle.qualificationStatus, "qualified_public");
+    assert.equal(qualifiedArticle.body, articleBody);
+    assert.ok(attested.ok, `real qualification attestation: ${JSON.stringify(attested)}`);
+    assert.equal(attested.status, "qualified_public");
+    assert.equal(qualifiedArticle.availableFromTick, attested.availableFromTick);
+    assert.equal(qualifiedArticle.availableFromOrdinal, attested.availableFromOrdinal);
+    console.log("C6 qualification readback", JSON.stringify({
+      scope: articleScope, article: qualifiedArticle, attested,
+    }));
 
     // demo 世界语义不回退：demo scope 读取正常且与异邦隔离。
     const demoListed = await knowledgeGET(

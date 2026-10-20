@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +59,7 @@ const migrationPaths = [
   "../database/postgres/migrations/0053_membership_capability.sql",
   "../database/postgres/migrations/0054_world_version_identity.sql",
   "../database/postgres/migrations/0055_goal_runtime.sql",
+  "../database/postgres/migrations/0056_runtime_save_restore_grants.sql",
   "../database/postgres/migrations/0057_realmworld_record_binding.sql",
   "../database/postgres/migrations/0058_durable_job_queue.sql",
   "../database/postgres/migrations/0059_world_commands.sql",
@@ -78,12 +79,26 @@ const migrationPaths = [
   "../database/postgres/migrations/0073_record_goal_genesis_capability.sql",
   "../database/postgres/migrations/0074_record_goal_restore_capability.sql",
   "../database/postgres/migrations/0075_record_goal_branch_capability.sql",
+  "../database/postgres/migrations/0076_story_definition_bindings.sql",
+  "../database/postgres/migrations/0077_grouped_record_goal_restore_capability.sql",
+  "../database/postgres/migrations/0078_bridge_command_write_authorization.sql",
+  "../database/postgres/migrations/0079_restored_outbox_delivery_origin.sql",
+  "../database/postgres/migrations/0080_realmworld_command_materializations.sql",
+  "../database/postgres/migrations/0081_command_policy_record_lock.sql",
+  "../database/postgres/migrations/0082_performance_evidence_snapshots.sql",
+  "../database/postgres/migrations/0083_goal_content_instance_bindings.sql",
+  "../database/postgres/migrations/0084_performance_evidence_transport_provenance.sql",
+  "../database/postgres/migrations/0085_runtime_performance_transport_body_v3.sql",
+  "../database/postgres/migrations/0086_unsigned_import_declaration_guard.sql",
 ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
 const migrationSql = migrationPaths.map((path) => readFileSync(path, "utf8"));
 const sql = migrationSql.join("\n");
 const canonicalSql = canonical(sql);
 
 const scopedTables = [
+  "goal_content_instance_bindings",
+  "goal_content_write_admissions",
+  "realmworld_command_materializations",
   "worlds",
   "worldlines",
   "stories",
@@ -161,6 +176,7 @@ const scopedTables = [
   "turn_cancel_requests",
   "story_node_instances",
   "story_unlock_ledger",
+  "story_definition_bindings",
   "projects",
   "project_milestones",
   "project_story_links",
@@ -172,6 +188,8 @@ const scopedTables = [
   "obligation_settlements",
   "committed_fact_commands",
   "performance_assessments",
+  "performance_evidence_snapshots",
+  "performance_evidence_transport_provenance",
   "member_relationship_revisions",
   "record_goal_definitions",
   "record_goal_commands", "record_goal_restore_admissions",
@@ -243,6 +261,8 @@ test("all workspace-scoped tables in the canonical migration chain are listed", 
 
 // Workspace containment is inherited through the declared composite parent FK.
 const COMPOSITE_SCOPE_ANCHORS = new Map([
+  ["goal_content_instance_bindings", "world_id, worldline_id, goal_instance_id) references goal_instances (workspace_id, world_id, worldline_id, id)"],
+  ["goal_content_write_admissions", "world_id, worldline_id, goal_instance_id) references goal_instances (workspace_id, world_id, worldline_id, id)"],
   ["record_goal_definitions", "world_id, worldline_id, record_id) references records (workspace_id, world_id, worldline_id, id)"],
   ["record_goal_commands", "world_id, worldline_id, record_id, goal_instance_id) references goal_instances (workspace_id, world_id, worldline_id, record_id, id)"],
   ["record_goal_restore_admissions", "world_id, worldline_id, record_id) references records (workspace_id, world_id, worldline_id, id)"],
@@ -303,6 +323,9 @@ test("forced row-level security denies unscoped workspace access", () => {
 
   for (const tableName of scopedTables) {
     if ([
+      "goal_content_instance_bindings",
+      "goal_content_write_admissions",
+      "realmworld_command_materializations",
       "memory_conclusions",
       "skill_definitions",
       "character_skills",
@@ -355,6 +378,7 @@ test("forced row-level security denies unscoped workspace access", () => {
       "turn_cancel_requests",
       "story_node_instances",
       "story_unlock_ledger",
+  "story_definition_bindings",
       "projects",
       "project_milestones",
       "project_story_links",
@@ -366,6 +390,8 @@ test("forced row-level security denies unscoped workspace access", () => {
       "obligation_settlements",
       "committed_fact_commands",
       "performance_assessments",
+  "performance_evidence_snapshots",
+  "performance_evidence_transport_provenance",
       "member_relationship_revisions",
       "record_goal_definitions",
       "record_goal_commands", "record_goal_restore_admissions",
@@ -1003,4 +1029,159 @@ test("T-series authorization provenance chapter matches the real grant surface",
   assert.match(tSeriesSql, /GRANT INSERT \([\s\S]*?\) ON scenes TO realm_runtime/);
   assert.match(tSeriesSql, /GRANT UPDATE \(settings\) ON worlds TO realm_runtime/);
   assert.match(tSeriesSql, /GRANT UPDATE \(ui_language\) ON accounts TO realm_runtime/);
+});
+
+test("0077 adds a transaction-bound group capability without new tables or wider runtime DML", () => {
+  const selected = migrationPaths.flatMap((path, index) => path.endsWith("/0077_grouped_record_goal_restore_capability.sql") ? [index] : []);
+  assert.equal(selected.length, 1);
+  const migration = canonical(migrationSql[selected[0]]);
+  assert.doesNotMatch(migration, /create table/);
+  assert.match(migration, /alter table record_goal_restore_admissions/);
+  for (const column of ["group_root", "body_commitment", "plan_commitment", "group_plan", "target_story_id", "target_status"]) assert.match(migration, new RegExp(`add column ${column}`));
+  assert.match(migration, /admission\.transaction_id is distinct from pg_current_xact_id\(\)/);
+  assert.match(migration, /public\.realm_capability_session_actor\(p_proof,p_workspace\)/);
+  assert.match(migration, /public\.membership_assert_world_owner\(p_workspace,p_world,actor\)/);
+  assert.match(migration, /deferrable initially deferred/);
+  assert.doesNotMatch(migration, /grant (?:all|insert|update|delete).*to realm_runtime/);
+  for (const signature of ["record_goal_restore_group_prepare(text,text,text,text,text,text,jsonb)", "record_goal_restore_group_definitions(text,text,text,text,text,jsonb)"]) {
+    assert.ok(migration.includes(`owner to realm_goal_authoring`));
+    assert.ok(migration.includes(`revoke all on function ${signature} from public`));
+    assert.ok(migration.includes(`grant execute on function ${signature} to realm_runtime`));
+  }
+});
+
+test("0079 pins complete schema identity and adds only nullable restore delivery classification", () => {
+  const expected = [
+  "0001_runtime_contract.sql",
+  "0002_runtime_contract_hardening.sql",
+  "0003_runtime_repository.sql",
+  "0004_runtime_security_hardening.sql",
+  "0005_hybrid_memory.sql",
+  "0006_action_state_ledger.sql",
+  "0007_dynamic_visibility_policies.sql",
+  "0008_record_timeline_kind.sql",
+  "0009_memory_m3_completion.sql",
+  "0010_world_governance.sql",
+  "0011_worldline_merge_semantic_propagation_jobs.sql",
+  "0012_accounts.sql",
+  "0013_membership_insert_grant.sql",
+  "0014_scene_crystallization_grants.sql",
+  "0015_account_ui_language.sql",
+  "0016_world_files.sql",
+  "0017_account_last_opened.sql",
+  "0018_account_last_opened_fk_set_null.sql",
+  "0019_record_first_nights.sql",
+  "0020_record_self_play_sessions.sql",
+  "0021_world_admin.sql",
+  "0022_worldline_merge_grants.sql",
+  "0023_library_runtime_grants.sql",
+  "0024_graph_invalidation_events.sql",
+  "0025_propagation_topology_semantic_scope.sql",
+  "0026_canon_security_audience.sql",
+  "0027_propagation_node_audiences.sql",
+  "0028_propagation_node_audiences_owner_append.sql",
+  "0029_record_scene_tension.sql",
+  "0030_character_instance_state.sql",
+  "0031_keen_insight_discovery.sql",
+  "0032_character_activity_grants.sql",
+  "0033_base_skill_metadata_grant.sql",
+  "0034_revoke_broad_skill_metadata_grant.sql",
+  "0035_keen_insight_concrete_discovery.sql",
+  "0036_keen_insight_location_context.sql",
+  "0037_record_archive_grant.sql",
+  "0038_remove_base_skill_hidden_clue.sql",
+  "0039_scene_weather_snapshot.sql",
+  "0040_scene_display_time_snapshot.sql",
+  "0041_article_qualification_and_import_entries.sql",
+  "0042_realm_transfer_and_import_jobs.sql",
+  "0043_propagation_node_audience_archived_guard.sql",
+  "0044_record_branch_timeline_kind.sql",
+  "0045_lobby_rooms.sql",
+  "0046_lobby_room_world_link.sql",
+  "0047_lobby_host_lease.sql",
+  "0048_scene_image_generations.sql",
+  "0049_scene_image_mode.sql",
+  "0050_scene_image_requests.sql",
+  "0051_account_password_hash.sql",
+  "0052_scene_image_queue_lease_fencing.sql",
+  "0053_membership_capability.sql",
+  "0054_world_version_identity.sql",
+  "0055_goal_runtime.sql",
+  "0056_runtime_save_restore_grants.sql",
+  "0057_realmworld_record_binding.sql",
+  "0058_durable_job_queue.sql",
+  "0059_world_commands.sql",
+  "0060_goal_scope_terminal_lifecycle.sql",
+  "0061_story_graph_runtime.sql",
+  "0062_project_finance_foundation.sql",
+  "0063_genesis_creation_requests.sql",
+  "0064_record_turn_jobs.sql",
+  "0065_funding_obligations.sql",
+  "0066_committed_fact_commands.sql",
+  "0067_member_relationship_revisions.sql",
+  "0068_inventory_grant_command.sql",
+  "0069_record_goal_authoring.sql",
+  "0070_record_goal_authoring_capability.sql",
+  "0071_record_narrative_state.sql",
+  "0072_record_goal_evolution_capability.sql",
+  "0073_record_goal_genesis_capability.sql",
+  "0074_record_goal_restore_capability.sql",
+  "0075_record_goal_branch_capability.sql",
+  "0076_story_definition_bindings.sql",
+  "0077_grouped_record_goal_restore_capability.sql",
+  "0078_bridge_command_write_authorization.sql",
+  "0079_restored_outbox_delivery_origin.sql",
+  "0080_realmworld_command_materializations.sql",
+  "0081_command_policy_record_lock.sql",
+  "0082_performance_evidence_snapshots.sql",
+  "0083_goal_content_instance_bindings.sql",
+  "0084_performance_evidence_transport_provenance.sql",
+  "0085_runtime_performance_transport_body_v3.sql",
+  "0086_unsigned_import_declaration_guard.sql",
+];
+  const files = readdirSync(new URL("../database/postgres/migrations/", import.meta.url)).filter(n=>n.endsWith(".sql")).sort();
+  assert.deepEqual(files, expected);
+  assert.deepEqual(migrationPaths.map(path=>path.split("/").at(-1)), expected);
+  const marker = canonical(migrationSql[78]);
+  assert.match(marker, /ALTER TABLE public\.outbox ADD COLUMN restore_delivery_kind text;/i);
+  assert.match(marker, /restore_delivery_kind IS NULL OR \( restore_delivery_kind = 'record-events-v1' AND turn_run_id IS NULL AND topic = 'record.events.committed' \)/i);
+  assert.match(marker, /GRANT INSERT \(restore_delivery_kind\) ON public\.outbox TO realm_runtime;/i);
+  assert.doesNotMatch(marker, /DEFAULT|NOT NULL|UPDATE|DELETE|SECURITY DEFINER|CREATE TABLE|CREATE POLICY|realm_control|realm_transfer/i);
+  assert.equal((marker.match(/grant /g)??[]).length, 1);
+});
+
+
+test("0080 command policy map has complete scoped immutable identity and narrow runtime access", () => {
+  const sql = canonical(migrationSql[79]);
+  const body = tableBody("realmworld_command_materializations");
+  for (const columns of ["workspace_id, world_id, worldline_id, project_key, milestone_key", "workspace_id, world_id, worldline_id, milestone_id"]) assert.ok(body.includes(columns));
+  for (const target of ["project_milestones", "records", "project_story_links"]) assert.match(sql, new RegExp(`references ${target}\\s*\\(`));
+  assert.match(sql, /before update or delete on realmworld_command_materializations/);
+  assert.match(sql, /raise exception 'command materializations are immutable'/);
+  assert.match(sql, /enable row level security/);
+  assert.match(sql, /force row level security/);
+  assert.match(sql, /with check \(workspace_id = realm_current_workspace_id\(\)\)/);
+  assert.match(sql, /grant select, insert on realmworld_command_materializations to realm_runtime/);
+  assert.doesNotMatch(sql, /grant (update|delete)|security definer|0081|0082/);
+});
+
+test("0086 unsigned import guard preserves the complete prior bootstrap and existing privilege surface", () => {
+  const oldSource = migrationSql[migrationPaths.findIndex((p) => p.endsWith("0042_realm_transfer_and_import_jobs.sql"))];
+  const source = migrationSql[migrationPaths.findIndex((p) => p.endsWith("0086_unsigned_import_declaration_guard.sql"))];
+  const extract = (s) => s.match(/CREATE OR REPLACE FUNCTION realm_import_begin_bootstrap\([\s\S]*?\$realm_import_begin_bootstrap\$;/)?.[0];
+  const body = extract(source);
+  assert.ok(body);
+  const start = body.indexOf("  -- Unsigned snapshot metadata cannot mint declaration authority.");
+  const end = body.indexOf("  -- 孤儿清理（C3：");
+  assert.ok(start > 0 && end > start);
+  const guard = body.slice(start, end);
+  assert.ok(start > body.indexOf("IF NOT FOUND THEN"));
+  assert.match(guard, /settings_doc := CASE WHEN jsonb_typeof\(p_world_row -> 'settings'\) = 'string'/);
+  assert.match(guard, /settings_doc \? 'declaredEvents'/);
+  assert.match(guard, /ERRCODE = '23514'/);
+  assert.match(guard, /MESSAGE = 'IMPORT_DECLARATION_METADATA_UNTRUSTED'/);
+  const restored = (body.slice(0, start) + body.slice(end)).replace("  settings_doc jsonb;\n", "");
+  assert.equal(restored, extract(oldSource));
+  assert.match(source, /to_regprocedure\('public\.realm_import_begin_bootstrap\(text,text,bigint,text,jsonb\)'\) IS NULL/);
+  assert.doesNotMatch(source, /^\s*(?:GRANT|REVOKE|ALTER|CREATE TABLE|CREATE ROLE)\b/gim);
 });

@@ -18,6 +18,7 @@ import {
   createPostgresRuntimeRepository,
   seedPostgresDemo,
 } from "../database/postgres/public.ts";
+import { trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
 import {
   enqueueGoalAssessmentJobsForCommittedEvents,
 } from "../database/postgres/goal-runtime-materialization.ts";
@@ -29,6 +30,7 @@ import {
 import {
   goalAssessmentJobIdFor,
   goalInstanceIdFor,
+  type GoalDefinition,
 } from "../modules/goals/public.ts";
 import {
   executeTurn,
@@ -80,21 +82,28 @@ interface Fixture {
   calendarId: string;
 }
 
-async function createFixtureDatabase(t: test.TestContext): Promise<Fixture> {
+async function createFixtureDatabase(t: test.TestContext): Promise<Fixture & {
+  deferCleanup: (close: () => Promise<unknown>) => void;
+}> {
+  const close = fixtureCleanup(t);
   const adminUrl = requireLoopbackUrl(adminConnectionString!);
   const databaseName = `realm_branch_${randomUUID().replaceAll("-", "")}`;
   const maintenanceUrl = new URL(adminUrl);
   maintenanceUrl.pathname = "/postgres";
   const maintenance = new pg.Client({ connectionString: maintenanceUrl.href });
+  close(() => maintenance.end());
   await maintenance.connect();
   await maintenance.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+  close(() => maintenance.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`));
 
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
   const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 4 });
+  close(() => ownerPool.end());
   const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
   runtimeUrl.pathname = `/${databaseName}`;
   const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
+  close(() => runtimePool.end());
 
   const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
   const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
@@ -102,7 +111,7 @@ async function createFixtureDatabase(t: test.TestContext): Promise<Fixture> {
   process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
   delete process.env.REALM_ACCESS_TOKEN;
 
-  t.after(async () => {
+  close(async () => {
     await endSharedRuntimePools();
     if (previousAccessToken === undefined) {
       delete process.env.REALM_ACCESS_TOKEN;
@@ -114,12 +123,6 @@ async function createFixtureDatabase(t: test.TestContext): Promise<Fixture> {
     } else {
       process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeUrl;
     }
-    await ownerPool.end();
-    await runtimePool.end();
-    await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
-    );
-    await maintenance.end();
   });
 
   // 全链迁移（0001–0044，按文件名排序，与本仓 runner 同序）。
@@ -167,6 +170,7 @@ async function createFixtureDatabase(t: test.TestContext): Promise<Fixture> {
   );
   const row = ids.rows[0]!;
   return {
+    deferCleanup: close,
     ownerPool,
     runtimePool,
     worldId: world.id,
@@ -680,8 +684,21 @@ test(
   { skip: !adminConnectionString || !runtimeConnectionString, timeout: 300_000 },
   async (t) => {
     const fixture = await createFixtureDatabase(t);
-    const runtimeLibrary = createPostgresLibraryService(fixture.runtimePool);
-    const ownerLibrary = createPostgresLibraryService(fixture.ownerPool);
+    const definitions: GoalDefinition[] = [
+      { goalKey: "ack-tide", policyVersion: "v1", mode: "deterministic" as const, visible: true,
+        rubric: { kind: "event_count" as const, eventKind: "narration.committed", progressKey: "narrations", threshold: 1 }, outcome: {} },
+      { goalKey: "harbor-omen", policyVersion: "v2", mode: "semantic" as const, visible: false,
+        rubric: { kind: "semantic" as const, promptKey: "harbor-omen" }, outcome: {} },
+      { goalKey: "settled-past", policyVersion: "v1", mode: "deterministic" as const, visible: true,
+        rubric: { kind: "event_count" as const, eventKind: "narration.committed", progressKey: "narrations", threshold: 2 }, outcome: { result: "done" } },
+      { goalKey: "boom-goal", policyVersion: "v1", mode: "deterministic" as const, visible: true,
+        rubric: { kind: "event_count" as const, eventKind: "narration.committed", progressKey: "narrations", threshold: 1 }, outcome: {} },
+    ];
+    const trusted = await trustedGoalFixture(t, { worldId: fixture.worldId, worldVersion: "1.0.0", goals: definitions });
+    await fixture.ownerPool.query("UPDATE worlds SET world_version='1.0.0' WHERE workspace_id=$1 AND id=$2", [WS, fixture.worldId]);
+    await fixture.ownerPool.query("UPDATE records SET world_version='1.0.0' WHERE workspace_id=$1 AND id=$2", [WS, fixture.recordId]);
+    const runtimeLibrary = createPostgresLibraryService(fixture.runtimePool, fixture.runtimePool, { resolveGoalSource: trusted.resolveSource });
+    const ownerLibrary = createPostgresLibraryService(fixture.ownerPool, fixture.ownerPool, { resolveGoalSource: trusted.resolveSource });
 
     const eventId1 = await commitSyntheticEvent(fixture.ownerPool, fixture, {
       tick: 40, ordinal: 1, recordOrdinal: 1, content: "潮起。",
@@ -701,23 +718,14 @@ test(
     const activeGoalId = goalInstanceIdFor(sourceGoalScope, "ack-tide");
     const semanticGoalId = goalInstanceIdFor(sourceGoalScope, "harbor-omen");
     const settledGoalId = goalInstanceIdFor(sourceGoalScope, "settled-past");
-    await fixture.ownerPool.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version, completed_at
-       ) VALUES
-         ($1, $2, $3, $4, $5, 'ack-tide', 'active', 2,
-          '{"narrations":1}'::jsonb, NULL, 'v1', NULL),
-         ($1, $2, $3, $4, $6, 'harbor-omen', 'active', 0,
-          '{}'::jsonb, NULL, 'v2', NULL),
-         ($1, $2, $3, $4, $7, 'settled-past', 'completed', 1,
-          '{"narrations":2}'::jsonb, '{"result":"done"}'::jsonb, 'v1',
-          '2026-08-13T06:30:00.000Z')`,
-      [
-        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
-        activeGoalId, semanticGoalId, settledGoalId,
-      ],
-    );
+    const materializedIds = await trusted.materialize(fixture.ownerPool, fixture.runtimePool,
+      { kind: "record", ...sourceGoalScope }, definitions.slice(0, 3));
+    assert.deepEqual(materializedIds, [activeGoalId, semanticGoalId, settledGoalId]);
+    await fixture.ownerPool.query(`UPDATE goal_instances SET revision=2,progress='{"narrations":1}'::jsonb
+      WHERE workspace_id=$1 AND id=$2`, [WS, activeGoalId]);
+    await fixture.ownerPool.query(`UPDATE goal_instances SET state='completed',revision=1,
+      progress='{"narrations":2}'::jsonb,outcome='{"result":"done"}'::jsonb,completed_at='2026-08-13T06:30:00.000Z'
+      WHERE workspace_id=$1 AND id=$2`, [WS, settledGoalId]);
     const sourceJobId = goalAssessmentJobIdFor(WS, settledGoalId, eventId2);
     await fixture.ownerPool.query(
       `INSERT INTO goal_assessment_jobs (
@@ -1060,17 +1068,9 @@ test(
     );
 
     // ---- 克隆写入失败（identity/约束不符的故障注入）即整体回滚 ----
-    await fixture.ownerPool.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version
-       ) VALUES ($1, $2, $3, $4, $5, 'boom-goal', 'active', 0,
-                 '{}'::jsonb, NULL, 'v1')`,
-      [
-        WS, fixture.worldId, fixture.worldlineId, fixture.recordId,
-        goalInstanceIdFor(sourceGoalScope, "boom-goal"),
-      ],
-    );
+    const [boomId] = await trusted.materialize(fixture.ownerPool, fixture.runtimePool,
+      { kind: "record", ...sourceGoalScope }, [definitions[3]!]);
+    assert.equal(boomId, goalInstanceIdFor(sourceGoalScope, "boom-goal"));
     await fixture.ownerPool.query(
       `CREATE OR REPLACE FUNCTION realm_test_fail_goal_clone()
        RETURNS trigger LANGUAGE plpgsql AS $fn$
@@ -1087,13 +1087,9 @@ test(
        BEFORE INSERT ON goal_instances
        FOR EACH ROW EXECUTE FUNCTION realm_test_fail_goal_clone()`,
     );
-    t.after(async () => {
-      await fixture.ownerPool.query(
-        `DROP TRIGGER IF EXISTS realm_test_fail_goal_clone ON goal_instances`,
-      ).catch(() => undefined);
-      await fixture.ownerPool.query(
-        `DROP FUNCTION IF EXISTS realm_test_fail_goal_clone()`,
-      ).catch(() => undefined);
+    fixture.deferCleanup(async () => {
+      await fixture.ownerPool.query(`DROP TRIGGER IF EXISTS realm_test_fail_goal_clone ON goal_instances`);
+      await fixture.ownerPool.query(`DROP FUNCTION IF EXISTS realm_test_fail_goal_clone()`);
     });
     const beforeRollback = await countTopology();
     await assert.rejects(

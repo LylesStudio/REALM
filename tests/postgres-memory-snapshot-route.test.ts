@@ -20,9 +20,10 @@ import {
 import {
   POSTGRES_DEMO_IDS,
   createPostgresCharacterMemoryRepository,
+  createPostgresRecordRuntimeScopeRepository,
   seedPostgresDemo,
 } from "../database/postgres/public.ts";
-import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { endSharedRuntimePools, getSharedRuntimePool } from "../app/api/world-scope.ts";
 import { lexicalEmbedding } from "../modules/memory/public.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
 
@@ -55,6 +56,8 @@ const MIGRATIONS = [
   "0020_record_self_play_sessions.sql",
   "0021_world_admin.sql",
   "0022_worldline_merge_grants.sql",
+  "0025_propagation_topology_semantic_scope.sql",
+  "0026_canon_security_audience.sql",
     "0039_scene_weather_snapshot.sql",
       "0040_scene_display_time_snapshot.sql",
   "0054_world_version_identity.sql",
@@ -74,6 +77,12 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
+function observePoolEnds(pool: pg.Pool): Promise<void>[] {
+  const ends: Promise<void>[] = [];
+  pool.on("connect", client => ends.push(new Promise<void>(resolve => client.once("end", resolve))));
+  return ends;
+}
+
 test(
   "T10-B4: snapshot/delta routes generate server-side scopes and honor epoch staleness",
   { skip: !adminConnectionString || !runtimeConnectionString },
@@ -89,6 +98,7 @@ test(
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
     const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerEnds = observePoolEnds(ownerPool);
     const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
     runtimeUrl.pathname = `/${databaseName}`;
 
@@ -96,9 +106,12 @@ test(
     const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
     process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
     delete process.env.REALM_ACCESS_TOKEN;
+    const routePool = getSharedRuntimePool(runtimeUrl.href);
+    const routeEnds = observePoolEnds(routePool);
 
     t.after(async () => {
       await endSharedRuntimePools();
+      await Promise.all(routeEnds);
       if (previousAccessToken === undefined) {
         delete process.env.REALM_ACCESS_TOKEN;
       } else {
@@ -110,6 +123,9 @@ test(
         process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeUrl;
       }
       await ownerPool.end();
+      await Promise.all(ownerEnds);
+      const remaining = await maintenance.query("SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [databaseName]);
+      assert.equal(remaining.rows.length, 0, "fixture backends must end before DROP");
       await maintenance.query(
         `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
       );
@@ -124,6 +140,20 @@ test(
       await ownerPool.query(sql);
     }
     await seedPostgresDemo(ownerPool);
+
+    // This nonempty production read fails if the Canon dependency query falls
+    // back to empty, even when the snapshot route itself still succeeds.
+    await ownerPool.query(`INSERT INTO world_entities(workspace_id,world_id,worldline_id,id,entity_kind,name)
+      VALUES($1,$2,$3,'c4_snapshot_canon_entity','setting','C4 Canon beacon')`,
+    [POSTGRES_DEMO_IDS.workspace,POSTGRES_DEMO_IDS.world,POSTGRES_DEMO_IDS.worldline]);
+    await ownerPool.query(`INSERT INTO world_claims(workspace_id,world_id,worldline_id,id,subject_entity_id,predicate,object_value,scope,truth_status)
+      VALUES($1,$2,$3,'c4_snapshot_canon_claim','c4_snapshot_canon_entity','signals','C4 snapshot Canon positive','world','world_canon')`,
+    [POSTGRES_DEMO_IDS.workspace,POSTGRES_DEMO_IDS.world,POSTGRES_DEMO_IDS.worldline]);
+    const canonScope = await createPostgresRecordRuntimeScopeRepository(routePool).resolve({
+      workspaceId: POSTGRES_DEMO_IDS.workspace, principalId: POSTGRES_DEMO_IDS.principal, recordId: POSTGRES_DEMO_IDS.record,
+    });
+    assert.ok(canonScope);
+    assert.ok(canonScope.brief.canon.includes("C4 snapshot Canon positive"), "real Canon loader must return the eligible claim");
 
     const recordScope = {
       workspaceId: POSTGRES_DEMO_IDS.workspace,

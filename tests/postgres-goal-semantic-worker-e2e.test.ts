@@ -7,7 +7,6 @@ import {
   type GoalAssessmentEnqueueInput,
   type PostgresGoalAssessmentJobQueue,
 } from "../database/postgres/goal-assessment-job-queue.ts";
-import { POSTGRES_DEMO_IDS } from "../database/postgres/public.ts";
 import { runGoalAssessmentWorkerCycle } from "../modules/goals/assessment-worker-runtime.ts";
 import type { ClaimedGoalAssessmentJob } from "../modules/goals/assessment-worker.ts";
 import { createModelGoalJudge } from "../modules/goals/model-judge.ts";
@@ -22,6 +21,8 @@ import {
   type ModelGateway,
 } from "../modules/inference/public.ts";
 import type { JsonValue } from "../modules/runtime/public.ts";
+
+import { cloneGoalRecordFixture, trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -43,40 +44,33 @@ function semanticDefinition(goalKey: string): GoalDefinition {
   };
 }
 
-async function insertGoalInstance(
-  ownerPool: pg.Pool,
-  goalInstanceId: string,
-  goalKey: string,
-): Promise<void> {
-  await ownerPool.query(
-    `INSERT INTO goal_instances (
-       workspace_id, world_id, worldline_id, record_id, id, goal_key,
-       state, revision, progress, outcome, policy_version
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, '{}'::jsonb, NULL, 'semantic-v1')`,
-    [
-      POSTGRES_DEMO_IDS.workspace,
-      POSTGRES_DEMO_IDS.world,
-      POSTGRES_DEMO_IDS.worldline,
-      POSTGRES_DEMO_IDS.record,
-      goalInstanceId,
-      goalKey,
-    ],
-  );
+async function prepareGoalInstance(
+  t: test.TestContext, ownerPool: pg.Pool, runtimePool: pg.Pool, definition: GoalDefinition,
+) {
+  const ids = await cloneGoalRecordFixture(ownerPool);
+  const trusted = await trustedGoalFixture(t, { worldId: ids.world, worldVersion: "1.0.0", goals: [definition] });
+  const [goalInstanceId] = await trusted.materialize(ownerPool, runtimePool, {
+    kind: "record", workspaceId: ids.workspace, worldId: ids.world, worldlineId: ids.worldline, recordId: ids.record,
+  });
+  assert.ok(goalInstanceId);
+  return { ids, goalInstanceId, resolveDefinition: trusted.resolveDefinition };
 }
 
 function enqueueInput(
   goalInstanceId: string,
   jobId: string,
+  goalKey: string,
+  ids: Awaited<ReturnType<typeof cloneGoalRecordFixture>>,
   sourceEventId: string,
 ): GoalAssessmentEnqueueInput {
   return {
     jobId,
-    workspaceId: POSTGRES_DEMO_IDS.workspace,
-    worldId: POSTGRES_DEMO_IDS.world,
-    worldlineId: POSTGRES_DEMO_IDS.worldline,
-    recordId: POSTGRES_DEMO_IDS.record,
+    workspaceId: ids.workspace,
+    worldId: ids.world,
+    worldlineId: ids.worldline,
+    recordId: ids.record,
     goalInstanceId,
-    goalKey: goalInstanceId,
+    goalKey,
     sourceEventId,
     input: { trigger: "semantic-e2e" },
     availableAt: now(),
@@ -111,24 +105,24 @@ function toGoalEvent(row: CommittedEventRow): GoalEvent {
   };
 }
 
-async function readCommittedEvents(ownerPool: pg.Pool): Promise<GoalEvent[]> {
+async function readCommittedEvents(ownerPool: pg.Pool, ids: Awaited<ReturnType<typeof cloneGoalRecordFixture>>): Promise<GoalEvent[]> {
   const result = await ownerPool.query<CommittedEventRow>(
     `SELECT id, record_id, record_version, record_ordinal, event_kind, payload
      FROM events
      WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND record_id = $4
      ORDER BY record_ordinal, id`,
     [
-      POSTGRES_DEMO_IDS.workspace,
-      POSTGRES_DEMO_IDS.world,
-      POSTGRES_DEMO_IDS.worldline,
-      POSTGRES_DEMO_IDS.record,
+      ids.workspace,
+      ids.world,
+      ids.worldline,
+      ids.record,
     ],
   );
   return result.rows.map(toGoalEvent);
 }
 
 async function readRecordHead(
-  ownerPool: pg.Pool,
+  ownerPool: pg.Pool, ids: Awaited<ReturnType<typeof cloneGoalRecordFixture>>,
 ): Promise<{ recordVersion: number; ordinal: number }> {
   const result = await ownerPool.query<{
     record_version: string | number;
@@ -138,10 +132,10 @@ async function readRecordHead(
      FROM record_heads
      WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND record_id = $4`,
     [
-      POSTGRES_DEMO_IDS.workspace,
-      POSTGRES_DEMO_IDS.world,
-      POSTGRES_DEMO_IDS.worldline,
-      POSTGRES_DEMO_IDS.record,
+      ids.workspace,
+      ids.world,
+      ids.worldline,
+      ids.record,
     ],
   );
   assert.equal(result.rowCount, 1, "the demo Record head must exist");
@@ -195,39 +189,30 @@ function assertNoLeakedSecrets(content: string, leaseOwner: string): void {
   }
 }
 
-async function cleanup(ownerPool: pg.Pool, goalInstanceIds: readonly string[]): Promise<void> {
-  for (const goalInstanceId of goalInstanceIds) {
-    await ownerPool.query(
-      `DELETE FROM goal_instances WHERE workspace_id = $1 AND id = $2`,
-      [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
-    );
-  }
-}
 
 test(
   "semantic Goal e2e: durable claim → ModelGateway Judge adapter → settle writes exactly one verified transition",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_sem_${suffix}`;
+    const goalKey = `goal_sem_${suffix}`;
     const jobId = `goal_job_sem_${suffix}`;
     const leaseOwner = `test-semantic-worker-${suffix}`;
-    const definition = semanticDefinition(goalInstanceId);
-    t.after(async () => {
-      await cleanup(ownerPool, [goalInstanceId]);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+    const definition = semanticDefinition(goalKey);
 
-    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
 
     // Real committed events/head from the disposable cluster — never assumed
     // constants, because sibling suites legitimately advance this record.
-    const committedEvents = await readCommittedEvents(ownerPool);
+    const committedEvents = await readCommittedEvents(ownerPool, POSTGRES_DEMO_IDS);
     assert.ok(committedEvents.length > 0, "the demo Record must have committed events");
-    const head = await readRecordHead(ownerPool);
+    const head = await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
     const evidenceEvent = committedEvents[0]!;
     const sourceEventId = committedEvents[committedEvents.length - 1]!.eventId;
 
@@ -238,7 +223,7 @@ test(
       leaseDurationMs: 30_000,
     });
     assert.equal(
-      await queue.enqueue(enqueueInput(goalInstanceId, jobId, sourceEventId)),
+      await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS, sourceEventId)),
       "inserted",
     );
 
@@ -438,7 +423,7 @@ test(
     );
 
     // The record head advanced by exactly the committed transition.
-    const advancedHead = await readRecordHead(ownerPool);
+    const advancedHead = await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
     assert.deepEqual(advancedHead, {
       recordVersion: head.recordVersion + 1,
       ordinal: head.ordinal + 1,
@@ -448,7 +433,7 @@ test(
     // duplicates the transition/ledger rows.
     const idleReports = await runGoalAssessmentWorkerCycle({
       slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       judge,
       now: now(),
     });
@@ -469,7 +454,7 @@ test(
     assert.equal(assessmentCount.rows[0]?.n, 1);
     // The durable dedupe key (workspace, goal instance, source event) holds.
     assert.equal(
-      await queue.enqueue(enqueueInput(goalInstanceId, `goal_job_sem_dup_${suffix}`, sourceEventId)),
+      await queue.enqueue(enqueueInput(goalInstanceId, `goal_job_sem_dup_${suffix}`, goalKey, POSTGRES_DEMO_IDS, sourceEventId)),
       "existing",
     );
   },
@@ -479,23 +464,22 @@ test(
   "semantic Goal e2e: rejected verdict settles with an immutable ledger row and no Goal fact",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_sem_rej_${suffix}`;
+    const goalKey = `goal_sem_rej_${suffix}`;
     const jobId = `goal_job_sem_rej_${suffix}`;
     const leaseOwner = `test-semantic-worker-${suffix}`;
-    const definition = semanticDefinition(goalInstanceId);
-    t.after(async () => {
-      await cleanup(ownerPool, [goalInstanceId]);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+    const definition = semanticDefinition(goalKey);
 
-    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
-    const committedEvents = await readCommittedEvents(ownerPool);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
+    const committedEvents = await readCommittedEvents(ownerPool, POSTGRES_DEMO_IDS);
     assert.ok(committedEvents.length > 0);
-    const headBefore = await readRecordHead(ownerPool);
+    const headBefore = await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
     const evidenceEvent = committedEvents[0]!;
     const sourceEventId = committedEvents[committedEvents.length - 1]!.eventId;
 
@@ -506,7 +490,7 @@ test(
       leaseDurationMs: 30_000,
     });
     assert.equal(
-      await queue.enqueue(enqueueInput(goalInstanceId, jobId, sourceEventId)),
+      await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS, sourceEventId)),
       "inserted",
     );
 
@@ -524,7 +508,7 @@ test(
 
     const reports = await runGoalAssessmentWorkerCycle({
       slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       judge,
       now: now(),
     });
@@ -623,13 +607,13 @@ test(
       [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
     );
     assert.equal(transitionCount.rows[0]?.n, 0);
-    assert.deepEqual(await readRecordHead(ownerPool), headBefore);
+    assert.deepEqual(await readRecordHead(ownerPool, POSTGRES_DEMO_IDS), headBefore);
 
     // Re-running the cycle neither re-claims the settled job nor duplicates
     // the ledger row.
     const idleReports = await runGoalAssessmentWorkerCycle({
       slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       judge,
       now: now(),
     });
@@ -646,19 +630,22 @@ test(
 
 test('semantic provider recovery retries the same durable job with backoff, no synthetic fact and one final transition',
   {skip:!adminConnectionString || !runtimeConnectionString ? skipReason:false,timeout:120_000},async t=>{
+  const close=fixtureCleanup(t);
   const ownerPool=new pg.Pool({connectionString:adminConnectionString!,max:2});
+  close(()=>ownerPool.end());
   const runtimePool=new pg.Pool({connectionString:runtimeConnectionString!,max:2});
-  const goalInstanceId=`goal_recovery_${randomUUID()}`;
+  close(()=>runtimePool.end());
+  const goalKey = `goal_recovery_${randomUUID()}`;
   const jobId=`job_recovery_${randomUUID()}`;
-  const definition=semanticDefinition(goalInstanceId);
-  t.after(async()=>{await cleanup(ownerPool,[goalInstanceId]);await runtimePool.end();await ownerPool.end();});
-  await insertGoalInstance(ownerPool,goalInstanceId,definition.goalKey);
-  const committed=await readCommittedEvents(ownerPool);
+  const definition=semanticDefinition(goalKey);
+
+  const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
+  const committed=await readCommittedEvents(ownerPool, POSTGRES_DEMO_IDS);
   const source=committed[committed.length-1]!.eventId;
-  const headBefore=await readRecordHead(ownerPool);
+  const headBefore=await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
   const queue=createPostgresGoalAssessmentJobQueue({pool:runtimePool,workspaceId:POSTGRES_DEMO_IDS.workspace,
     leaseOwner:`recover-${randomUUID()}`,retryJudgeFailures:true,retryDelayMs:1000});
-  await queue.enqueue(enqueueInput(goalInstanceId,jobId,source));
+  await queue.enqueue(enqueueInput(goalInstanceId,jobId,goalKey,POSTGRES_DEMO_IDS,source));
   let available=false;
   const gateway=fakeGateway(async()=>{
     if(!available) throw new ModelProviderError('MODEL_REQUEST_FAILED','synthetic fixture outage');
@@ -666,7 +653,7 @@ test('semantic provider recovery retries the same durable job with backoff, no s
   });
   const judge=createModelGoalJudge({getGateway:async()=>gateway});
   const before=now();
-  const cycle=(at:string)=>runGoalAssessmentWorkerCycle({slots:[{workspaceId:POSTGRES_DEMO_IDS.workspace,repository:queue}],resolveDefinition:async()=>definition,judge,now:at});
+  const cycle=(at:string)=>runGoalAssessmentWorkerCycle({slots:[{workspaceId:POSTGRES_DEMO_IDS.workspace,repository:queue}],resolveDefinition,judge,now:at});
   assert.deepEqual((await cycle(before)).get(POSTGRES_DEMO_IDS.workspace),{kind:'failed',code:'GOAL_JUDGE_FAILED'});
   const pending=(await ownerPool.query(`SELECT state,completed_at,last_error_code,lease_owner,available_at FROM goal_assessment_jobs WHERE id=$1`,[jobId])).rows[0];
   assert.equal(pending.state,'retryable');
@@ -674,7 +661,7 @@ test('semantic provider recovery retries the same durable job with backoff, no s
   assert.equal(pending.lease_owner,null);
   assert.equal(pending.last_error_code,'GOAL_JUDGE_FAILED');
   assert.ok(new Date(pending.available_at).getTime()>Date.parse(before));
-  assert.deepEqual(await readRecordHead(ownerPool),headBefore);
+  assert.deepEqual(await readRecordHead(ownerPool, POSTGRES_DEMO_IDS),headBefore);
   assert.equal((await cycle(before)).get(POSTGRES_DEMO_IDS.workspace)?.kind,'idle');
   available=true;
   const later=new Date(new Date(pending.available_at).getTime()+1).toISOString();
@@ -689,25 +676,24 @@ test(
   "semantic Goal e2e: provider failure fails closed with GOAL_JUDGE_FAILED and writes no Goal fact",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_sem_fail_${suffix}`;
+    const goalKey = `goal_sem_fail_${suffix}`;
     const jobId = `goal_job_sem_fail_${suffix}`;
     const leaseOwner = `test-semantic-worker-${suffix}`;
-    const definition = semanticDefinition(goalInstanceId);
+    const definition = semanticDefinition(goalKey);
     const providerSecret = `synthetic-provider-secret-${suffix}`;
     const providerEndpoint = `https://synthetic.invalid/model/${suffix}`;
-    t.after(async () => {
-      await cleanup(ownerPool, [goalInstanceId]);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
 
-    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
-    const committedEvents = await readCommittedEvents(ownerPool);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
+    const committedEvents = await readCommittedEvents(ownerPool, POSTGRES_DEMO_IDS);
     assert.ok(committedEvents.length > 0);
-    const headBefore = await readRecordHead(ownerPool);
+    const headBefore = await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
     const sourceEventId = committedEvents[committedEvents.length - 1]!.eventId;
 
     const queue = createPostgresGoalAssessmentJobQueue({
@@ -717,7 +703,7 @@ test(
       leaseDurationMs: 30_000,
     });
     assert.equal(
-      await queue.enqueue(enqueueInput(goalInstanceId, jobId, sourceEventId)),
+      await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS, sourceEventId)),
       "inserted",
     );
 
@@ -733,7 +719,7 @@ test(
 
     const reports = await runGoalAssessmentWorkerCycle({
       slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       judge,
       now: now(),
     });
@@ -803,7 +789,7 @@ test(
       [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
     );
     assert.equal(transitionCount.rows[0]?.n, 0, "fail path must not commit a transition");
-    assert.deepEqual(await readRecordHead(ownerPool), headBefore, "record head must not advance");
+    assert.deepEqual(await readRecordHead(ownerPool, POSTGRES_DEMO_IDS), headBefore, "record head must not advance");
   },
 );
 
@@ -811,24 +797,23 @@ test(
   "semantic Goal e2e: unparseable model output (initial + repair) fails closed without leaking raw model text",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
-    const goalInstanceId = `goal_sem_bad_${suffix}`;
+    const goalKey = `goal_sem_bad_${suffix}`;
     const jobId = `goal_job_sem_bad_${suffix}`;
     const leaseOwner = `test-semantic-worker-${suffix}`;
-    const definition = semanticDefinition(goalInstanceId);
+    const definition = semanticDefinition(goalKey);
     const rawModelGarbage = `not json at all <<<raw-model-secret-${suffix}>>>`;
-    t.after(async () => {
-      await cleanup(ownerPool, [goalInstanceId]);
-      await runtimePool.end();
-      await ownerPool.end();
-    });
 
-    await insertGoalInstance(ownerPool, goalInstanceId, definition.goalKey);
-    const committedEvents = await readCommittedEvents(ownerPool);
+
+    const { ids: POSTGRES_DEMO_IDS, goalInstanceId, resolveDefinition } = await prepareGoalInstance(t, ownerPool, runtimePool, definition);
+    const committedEvents = await readCommittedEvents(ownerPool, POSTGRES_DEMO_IDS);
     assert.ok(committedEvents.length > 0);
-    const headBefore = await readRecordHead(ownerPool);
+    const headBefore = await readRecordHead(ownerPool, POSTGRES_DEMO_IDS);
     const sourceEventId = committedEvents[committedEvents.length - 1]!.eventId;
 
     const queue = createPostgresGoalAssessmentJobQueue({
@@ -838,7 +823,7 @@ test(
       leaseDurationMs: 30_000,
     });
     assert.equal(
-      await queue.enqueue(enqueueInput(goalInstanceId, jobId, sourceEventId)),
+      await queue.enqueue(enqueueInput(goalInstanceId, jobId, goalKey, POSTGRES_DEMO_IDS, sourceEventId)),
       "inserted",
     );
 
@@ -848,7 +833,7 @@ test(
 
     const reports = await runGoalAssessmentWorkerCycle({
       slots: [{ workspaceId: POSTGRES_DEMO_IDS.workspace, repository: queue }],
-      resolveDefinition: async () => definition,
+      resolveDefinition,
       judge,
       now: now(),
     });
@@ -902,6 +887,6 @@ test(
       [POSTGRES_DEMO_IDS.workspace, goalInstanceId],
     );
     assert.equal(transitionCount.rows[0]?.n, 0);
-    assert.deepEqual(await readRecordHead(ownerPool), headBefore);
+    assert.deepEqual(await readRecordHead(ownerPool, POSTGRES_DEMO_IDS), headBefore);
   },
 );

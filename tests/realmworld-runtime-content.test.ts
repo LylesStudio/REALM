@@ -245,3 +245,143 @@ test("RealmWorld runtime content fails closed for missing or malformed runtime d
       && error.code === "RUNTIME_INVALID",
   );
 });
+
+// Synthetic policy fixture; these authored conditions do not define any World rules.
+function policyFiles(policy: unknown = syntheticCommandPolicy()) {
+  const result = files();
+  const world = JSON.parse(Buffer.from(result.get("content/world.json")!).toString());
+  world.settings.declaredEvents = ["synthetic.ready"];
+  result.set("content/world.json", Buffer.from(JSON.stringify(world)));
+  result.set("content/command-policy.json", Buffer.from(typeof policy === "string" ? policy : JSON.stringify(policy)));
+  return result;
+}
+function syntheticCommandPolicy() {
+  return {
+    format: "realmworld-command-policy", schemaVersion: 1, policyVersion: "synthetic.v1",
+    projects: [{ projectKey: "p", kind: "production", title: { en: "Synthetic" }, milestones: [
+      { milestoneKey: "prior", title: { en: "Prior" } }, { milestoneKey: "target", title: { en: "Target" } },
+    ] }],
+    bindings: [{ bindingKey: "target.ready", command: "confirm_milestone", projectKey: "p", milestoneKey: "target",
+      semanticEventKey: "synthetic.ready", storySelector: "genesis", recordSelector: "genesis",
+      all: [{ kind: "milestone_status", milestoneKey: "prior", status: "completed" }] }],
+  };
+}
+test("A2 plan carries explicit package hash and strictly decoded authored policy without adding a draft injection channel", () => {
+  const plan = createRealmWorldInstantiationPlan({ manifest, files: policyFiles(), locale: "en" });
+  assert.equal(plan.contentHash, manifest.contentHash);
+  assert.deepEqual(plan.commandPolicy, syntheticCommandPolicy());
+  const draft = realmWorldPlanToGenesisDraft(plan, { worldlineId: "wl", storyId: "st", recordId: "re" });
+  assert.equal("commandPolicy" in draft, false);
+  assert.equal(createRealmWorldInstantiationPlan({ manifest, files: files(), locale: "en" }).commandPolicy, undefined);
+});
+test("A2 decoder refuses unknown keys, duplicate JSON members, refs, selectors, versions, self predicates and undeclared events", () => {
+  const bad: unknown[] = [];
+  bad.push({ ...syntheticCommandPolicy(), schemaVersion: 2 });
+  bad.push({ ...syntheticCommandPolicy(), sql: "SELECT 1" });
+  bad.push(JSON.stringify(syntheticCommandPolicy()).replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1'));
+  for (const change of [ { all: undefined }, { all: [{ kind: "milestone_status", milestoneKey: "target", status: "completed" }] },
+    { all: [{ kind: "milestone_status", milestoneKey: "foreign", status: "completed" }] }, { storySelector: "current" },
+    { semanticEventKey: "synthetic.undeclared" }, { bindingKey: ".." } ]) {
+    const p = syntheticCommandPolicy(); Object.assign(p.bindings[0]!, change); bad.push(p);
+  }
+  const duplicate = syntheticCommandPolicy(); duplicate.bindings.push(duplicate.bindings[0]!); bad.push(duplicate);
+  for (const policy of bad) assert.throws(() => createRealmWorldInstantiationPlan({ manifest, files: policyFiles(policy), locale: "en" }));
+});
+
+
+test("A2 strict decoder negative matrix at public plan boundary", async t => {
+  const variants: [string, (p: ReturnType<typeof syntheticCommandPolicy>) => void][] = [
+    ["unknown project member", p => Object.assign(p.projects[0]!, { script: "return true" })],
+    ["unknown milestone member", p => Object.assign(p.projects[0]!.milestones[0]!, { sql: "SELECT 1" })],
+    ["unknown predicate member", p => Object.assign(p.bindings[0]!.all[0]!, { expression: "true" })],
+    ["duplicate project", p => p.projects.push(structuredClone(p.projects[0]!))],
+    ["duplicate milestone", p => p.projects[0]!.milestones.push(structuredClone(p.projects[0]!.milestones[0]!))],
+    ["unknown project reference", p => { p.bindings[0]!.projectKey = "foreign"; }],
+    ["unknown target reference", p => { p.bindings[0]!.milestoneKey = "foreign"; }],
+    ["cross project prerequisite", p => { p.projects.push({ projectKey: "other", kind: "production", title: { en: "Other" }, milestones: [{ milestoneKey: "foreign", title: { en: "Foreign" } }] }); p.bindings[0]!.all[0]!.milestoneKey = "foreign"; }],
+    ["ambiguous selector tuple", p => p.bindings.push({ ...structuredClone(p.bindings[0]!), bindingKey: "other" })],
+    ["invalid policy version", p => { p.policyVersion = "../invalid"; }],
+    ["empty localized title", p => { p.projects[0]!.title.en = ""; }],
+    ["noncanonical localized title", p => { p.projects[0]!.milestones[0]!.title.en = " Prior"; }],
+    ["unknown kind", p => Object.assign(p.projects[0]!, { kind: "script" })],
+    ["unknown command", p => Object.assign(p.bindings[0]!, { command: "record_income" })],
+    ["current record selector", p => { p.bindings[0]!.recordSelector = "current"; }],
+    ["recursive predicate", p => Object.assign(p.bindings[0]!.all[0]!, { kind: "all", all: [] })],
+    ["unsupported status", p => { p.bindings[0]!.all[0]!.status = "planned"; }],
+    ["missing all", p => { Reflect.deleteProperty(p.bindings[0]!, "all"); }],
+    ["null all", p => Object.assign(p.bindings[0]!, { all: null })],
+    ["too many predicates", p => { p.bindings[0]!.all = Array.from({ length: 9 }, () => structuredClone(p.bindings[0]!.all[0]!)); }],
+    ["too many bindings", p => { p.bindings = Array.from({ length: 65 }, (_, i) => ({ ...structuredClone(p.bindings[0]!), bindingKey: `b${i}` })); }],
+    ["too many projects", p => { p.projects = Array.from({ length: 65 }, (_, i) => ({ ...structuredClone(p.projects[0]!), projectKey: `p${i}` })); }],
+    ["total milestone budget", p => { for (let i = 0; i < 4; i++) p.projects.push({ projectKey: `extra${i}`, kind: "production", title: { en: "Extra" }, milestones: Array.from({ length: 64 }, (_, j) => ({ milestoneKey: `m${j}`, title: { en: "M" } })) }); }],
+    ["canonical byte budget", p => { p.projects[0]!.title = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`locale${i}`, "x".repeat(512)])) as { en: string }; }],
+    ["too many milestones", p => { p.projects[0]!.milestones = Array.from({ length: 65 }, (_, i) => ({ milestoneKey: `m${i}`, title: { en: "M" } })); }],
+  ];
+  for (const [name, mutate] of variants) await t.test(name, () => {
+    const policy = syntheticCommandPolicy(); mutate(policy);
+    assert.throws(() => createRealmWorldInstantiationPlan({ manifest, files: policyFiles(policy), locale: "en" }), { code: "BUSINESS_POLICY_MISSING" });
+  });
+  for (const [name, raw] of [
+    ["escaped duplicate member", JSON.stringify(syntheticCommandPolicy()).replace('"projectKey":"p"', '"projectKey":"p","project\\u004bey":"p"')],
+    ["nested duplicate localized member", JSON.stringify(syntheticCommandPolicy()).replace('"en":"Prior"', '"en":"Prior","en":"Prior"')],
+    ["invalid UTF8", new Uint8Array([0xc3, 0x28])],
+  ] as const) await t.test(name, () => {
+    const input = policyFiles(); input.set("content/command-policy.json", typeof raw === "string" ? Buffer.from(raw) : raw);
+    assert.throws(() => createRealmWorldInstantiationPlan({ manifest, files: input, locale: "en" }), { code: "BUSINESS_POLICY_MISSING" });
+  });
+  await t.test("explicit empty all and locale changes keep selectors", () => {
+    const p = syntheticCommandPolicy(); p.bindings[0]!.all = []; Object.assign(p.projects[0]!.title, { "zh-CN": "不同标题" });
+    const en = createRealmWorldInstantiationPlan({ manifest, files: policyFiles(p), locale: "en" });
+    const zh = createRealmWorldInstantiationPlan({ manifest, files: policyFiles(p), locale: "zh-CN" });
+    assert.deepEqual(en.commandPolicy, zh.commandPolicy); assert.deepEqual(en.commandPolicy!.bindings[0]!.all, []);
+    assert.equal(en.commandPolicy!.projects[0]!.projectKey, "p");
+  });
+  await t.test("settings cannot synthesize a policy file", () => {
+    const input = files(), world = JSON.parse(Buffer.from(input.get("content/world.json")!).toString());
+    world.settings.commandPolicy = syntheticCommandPolicy(); world.settings.trusted = true;
+    input.set("content/world.json", Buffer.from(JSON.stringify(world)));
+    assert.equal(createRealmWorldInstantiationPlan({ manifest, files: input, locale: "en" }).commandPolicy, undefined);
+  });
+});
+
+
+test("A2 command boundary exposes stable safe policy refusal responses", async () => {
+  const { projectFinanceRouteError } = await import("../app/api/bridge/v1/project-finance-context.ts");
+  const { ProjectFinanceCommandError } = await import("../modules/application/project-finance-command.ts");
+  for (const [code, status] of [["BUSINESS_POLICY_MISSING", 422], ["BUSINESS_PRECONDITION_FAILED", 409], ["IDEMPOTENCY_KEY_REUSE", 409], ["COMMAND_INVALID", 422]] as const) {
+    const response = projectFinanceRouteError(new ProjectFinanceCommandError(code, "private-file-location-and-policy-detail"));
+    assert.equal(response.status, status); assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = await response.json() as { error: { code: string; message: string } };
+    assert.equal(body.error.code, code); assert.equal(body.error.message.includes("private-file-location"), false);
+  }
+});
+
+
+test("A2 materialization decoder rejects malformed identities, aliases, topology splits and resource excess", async t => {
+  const { normalizeCommandMaterializations } = await import("../modules/world-transfer/realmworld-command-policy.ts");
+  const fixture = () => normalizeCommandMaterializations({ format: "realmworld-command-materializations", schemaVersion: 1, worldVersion: "1.2.0", contentHash: "a".repeat(64), policyVersion: "synthetic.v1", rows: ["prior", "target"].map(key => ({ projectKey: "p", milestoneKey: key, projectId: "project", milestoneId: `milestone-${key}`, storyId: "story", recordId: "record" })) });
+  const cases: [string, (m: ReturnType<typeof fixture>) => void][] = [
+    ["unknown document field", m => Object.assign(m, { trusted: true })],
+    ["unsupported version", m => Object.assign(m, { schemaVersion: 2 })],
+    ["unknown format", m => Object.assign(m, { format: "policy-map" })],
+    ["empty world version", m => { m.worldVersion = ""; }],
+    ["oversized world version", m => { m.worldVersion = "v".repeat(257); }],
+    ["malformed hash", m => { m.contentHash = "A".repeat(64); }],
+    ["invalid policy version", m => { m.policyVersion = ".."; }],
+    ["empty map", m => { m.rows = []; }],
+    ["unknown row field", m => Object.assign(m.rows[0]!, { sql: "SELECT 1" })],
+    ["invalid authored key", m => { m.rows[0]!.milestoneKey = "../key"; }],
+    ["empty runtime id", m => { m.rows[0]!.projectId = ""; }],
+    ["whitespace runtime id", m => { m.rows[0]!.recordId = " record"; }],
+    ["oversized runtime id", m => { m.rows[0]!.milestoneId = "m".repeat(257); }],
+    ["duplicate authored tuple", m => { m.rows[1]!.milestoneKey = m.rows[0]!.milestoneKey; }],
+    ["duplicate milestone id", m => { m.rows[1]!.milestoneId = m.rows[0]!.milestoneId; }],
+    ["same key aliases two projects", m => { m.rows[1]!.projectId = "another-project"; }],
+    ["two keys alias one project", m => { m.rows[1]!.projectKey = "another-key"; }],
+    ["split genesis Story", m => { m.rows[1]!.storyId = "another-story"; }],
+    ["split genesis Record", m => { m.rows[1]!.recordId = "another-record"; }],
+    ["row count budget", m => { m.rows = Array.from({ length: 257 }, (_, i) => ({ ...m.rows[0]!, milestoneKey: `k${i}`, milestoneId: `milestone-${i}` })); }],
+    ["canonical byte budget", m => { m.rows = Array.from({ length: 256 }, (_, i) => ({ projectKey: "p".repeat(128), milestoneKey: String(i).padEnd(128, "k"), projectId: "p".repeat(256), milestoneId: String(i).padEnd(256, "m"), storyId: "s".repeat(256), recordId: "r".repeat(256) })); }],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, () => { const value = fixture(); mutate(value); assert.throws(() => normalizeCommandMaterializations(value), { code: "BUSINESS_POLICY_MISSING" }); });
+});

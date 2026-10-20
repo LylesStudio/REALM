@@ -1,4 +1,8 @@
+import { admitSemanticMilestone } from "./business-command-policy.ts";
+import { normalizeRequestPolicy, type CommandPolicyResolver } from "../../modules/world-transfer/realmworld-command-policy.ts";
 import type { PoolClient, QueryResultRow } from "pg";
+import { compareReplay, decodeReplayContext, decodeStoredReplayBinding, REPLAY_LINEAGE_MAX_BYTES,
+  type ReplayContextV1 } from "../../modules/application/command-replay-lineage.ts";
 
 import {
   ProjectFinanceCommandError,
@@ -17,6 +21,9 @@ import {
   type StoredCommandResult,
 } from "../../modules/application/project-finance-command.ts";
 import {
+  declaredSemanticEventsFromWorldSettings,
+} from "../../modules/world-transfer/semantic-events.ts";
+import {
   deriveCashPosition,
   normalizeFinanceAccount,
   normalizeLedgerEntry,
@@ -25,6 +32,7 @@ import {
 } from "../../modules/finance/public.ts";
 import type { ProjectScope } from "../../modules/projects/public.ts";
 import {
+  lockWorkspaceCommandKey,
   withWorkspaceTransaction,
   type WorkspaceDatabase,
 } from "./workspace-transaction.ts";
@@ -58,11 +66,6 @@ interface LedgerRow extends QueryResultRow {
   idempotency_key: string;
 }
 
-interface CommandRow extends QueryResultRow {
-  request_fingerprint: string;
-  result_manifest: StoredCommandResult;
-}
-
 const LEDGER_SQL = `SELECT workspace_id, world_id, worldline_id, id,
   account_id, kind, direction, amount_minor, currency,
   category, memo, project_id, source_record_id, source_event_id,
@@ -73,6 +76,7 @@ const LEDGER_SQL = `SELECT workspace_id, world_id, worldline_id, id,
 
 export function createPostgresProjectFinanceCommandStore(
   database: WorkspaceDatabase,
+  options: { resolveCommandPolicy?: CommandPolicyResolver } = {},
 ): ProjectFinanceCommandStore {
   return {
     async loadCommand(scope, idempotencyKey) {
@@ -126,13 +130,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async confirmMilestone(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return { ...(existing.result as unknown as MilestoneCommandResult), status: "replayed" as const };
+          return replayStoredCommand<MilestoneCommandResult>(existing, input, "project.milestone.confirmed");
         }
+        requireWritableFinanceScope(lockedScope);
         const project = await client.query<{ status: string; version: string }>(
           `SELECT status, version::text
            FROM projects
@@ -150,6 +154,26 @@ export function createPostgresProjectFinanceCommandStore(
         if (Number(projectRow.version) !== input.expectedProjectVersion) {
           throw new ProjectFinanceCommandError("WRITE_CONFLICT", "The project changed. Read it again before retrying.");
         }
+        // World-declared semantic event keys: shape was validated by the
+        // service; authorization is database-authoritative — the key must be
+        // declared by this installed World (worlds.settings.declaredEvents,
+        // materialized from the signed package at genesis). Undeclared keys
+        // fail closed before any write.
+        if (input.semanticEventKey) {
+          const world = await client.query<{ settings: unknown }>(
+            `SELECT settings FROM worlds WHERE workspace_id = $1 AND id = $2`,
+            [input.scope.workspaceId, input.scope.worldId],
+          );
+          if (!declaredSemanticEventsFromWorldSettings(world.rows[0]?.settings).has(input.semanticEventKey)) {
+            throw new ProjectFinanceCommandError(
+              "COMMAND_INVALID",
+              "semanticEventKey is not declared by this World.",
+            );
+          }
+        }
+        const requestPolicy = input.semanticEventKey
+          ? await admitSemanticMilestone(client, { ...input, semanticEventKey: input.semanticEventKey }, options.resolveCommandPolicy)
+          : undefined;
         const milestone = await client.query<{ status: string }>(
           `SELECT status
            FROM project_milestones
@@ -166,7 +190,21 @@ export function createPostgresProjectFinanceCommandStore(
           throw new ProjectFinanceCommandError("MILESTONE_NOT_OPEN", "The milestone is not open for confirmation.");
         }
         const evidenceEvent = input.evidence
-          ? await writeRecordEvidence(client, input.scope, input.evidence, "project.milestone.confirmed", `${input.commandGroupId}:milestone-event`)
+          ? await writeRecordEvidence(
+            client,
+            input.scope,
+            input.evidence,
+            "project.milestone.confirmed",
+            `${input.commandGroupId}:milestone-event`,
+            {
+              projectId: input.projectId,
+              milestoneId: input.milestoneId,
+              // Declared World/content semantic completion signal, emitted
+              // exactly once inside the same transaction as the milestone
+              // completion; the engine never interprets its vocabulary.
+              ...(input.semanticEventKey ? { semanticEventKey: input.semanticEventKey } : {}),
+            },
+          )
           : null;
         const updatedMilestone = await client.query(
           `UPDATE project_milestones
@@ -192,6 +230,7 @@ export function createPostgresProjectFinanceCommandStore(
           throw new ProjectFinanceCommandError("WRITE_CONFLICT", "The project changed. Read it again before retrying.");
         }
         const result: MilestoneCommandResult = {
+          ...(requestPolicy ? { requestPolicy } : {}),
           status: "committed",
           commandGroupId: input.commandGroupId,
           projectId: input.projectId,
@@ -199,6 +238,7 @@ export function createPostgresProjectFinanceCommandStore(
           projectVersion: version,
           eventKind: "project.milestone.confirmed",
           ...(evidenceEvent ? { worldCursor: evidenceEvent.worldCursor } : {}),
+          ...(input.semanticEventKey ? { semanticEventKey: input.semanticEventKey } : {}),
         };
         await insertCommandGroup(client, input, result, evidenceEvent?.recordId ?? null);
         return result;
@@ -206,13 +246,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async allocateBudget(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return { ...(existing.result as unknown as BudgetCommandResult), status: "replayed" as const };
+          return replayStoredCommand<BudgetCommandResult>(existing, input, "finance.budget.allocated");
         }
+        requireWritableFinanceScope(lockedScope);
         const project = await client.query<{ status: string }>(
           `SELECT status FROM projects
            WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND id = $4`,
@@ -283,13 +323,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async changeStage(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return { ...(existing.result as unknown as StageCommandResult), status: "replayed" as const };
+          return replayStoredCommand<StageCommandResult>(existing, input, "project.stage.changed");
         }
+        requireWritableFinanceScope(lockedScope);
         const applied = await applyStageChange(client, input);
         await insertCommandGroup(client, input, applied, applied.worldCursor ? input.evidence?.recordId ?? null : null);
         return applied;
@@ -297,13 +337,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async applyRecordProjectFinance(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return { ...(existing.result as unknown as ApplyProjectFinanceResult), status: "replayed" as const };
+          return replayStoredCommand<ApplyProjectFinanceResult>(existing, input, "record.apply_project_finance");
         }
+        requireWritableFinanceScope(lockedScope);
         let evidence = input.evidence;
         let worldCursor: { worldTick: number; worldOrdinal: number } | null = null;
         for (const [index, action] of input.actions.entries()) {
@@ -313,6 +353,7 @@ export function createPostgresProjectFinanceCommandStore(
               commandGroupId: input.commandGroupId,
               requestFingerprint: input.requestFingerprint,
               idempotencyKey: input.idempotencyKey,
+              request: input.request,
               projectId: action.projectId,
               stage: action.stage,
               expectedProjectVersion: action.expectedProjectVersion,
@@ -342,6 +383,7 @@ export function createPostgresProjectFinanceCommandStore(
             commandGroupId: input.commandGroupId,
             requestFingerprint: input.requestFingerprint,
             idempotencyKey: `${input.idempotencyKey}:${index}`,
+            request: input.request,
             accountId,
             entryId: `${input.commandGroupId}:entry:${index}`,
             sourceEventId: `${input.commandGroupId}:event:${index}`,
@@ -371,13 +413,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async createObligation(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return { ...(existing.result as unknown as ObligationResult), status: "replayed" as const };
+          return replayStoredCommand<ObligationResult>(existing, input, "finance.obligation.created");
         }
+        requireWritableFinanceScope(lockedScope);
         if (input.projectId) {
           await requireActiveProject(client, input.scope, input.projectId);
         }
@@ -417,16 +459,13 @@ export function createPostgresProjectFinanceCommandStore(
     },
     async settleObligation(input) {
       return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+        const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+        await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
         const existing = await readCommand(client, input.scope, input.idempotencyKey);
         if (existing) {
-          if (existing.requestFingerprint !== input.requestFingerprint) {
-            throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-          }
-          return {
-            ...(existing.result as ObligationResult & { cash: ReturnType<typeof deriveCashPosition> }),
-            status: "replayed" as const,
-          };
+          return replayStoredCommand<ObligationResult & { cash: ReturnType<typeof deriveCashPosition> }>(existing, input, "finance.obligation.settled");
         }
+        requireWritableFinanceScope(lockedScope);
         const obligation = await client.query<{
           kind: "loan" | "presale" | "revenue_share";
           status: string;
@@ -460,6 +499,7 @@ export function createPostgresProjectFinanceCommandStore(
           commandGroupId: input.commandGroupId,
           requestFingerprint: input.requestFingerprint,
           idempotencyKey: input.idempotencyKey,
+          request: input.request,
           accountId,
           entryId: input.entryId,
           sourceEventId: `${input.commandGroupId}:event`,
@@ -517,24 +557,135 @@ export function createPostgresProjectFinanceCommandStore(
   };
 }
 
+type LoadedFinanceReceipt = NonNullable<Awaited<ReturnType<ProjectFinanceCommandStore["loadCommand"]>>>;
+
+function invalidFinanceReceipt(): never {
+  throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key has no valid replay proof for this command.");
+}
+
+function replayStoredCommand<T extends StoredCommandResult>(
+  existing: LoadedFinanceReceipt,
+  input: { scope: ProjectScope; requestFingerprint: string; request: Readonly<Record<string, unknown>> },
+  expectedOperation: string,
+): T {
+  const { result, ...receipt } = existing;
+  if (!compareReplay({ family: "finance", trustedScope: input.scope, candidate: input.request,
+    expectedOperation, existing: receipt, suppliedTargetFingerprint: input.requestFingerprint })) invalidFinanceReceipt();
+  return { ...(result as object), status: "replayed" } as T;
+}
+
+/** Internal SQL projection shared by the Finance store and ordinary save reader. */
+export interface ScopedFinanceReceiptRow {
+  workspace_id: string;
+  world_id: string;
+  worldline_id: string;
+  id: string;
+  request_fingerprint: string;
+  state: "committed" | "rejected";
+  policy_version: string;
+  result_manifest: unknown;
+  receipt_oversized: boolean;
+}
+
+function financeReceiptObject(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) invalidFinanceReceipt();
+  return value as Record<string, unknown>;
+}
+
+function scopedFinanceManifest(scope: ProjectScope, row: ScopedFinanceReceiptRow): Record<string, unknown> {
+  if (row.workspace_id !== scope.workspaceId || row.world_id !== scope.worldId
+    || row.worldline_id !== scope.worldlineId || row.receipt_oversized) invalidFinanceReceipt();
+  const manifest = financeReceiptObject(row.result_manifest);
+  if (Buffer.byteLength(JSON.stringify(manifest), "utf8") > REPLAY_LINEAGE_MAX_BYTES) invalidFinanceReceipt();
+  return manifest;
+}
+
+function financeLegacyBinding(row: ScopedFinanceReceiptRow, manifest: Record<string, unknown>) {
+  if (row.state !== "committed" || row.policy_version !== PROJECT_FINANCE_COMMAND_POLICY_VERSION
+    || Object.keys(manifest).some((key) => !["provenance", "result", "request", "replayLineage", "replayContext"].includes(key))
+    || manifest.provenance !== "legacy-result-v1" || manifest.request !== null
+    || financeReceiptObject(manifest.result).commandGroupId !== row.id) invalidFinanceReceipt();
+  const binding = decodeStoredReplayBinding(manifest.replayLineage);
+  if (binding.originalRequestFingerprint !== row.request_fingerprint) invalidFinanceReceipt();
+  return binding;
+}
+
+export function decodeScopedFinanceCommandReceipt(
+  scope: ProjectScope,
+  row: ScopedFinanceReceiptRow,
+  anchorFor: (id: string) => ScopedFinanceReceiptRow | undefined,
+  contexts = new Map<string, { row: ScopedFinanceReceiptRow; context: ReplayContextV1 }>(),
+): LoadedFinanceReceipt {
+  try {
+    const manifest = scopedFinanceManifest(scope, row);
+    const result = Object.hasOwn(manifest, "result") ? financeReceiptObject(manifest.result) : manifest;
+    if (Object.hasOwn(result, "requestPolicy")) normalizeRequestPolicy(result.requestPolicy);
+    const base = { requestFingerprint: row.request_fingerprint, state: row.state, policyVersion: row.policy_version };
+    if (Object.hasOwn(manifest, "replayLineage") || Object.hasOwn(manifest, "replayContext")) {
+      const binding = financeLegacyBinding(row, manifest);
+      const anchor = binding.anchorCommandId === row.id ? row : anchorFor(binding.anchorCommandId);
+      if (!anchor || anchor.id !== binding.anchorCommandId || (row.id !== anchor.id && Object.hasOwn(manifest, "replayContext"))) invalidFinanceReceipt();
+      const cached = contexts.get(anchor.id);
+      let context: ReplayContextV1;
+      if (cached?.row === anchor) {
+        context = cached.context;
+      } else {
+        const anchorManifest = anchor === row ? manifest : scopedFinanceManifest(scope, anchor);
+        const anchorBinding = financeLegacyBinding(anchor, anchorManifest);
+        if (anchorBinding.anchorCommandId !== anchor.id || anchorBinding.contextId !== binding.contextId) invalidFinanceReceipt();
+        context = decodeReplayContext(anchorManifest.replayContext);
+        contexts.set(anchor.id, { row: anchor, context });
+      }
+      if (context.id !== binding.contextId || context.family !== "finance"
+        || context.currentScope.workspaceId !== scope.workspaceId || context.currentScope.worldId !== scope.worldId
+        || context.currentScope.worldlineId !== scope.worldlineId) invalidFinanceReceipt();
+      const archiveBinding = { version: binding.version, contextId: binding.contextId,
+        originalRequestFingerprint: binding.originalRequestFingerprint };
+      return { ...base, result: manifest.result as StoredCommandResult, request: null, provenance: "legacy-result-v1",
+        replayProof: { binding: archiveBinding, context } };
+    }
+    if (manifest.provenance === "legacy-result-v1") {
+      if (manifest.request !== undefined && manifest.request !== null) invalidFinanceReceipt();
+      return { ...base, result: financeReceiptObject(manifest.result) as unknown as StoredCommandResult,
+        request: null, provenance: "legacy-result-v1" };
+    }
+    if (Object.hasOwn(manifest, "provenance") && manifest.provenance !== "request-result-v1") invalidFinanceReceipt();
+    if (Object.hasOwn(manifest, "result") || Object.hasOwn(manifest, "request")) {
+      return { ...base, result: financeReceiptObject(manifest.result) as unknown as StoredCommandResult,
+        request: financeReceiptObject(manifest.request), provenance: "request-result-v1" };
+    }
+    return { ...base, result: manifest as unknown as StoredCommandResult, request: null, provenance: "legacy-result-v1" };
+  } catch { return invalidFinanceReceipt(); }
+}
+
 async function readCommand(
   client: PoolClient,
   scope: ProjectScope,
   idempotencyKey: string,
-): Promise<{ requestFingerprint: string; result: StoredCommandResult } | null> {
-  const result = await client.query<CommandRow>(
-    `SELECT request_fingerprint, result_manifest
-     FROM project_finance_command_groups
-     WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3
-       AND idempotency_key = $4`,
-    [scope.workspaceId, scope.worldId, scope.worldlineId, idempotencyKey],
+): Promise<LoadedFinanceReceipt | null> {
+  const result = await client.query<ScopedFinanceReceiptRow & { anchor_row: ScopedFinanceReceiptRow | null }>(
+    `SELECT command.workspace_id, command.world_id, command.worldline_id, command.id,
+            command.request_fingerprint, command.state, command.policy_version,
+            CASE WHEN octet_length(command.result_manifest::text) <= $5
+              THEN command.result_manifest ELSE NULL END AS result_manifest,
+            octet_length(command.result_manifest::text) > $5 AS receipt_oversized,
+            CASE WHEN anchor.id IS NULL THEN NULL ELSE jsonb_build_object(
+              'workspace_id', anchor.workspace_id, 'world_id', anchor.world_id, 'worldline_id', anchor.worldline_id,
+              'id', anchor.id, 'request_fingerprint', anchor.request_fingerprint, 'state', anchor.state, 'policy_version', anchor.policy_version,
+              'result_manifest', CASE WHEN octet_length(anchor.result_manifest::text) <= $5
+                THEN anchor.result_manifest ELSE NULL END,
+              'receipt_oversized', octet_length(anchor.result_manifest::text) > $5) END AS anchor_row
+     FROM project_finance_command_groups AS command
+     LEFT JOIN project_finance_command_groups AS anchor
+       ON anchor.workspace_id = command.workspace_id AND anchor.world_id = command.world_id
+      AND anchor.worldline_id = command.worldline_id
+      AND anchor.id = command.result_manifest #>> '{replayLineage,anchorCommandId}'
+     WHERE command.workspace_id = $1 AND command.world_id = $2 AND command.worldline_id = $3
+       AND command.idempotency_key = $4`,
+    [scope.workspaceId, scope.worldId, scope.worldlineId, idempotencyKey, REPLAY_LINEAGE_MAX_BYTES * 2],
   );
   const row = result.rows[0];
-  if (!row) return null;
-  return {
-    requestFingerprint: row.request_fingerprint,
-    result: row.result_manifest,
-  };
+  return row ? decodeScopedFinanceCommandReceipt(scope, row, (id) => row.anchor_row?.id === id ? row.anchor_row : undefined) : null;
 }
 
 async function readAccount(
@@ -609,13 +760,16 @@ async function commitLedgerEntry(
   enforceFunds: boolean,
 ): Promise<ExpenseCommandResult> {
   return withWorkspaceTransaction(database, input.scope.workspaceId, async (client) => {
+    const lockedScope = await lockFinanceScopePrelude(client, input.scope);
+    await lockWorkspaceCommandKey(client, "finance", input.scope, input.idempotencyKey);
     const existing = await readCommand(client, input.scope, input.idempotencyKey);
     if (existing) {
-      if (existing.requestFingerprint !== input.requestFingerprint) {
-        throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-      }
-      return { ...(existing.result as ExpenseCommandResult), status: "replayed" };
+      const expectedOperation = input.kind === "expense" ? "finance.expense.recorded"
+        : input.kind === "income" ? "finance.income.recorded" : "finance.adjustment.recorded";
+      if (input.eventKind !== expectedOperation) invalidFinanceReceipt();
+      return replayStoredCommand<ExpenseCommandResult>(existing, input, expectedOperation);
     }
+    requireWritableFinanceScope(lockedScope);
     const account = await readAccount(client, input.scope, input.accountId, true);
     if (!account || account.status !== "active") {
       throw new ProjectFinanceCommandError("FINANCE_ACCOUNT_NOT_FOUND", "The finance account is not available.");
@@ -636,7 +790,13 @@ async function commitLedgerEntry(
 
 async function insertCommandGroup(
   client: PoolClient,
-  input: { scope: { workspaceId: string; worldId: string; worldlineId: string }; commandGroupId: string; idempotencyKey: string; requestFingerprint: string },
+  input: {
+    scope: { workspaceId: string; worldId: string; worldlineId: string };
+    commandGroupId: string;
+    idempotencyKey: string;
+    requestFingerprint: string;
+    request: Readonly<Record<string, unknown>>;
+  },
   result: StoredCommandResult | (ObligationResult & { cash: ReturnType<typeof deriveCashPosition> }),
   recordId: string | null,
 ): Promise<void> {
@@ -657,7 +817,7 @@ async function insertCommandGroup(
       input.commandGroupId,
       input.idempotencyKey,
       input.requestFingerprint,
-      JSON.stringify(result),
+      JSON.stringify({ result, request: input.request }),
       PROJECT_FINANCE_COMMAND_POLICY_VERSION,
       recordId,
     ],
@@ -867,6 +1027,7 @@ async function writeRecordEvidence(
   evidence: RecordEvidence,
   eventKind: string,
   eventId: string,
+  payloadFacts?: Readonly<Record<string, string>>,
 ): Promise<{ eventId: string; recordId: string; worldCursor: { worldTick: number; worldOrdinal: number } }> {
   const worldline = await client.query<{
     head_tick: string | number;
@@ -949,7 +1110,7 @@ async function writeRecordEvidence(
      ) VALUES (
        $1, $2, $3, $4, $5, $6,
        $7, $8, 0, $9,
-       NULL, '', '', '{}'::jsonb,
+       NULL, '', '', $15::jsonb,
        $10, $11, $12, $13, $14
      )`,
     [
@@ -967,6 +1128,9 @@ async function writeRecordEvidence(
       nextOrdinal,
       head.calendar_id,
       head.display_time,
+      // Payload carries server-validated facts only (never client free text):
+      // for milestone confirmation the confirmed project/milestone identity.
+      JSON.stringify(payloadFacts ?? {}),
     ],
   );
   await client.query(
@@ -1055,4 +1219,24 @@ function nextObligationOutstanding(
     throw new ProjectFinanceCommandError("COMMAND_INVALID", "Only a revenue share can post a share settlement.");
   }
   return outstanding;
+}
+
+/** All finance mutators enter World → worldline before key/domain rows.
+ * Status is held under these locks, but historical direct-store receipts replay first.
+ */
+async function lockFinanceScopePrelude(client: PoolClient, scope: { workspaceId: string; worldId: string; worldlineId: string }): Promise<{ world: string | null; line: string | null }> {
+  const world = await client.query<{ status: string }>(
+    `SELECT status FROM worlds WHERE workspace_id = $1 AND id = $2 FOR SHARE`,
+    [scope.workspaceId, scope.worldId],
+  );
+  const line = await client.query<{ status: string }>(
+    `SELECT status FROM worldlines WHERE workspace_id = $1 AND world_id = $2 AND id = $3 FOR UPDATE`,
+    [scope.workspaceId, scope.worldId, scope.worldlineId],
+  );
+  return { world: world.rowCount === 1 ? world.rows[0]?.status ?? null : null, line: line.rowCount === 1 ? line.rows[0]?.status ?? null : null };
+}
+function requireWritableFinanceScope(scope: { world: string | null; line: string | null }): void {
+  if (scope.world !== "active" || scope.line !== "active") {
+    throw new ProjectFinanceCommandError("BUSINESS_PRECONDITION_FAILED", "The world and worldline must be active for a new finance command.");
+  }
 }

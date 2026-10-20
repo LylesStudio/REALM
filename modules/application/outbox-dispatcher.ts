@@ -12,36 +12,31 @@ import {
   RuntimeConcurrencyError,
   RuntimeInvariantError,
   type JsonValue,
-  type RuntimeOutboxMessage,
-  type RuntimeRepository,
 } from "../runtime/public.ts";
 
-/** Dispatcher 实际依赖的仓储窄面：只读 outbox 列表与 claim/settle 契约。 */
-export type OutboxDispatcherRepository<
-  TPayload extends JsonValue = JsonValue,
-> = Pick<
-  RuntimeRepository<
-    JsonValue,
-    JsonValue,
-    JsonValue,
-    JsonValue,
-    JsonValue,
-    TPayload
-  >,
-  "listOutboxMessages" | "claimOutbox" | "settleOutbox"
->;
+import type {
+  OutboxDeliveryMessage,
+  OutboxDeliveryRepository,
+  RecordCommittedBody,
+} from "./outbox-delivery-contract.ts";
 
-/** 交给 publish sink 的窄请求：topic、payload 与消息身份/record scope 可读。 */
-export interface OutboxPublishRequest<TPayload extends JsonValue = JsonValue> {
+/** Dispatcher depends only on the delivery port; native in-memory ports remain compatible. */
+export type OutboxDispatcherRepository<T extends JsonValue = JsonValue> = OutboxDeliveryRepository<T>;
+
+type PublishFields<T extends JsonValue> = {
   messageId: string;
-  turnId: string;
   recordId: string;
-  topic: string;
   dedupeKey: string;
-  payload: TPayload;
-  /** 当前 delivery attempt（claim 之后的 attempts 计数，从 1 开始）。 */
+  payload: T;
   attempt: number;
-}
+};
+export type OutboxPublishRequest<T extends JsonValue = JsonValue> =
+  | (PublishFields<T> & { origin?: "runtime-turn"; turnId: string; topic: string })
+  | (PublishFields<RecordCommittedBody> & {
+      origin: "record-events-restore-v1";
+      turnId: null;
+      topic: "record.events.committed";
+    });
 
 /**
  * 显式窄 publish 契约：resolve 表示已投递；抛 RetryableOutboxPublishError
@@ -223,7 +218,7 @@ async function runBatch<TPayload extends JsonValue>(
     nowEpoch + config.leaseDurationMs,
   ).toISOString();
 
-  const messages = await config.repository.listOutboxMessages();
+  const messages = await config.repository.listOutboxMessages({ now, limit: config.batchLimit });
   const candidates = messages
     .filter((message) => isDispatchable(message, nowEpoch))
     .sort(compareCandidates)
@@ -242,7 +237,7 @@ async function runBatch<TPayload extends JsonValue>(
   };
 
   for (const candidate of candidates) {
-    let claimed: RuntimeOutboxMessage<TPayload>;
+    let claimed: OutboxDeliveryMessage<TPayload>;
     try {
       claimed = await config.repository.claimOutbox({
         messageId: candidate.messageId,
@@ -263,14 +258,24 @@ async function runBatch<TPayload extends JsonValue>(
 
     let outcome: SettledOutcome;
     try {
-      await config.sink.publish({
+      const fields = {
         messageId: claimed.messageId,
-        turnId: claimed.turnId,
         recordId: claimed.recordId,
-        topic: claimed.topic,
         dedupeKey: claimed.dedupeKey,
-        payload: claimed.payload,
         attempt: claimed.attempts,
+      };
+      await config.sink.publish(claimed.origin === "record-events-restore-v1" ? {
+        ...fields,
+        origin: claimed.origin,
+        turnId: claimed.turnId,
+        topic: claimed.topic,
+        payload: claimed.payload,
+      } : {
+        ...fields,
+        ...(claimed.origin ? { origin: claimed.origin } : {}),
+        turnId: claimed.turnId,
+        topic: claimed.topic,
+        payload: claimed.payload,
       });
       outcome = { kind: "delivered" };
     } catch (error) {
@@ -314,7 +319,7 @@ interface FailureSummary {
 
 function classifyPublishFailure<TPayload extends JsonValue>(
   error: unknown,
-  claimed: RuntimeOutboxMessage<TPayload>,
+  claimed: OutboxDeliveryMessage<TPayload>,
   config: ValidatedConfig<TPayload>,
   now: string,
   nowEpoch: number,
@@ -359,7 +364,7 @@ function classifyPublishFailure<TPayload extends JsonValue>(
 }
 
 function isDispatchable<TPayload extends JsonValue>(
-  message: RuntimeOutboxMessage<TPayload>,
+  message: OutboxDeliveryMessage<TPayload>,
   nowEpoch: number,
 ): boolean {
   if (message.state === "pending" || message.state === "retryable") {
@@ -382,8 +387,8 @@ function isDispatchable<TPayload extends JsonValue>(
 }
 
 function compareCandidates<TPayload extends JsonValue>(
-  left: RuntimeOutboxMessage<TPayload>,
-  right: RuntimeOutboxMessage<TPayload>,
+  left: OutboxDeliveryMessage<TPayload>,
+  right: OutboxDeliveryMessage<TPayload>,
 ): number {
   const byAvailability = left.availableAt.localeCompare(right.availableAt);
   return byAvailability !== 0

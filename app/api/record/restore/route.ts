@@ -1,3 +1,4 @@
+import { createInstalledRealmWorldCommandPolicyResolver } from "../../../../modules/world-transfer/realmworld-command-policy.ts";
 import {
   createPostgresRealmRuntimeSaveRestorer,
   RealmRuntimeSaveRepositoryError,
@@ -34,6 +35,7 @@ function repositoryStatus(code: RealmRuntimeSaveRepositoryError["code"]): number
   if (code === "WORLD_READ_ONLY") return 403;
   if (code === "RESTORE_ID_COLLISION" || code === "RESTORE_CONFLICT") return 409;
   if (code === "WORLD_ARCHIVED") return 409;
+  if (code === "GOAL_TRANSPORT_TARGET_UNSUPPORTED" || code === "GOAL_TRANSPORT_VERSION_UNSUPPORTED") return 422;
   if (code === "REALMWORLD_IDENTITY_MISMATCH") return 409;
   if (code === "BASE_VERSION_INCOMPATIBLE") return 409;
   if (
@@ -101,7 +103,11 @@ export function createRealmRuntimeSaveWorldBindingValidator(environment: {
 
 export async function POST(request: Request) {
   const principalId = resolveRequestPrincipal(request, LOCAL_RECORD_SCOPE.principalId);
-  if (!principalId) return unauthorizedResponse();
+  if (!principalId) {
+    const response = unauthorizedResponse();
+    response.headers.set("Cache-Control", "no-store");
+    return response;
+  }
 
   const connectionString = process.env.REALM_RUNTIME_DATABASE_URL;
   if (!connectionString) return errorResponse("LOCAL_RUNTIME_NOT_INITIALIZED", 503);
@@ -136,7 +142,7 @@ export async function POST(request: Request) {
 
   let archive;
   try {
-    archive = parseRealmRuntimeSaveArchive(bytes);
+    archive = parseRealmRuntimeSaveArchive(bytes, { goalsSchemaVersion: 2 });
   } catch (error) {
     if (error instanceof RealmRuntimeSaveError) {
       return errorResponse(error.code, 400);
@@ -161,7 +167,7 @@ export async function POST(request: Request) {
   try {
     const restorer = createPostgresRealmRuntimeSaveRestorer(
       getSharedRuntimePool(connectionString),
-      { validateWorldBinding, validateUpgradeTarget },
+      { goalsSchemaVersion: 2, validateWorldBinding, validateUpgradeTarget, resolveCommandPolicy: verifier ? createInstalledRealmWorldCommandPolicyResolver(verifier) : undefined },
     );
     const result = await restorer.restore({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,

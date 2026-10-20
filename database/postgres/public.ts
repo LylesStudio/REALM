@@ -1,5 +1,7 @@
 export {
   createPostgresRuntimeRepository,
+  createPostgresOutboxDeliveryRepository,
+  type PostgresOutboxDeliveryRepositoryOptions,
   type PostgresCommittedEventKind,
   type PostgresActionStateWrite,
   type PostgresCommittedFormalEvents,

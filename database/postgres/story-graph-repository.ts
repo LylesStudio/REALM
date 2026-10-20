@@ -24,6 +24,7 @@ import {
 export type StoryGraphRepositoryErrorCode =
   | "STORY_NOT_FOUND"
   | "STORY_NOT_WRITABLE"
+  | "STORY_DEFINITION_NOT_FOUND"
   | "STORY_DEFINITION_CONFLICT"
   | "STORY_RECORD_INSTANTIATION_FAILED"
   | "STORY_NODE_STATE_INVALID"
@@ -55,6 +56,8 @@ export interface StoryGraphSnapshot {
 export interface StoryGraphReconcileResult extends StoryGraphSnapshot {
   /** Nodes whose rules are satisfied by the authoritative facts read in this run. */
   unlockedNodeKeys: readonly string[];
+  /** Nodes that transitioned locked -> active in THIS reconcile call. */
+  activatedNodeKeys: readonly string[];
 }
 
 export interface StoryGraphRepository {
@@ -66,7 +69,13 @@ export interface StoryGraphRepository {
   reconcile(input: {
     workspaceId: string;
     storyId: string;
-    definition: StoryDefinition;
+    /**
+     * Optional caller-supplied definition. When present it must hash to the
+     * persisted authoritative binding exactly; when omitted the binding is
+     * resolved server-side from story_definition_bindings. Client-provided
+     * definitions are never trusted on their own.
+     */
+    definition?: StoryDefinition;
   }): Promise<StoryGraphReconcileResult>;
 }
 
@@ -111,6 +120,7 @@ export function createPostgresStoryGraphRepository(
         };
         const definitionHash = storyDefinitionHashFor(normalized);
         await ensureNodeRows(client, scope, normalized, definitionHash);
+        await ensureDefinitionBinding(client, scope, normalized, definitionHash);
         const facts = await loadFacts(client, scope, story.status !== "draft");
         await activateEligibleNodes(client, scope, normalized, definitionHash, facts);
         return readSnapshot(client, scope, normalized, definitionHash);
@@ -118,7 +128,6 @@ export function createPostgresStoryGraphRepository(
     },
 
     async reconcile({ workspaceId, storyId, definition }) {
-      const normalized = normalizeStoryDefinition(definition);
       return withWorkspaceTransaction(database, workspaceId, async (client) => {
         const story = await lockStory(client, workspaceId, storyId);
         const scope: RuntimeStoryScope = {
@@ -127,16 +136,19 @@ export function createPostgresStoryGraphRepository(
           worldlineId: story.worldline_id,
           storyId,
         };
-        const definitionHash = storyDefinitionHashFor(normalized);
+        const { definition: normalized, definitionHash } = definition === undefined
+          ? await resolvePersistedDefinition(client, scope)
+          : await ensureSuppliedDefinition(client, scope, definition);
         await ensureNodeRows(client, scope, normalized, definitionHash);
         const facts = await loadFacts(client, scope, story.status !== "draft");
         const satisfiedNodeKeys = normalized.nodes
           .filter((node) => node.unlock && factsForNode(node.unlock, facts))
           .map((node) => node.nodeKey);
-        await activateEligibleNodes(client, scope, normalized, definitionHash, facts);
+        const activatedNodeKeys = await activateEligibleNodes(client, scope, normalized, definitionHash, facts);
         return {
           ...(await readSnapshot(client, scope, normalized, definitionHash)),
           unlockedNodeKeys: satisfiedNodeKeys,
+          activatedNodeKeys,
         };
       });
     },
@@ -217,7 +229,7 @@ async function activateEligibleNodes(
   definition: StoryDefinition,
   definitionHash: string,
   facts: StoryGraphFacts,
-): Promise<void> {
+): Promise<readonly string[]> {
   const eligible = getEligibleStoryRecordNodes(definition, facts);
   const rows = await selectNodeRows(client, scope);
   const byKey = new Map(rows.map((row) => [row.node_key, row]));
@@ -231,6 +243,7 @@ async function activateEligibleNodes(
   const cursor = worldline.rows[0];
   if (!cursor) throw new StoryGraphRepositoryError("STORY_GRAPH_READ_FAILED", "Worldline not found.");
   const now = new Date();
+  const activated: string[] = [];
 
   for (const candidate of eligible) {
     const current = byKey.get(candidate.node.nodeKey);
@@ -343,7 +356,145 @@ async function activateEligibleNodes(
       updated.unlock_evidence_event_ids = [...candidate.evidence.eventIds];
       updated.unlock_evidence = candidate.evidence;
     }
+    activated.push(candidate.node.nodeKey);
   }
+  return activated;
+}
+
+interface DefinitionBindingRow {
+  definition_hash: string;
+  definition: unknown;
+}
+
+async function selectDefinitionBinding(
+  client: PoolClient,
+  scope: RuntimeStoryScope,
+): Promise<DefinitionBindingRow | null> {
+  const result = await client.query<DefinitionBindingRow>(
+    `SELECT definition_hash, definition
+     FROM story_definition_bindings
+     WHERE workspace_id = $1 AND world_id = $2
+       AND worldline_id = $3 AND story_id = $4`,
+    [scope.workspaceId, scope.worldId, scope.worldlineId, scope.storyId],
+  );
+  return result.rows[0] ?? null;
+}
+
+function parseBindingDefinition(row: DefinitionBindingRow): {
+  definition: StoryDefinition;
+  definitionHash: string;
+} {
+  // Integrity: the persisted content must re-normalize and re-hash to the
+  // stored hash exactly; any drift means the authoritative binding was
+  // tampered with outside the runtime role and every use must fail closed.
+  let definition: StoryDefinition;
+  try {
+    definition = normalizeStoryDefinition(
+      row.definition as Parameters<typeof normalizeStoryDefinition>[0],
+    );
+  } catch {
+    throw new StoryGraphRepositoryError(
+      "STORY_DEFINITION_CONFLICT",
+      "Persisted Story definition binding is invalid.",
+    );
+  }
+  if (storyDefinitionHashFor(definition) !== row.definition_hash) {
+    throw new StoryGraphRepositoryError(
+      "STORY_DEFINITION_CONFLICT",
+      "Persisted Story definition binding does not match its hash.",
+    );
+  }
+  return { definition, definitionHash: row.definition_hash };
+}
+
+/**
+ * Persist the authoritative definition binding in the same transaction as
+ * node materialization/reconciliation. An existing binding is immutable:
+ * a different hash is a hard conflict, never an overwrite.
+ */
+async function ensureDefinitionBinding(
+  client: PoolClient,
+  scope: RuntimeStoryScope,
+  definition: StoryDefinition,
+  definitionHash: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO story_definition_bindings (
+       workspace_id, world_id, worldline_id, story_id,
+       definition_hash, definition, origin
+     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'materialization')
+     ON CONFLICT (workspace_id, world_id, worldline_id, story_id) DO NOTHING`,
+    [
+      scope.workspaceId,
+      scope.worldId,
+      scope.worldlineId,
+      scope.storyId,
+      definitionHash,
+      JSON.stringify(definition),
+    ],
+  );
+  const binding = await selectDefinitionBinding(client, scope);
+  if (!binding) {
+    throw new StoryGraphRepositoryError(
+      "STORY_GRAPH_READ_FAILED",
+      "Story definition binding could not be persisted.",
+    );
+  }
+  if (binding.definition_hash !== definitionHash) {
+    throw new StoryGraphRepositoryError(
+      "STORY_DEFINITION_CONFLICT",
+      "Story definition binding already exists with a different hash.",
+    );
+  }
+  parseBindingDefinition(binding);
+}
+
+/**
+ * Resolve the server-persisted authoritative definition for continuation
+ * paths that never see client content (runtime save, command completion
+ * orchestration). Graph rows that predate binding persistence fail closed
+ * with an explicit compatibility error instead of a fabricated definition.
+ */
+async function resolvePersistedDefinition(
+  client: PoolClient,
+  scope: RuntimeStoryScope,
+): Promise<{ definition: StoryDefinition; definitionHash: string }> {
+  const binding = await selectDefinitionBinding(client, scope);
+  if (!binding) {
+    throw new StoryGraphRepositoryError(
+      "STORY_DEFINITION_NOT_FOUND",
+      "Story definition binding is missing; the graph predates binding persistence and must be materialized with its authoritative definition.",
+    );
+  }
+  return parseBindingDefinition(binding);
+}
+
+/**
+ * Validate a caller-supplied definition against the persisted binding and
+ * materialized node rows. When no binding exists yet (graph predates binding
+ * persistence) the supplied definition is bound only after the node-row hash
+ * check passes, keeping the back-fill exact and atomic.
+ */
+async function ensureSuppliedDefinition(
+  client: PoolClient,
+  scope: RuntimeStoryScope,
+  input: StoryDefinition,
+): Promise<{ definition: StoryDefinition; definitionHash: string }> {
+  const definition = normalizeStoryDefinition(input);
+  const definitionHash = storyDefinitionHashFor(definition);
+  const binding = await selectDefinitionBinding(client, scope);
+  if (binding) {
+    if (binding.definition_hash !== definitionHash) {
+      throw new StoryGraphRepositoryError(
+        "STORY_DEFINITION_CONFLICT",
+        "Supplied Story definition does not match the persisted binding.",
+      );
+    }
+    return parseBindingDefinition(binding);
+  }
+  await ensureNodeRows(client, scope, definition, definitionHash);
+  await ensureDefinitionBinding(client, scope, definition, definitionHash);
+  return { definition, definitionHash };
 }
 
 async function worldVersionFor(client: PoolClient, scope: RuntimeStoryScope): Promise<string> {

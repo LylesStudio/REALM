@@ -159,3 +159,108 @@ export async function resolveWorldScopeForMember(
     { readOnly: true },
   );
 }
+
+/**
+ * F1a：Bridge 命令路由的显式世界线选择与读写分离授权。
+ *
+ * 与 resolveWorldScopeForMember 的读语义分离：
+ * - 显式 worldlineId 必须在同一 workspace/world 内存在——不存在、跨世界、
+ *   非成员一律 not_found（404，不泄露存在性），绝不回退到最早世界线；
+ * - 写访问要求 membership 角色 owner/player，observer → forbidden（403）；
+ * - 写访问下显式目标必须 active（frozen/archived → not_writable）；
+ * - 写访问缺省选择只在可写（active）世界线恰好一条时成立，多条 →
+ *   scope_required，绝不静默选最旧；零条 → not_writable；
+ * - 读访问缺省保持既有"最早一条挂接世界线"语义，显式选择只校验归属。
+ * 客户端 workspace/principal 永远不参与裁决：二者都来自服务端会话与
+ * LOCAL_RECORD_SCOPE，worldlineId 只作为世界线身份输入。
+ */
+export type BridgeWorldScopeAccess = "read" | "write";
+
+export type BridgeWorldScopeResolution =
+  | { status: "ok"; scope: WorldScope; role: string }
+  | { status: "not_found" }
+  | { status: "forbidden" }
+  | { status: "scope_required" }
+  | { status: "not_writable" };
+
+const WRITE_ROLES = new Set(["owner", "player"]);
+
+export async function resolveBridgeWorldScopeForMember(
+  database: Pool,
+  input: {
+    workspaceId: string;
+    principalId: string;
+    worldId: string;
+    worldlineId?: string;
+    access: BridgeWorldScopeAccess;
+  },
+): Promise<BridgeWorldScopeResolution> {
+  return withWorkspaceTransaction(
+    database,
+    input.workspaceId,
+    async (client) => {
+      const membership = await client.query<{ role: string }>(
+        `SELECT membership.role AS role
+         FROM worlds AS world
+         JOIN player_world_memberships AS membership
+           ON membership.workspace_id = world.workspace_id
+          AND membership.world_id = world.id
+          AND membership.principal_id = $3
+         WHERE world.workspace_id = $1 AND world.id = $2`,
+        [input.workspaceId, input.worldId, input.principalId],
+      );
+      const role = membership.rows[0]?.role;
+      if (!role) return { status: "not_found" };
+      if (input.access === "write" && !WRITE_ROLES.has(role)) {
+        return { status: "forbidden" };
+      }
+      const scope = (worldlineId: string): BridgeWorldScopeResolution => ({
+        status: "ok",
+        scope: {
+          workspaceId: input.workspaceId,
+          worldId: input.worldId,
+          worldlineId,
+        },
+        role,
+      });
+
+      if (input.worldlineId !== undefined) {
+        const explicit = await client.query<{ status: string }>(
+          `SELECT status FROM worldlines
+           WHERE workspace_id = $1 AND world_id = $2 AND id = $3`,
+          [input.workspaceId, input.worldId, input.worldlineId],
+        );
+        const worldline = explicit.rows[0];
+        if (!worldline) return { status: "not_found" };
+        if (input.access === "write" && worldline.status !== "active") {
+          return { status: "not_writable" };
+        }
+        return scope(input.worldlineId);
+      }
+
+      if (input.access === "write") {
+        const writable = await client.query<{ id: string }>(
+          `SELECT id FROM worldlines
+           WHERE workspace_id = $1 AND world_id = $2 AND status = 'active'
+           ORDER BY created_at ASC, id ASC`,
+          [input.workspaceId, input.worldId],
+        );
+        if (writable.rows.length === 0) return { status: "not_writable" };
+        if (writable.rows.length > 1) return { status: "scope_required" };
+        return scope(writable.rows[0]!.id);
+      }
+
+      const readable = await client.query<{ id: string }>(
+        `SELECT id FROM worldlines
+         WHERE workspace_id = $1 AND world_id = $2
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`,
+        [input.workspaceId, input.worldId],
+      );
+      const worldlineId = readable.rows[0]?.id;
+      if (!worldlineId) return { status: "not_found" };
+      return scope(worldlineId);
+    },
+    { readOnly: true },
+  );
+}

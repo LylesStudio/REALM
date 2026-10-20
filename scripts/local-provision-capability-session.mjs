@@ -61,11 +61,11 @@ try {
             to_regclass('public.workspaces') AS workspaces_table`,
   );
   if (!tables.rows[0]?.keys_table || !tables.rows[0]?.workspaces_table) {
-    fail("realm_capability_keys/workspaces missing; run migrations and seed first.");
+    throw new Error("realm_capability_keys/workspaces missing; run migrations and seed first.");
   }
   const workspaces = await client.query(`SELECT id FROM workspaces ORDER BY id`);
   if (workspaces.rows.length === 0) {
-    fail("no workspaces found; run the demo seed first.");
+    throw new Error("no workspaces found; run the demo seed first.");
   }
   for (const row of workspaces.rows) {
     // 同值幂等；分歧 fail-closed（只回读布尔，不读值）。
@@ -83,11 +83,14 @@ try {
         [row.id, Buffer.from(resolved.secret, "utf8")],
       );
       if (matches.rows[0]?.matches !== true) {
-        fail(`session key mismatch on an existing workspace (value never printed): ${row.id}`);
+        throw new Error(`session key mismatch on an existing workspace (value never printed): ${row.id}`);
       }
     }
   }
   console.error(`local-provision-capability-session: provisioned ${workspaces.rows.length} workspace(s) from ${resolved.source} secret.`);
+} catch (error) {
+  console.error(`local-provision-capability-session: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 } finally {
   await client.end();
 }

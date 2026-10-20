@@ -869,11 +869,11 @@ test("export-matrix fences: runtime table diff / text[] list / scope sets", asyn
   // Genesis/Record Turn 两张 durable 台账表进入 schema；后两者明确不进入 realm-pack。
   const planned: string[] = [];
   const nonExportable = new Set(["genesis_creation_requests", "turn_cancel_requests"]);
-  assert.equal(actual.size, 94, `schema 实有表应为 94（92 个矩阵表 + 2 张 durable 台账表），实际 ${actual.size}`);
+  assert.equal(actual.size, 100, `schema 实有表应为 100（98 个矩阵表 + 2 张 durable 台账表），实际 ${actual.size}`);
   const exportableActual = new Set([...actual].filter((table) => !nonExportable.has(table)));
-  assert.equal(exportableActual.size, 92, `矩阵范围实有表应为 92，实际 ${exportableActual.size}`);
+  assert.equal(exportableActual.size, 98, `矩阵范围实有表应为 98，实际 ${exportableActual.size}`);
   const matrixTables = new Set(EXPORT_MATRIX.map((entry) => entry.table));
-  assert.equal(matrixTables.size, 92, `矩阵应为 92 行，实际 ${matrixTables.size}`);
+  assert.equal(matrixTables.size, 98, `矩阵应为 98 行，实际 ${matrixTables.size}`);
   for (const table of [...exportableActual, ...planned]) {
     assert.ok(matrixTables.has(table), `矩阵缺表：${table}`);
   }
@@ -883,6 +883,7 @@ test("export-matrix fences: runtime table diff / text[] list / scope sets", asyn
       `矩阵多表（无 schema 来源）：${table}`,
     );
   }
+  assert.equal(EXPORT_MATRIX.find(entry => entry.table === "story_definition_bindings")?.tier, "excluded");
   for (const table of nonExportable) {
     assert.ok(!matrixTables.has(table), `内部 durable 台账不得进入 realm-pack：${table}`);
   }
@@ -923,4 +924,8 @@ test("server-only fence: no fflate import under app/components", async () => {
   }
   for (const root of roots) await walk(root);
   assert.deepEqual(offenders, [], `fflate 不得进入前端路径：${offenders.join(", ")}`);
+});
+
+test("A2 command maps remain excluded from ordinary realm-pack exports", () => {
+  assert.equal(EXPORT_MATRIX.find(entry => entry.table === "realmworld_command_materializations")?.tier, "excluded");
 });

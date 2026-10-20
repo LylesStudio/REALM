@@ -7,6 +7,7 @@ import {
   StoryGraphRepositoryError,
 } from "../database/postgres/story-graph-repository.ts";
 
+import { cloneGoalRecordFixture, trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
 import { goalInstanceIdFor } from "../modules/goals/public.ts";
 import {
   normalizeStoryDefinition,
@@ -51,23 +52,31 @@ function makeDefinition(nextNode: boolean): StoryDefinition {
   });
 }
 
-async function createStory(owner: pg.Pool, suffix: string, worldlineId: string = WORLDLINE): Promise<string> {
+async function createStory(owner: pg.Pool, suffix: string, worldlineId: string = WORLDLINE, worldId: string = WORLD): Promise<string> {
   const storyId = `story_b2_${suffix}`;
   await owner.query(
     `INSERT INTO stories (
        workspace_id, world_id, worldline_id, id, title, status, premise,
        start_tick, start_ordinal
      ) VALUES ($1, $2, $3, $4, 'B2 Story', 'active', 'B2 test', 0, 0)`,
-    [WS, WORLD, worldlineId, storyId],
+    [WS, worldId, worldlineId, storyId],
   );
   return storyId;
 }
 
-function pools(): { owner: pg.Pool; runtime: pg.Pool } {
-  return {
-    owner: new pg.Pool({ connectionString: adminConnectionString!, max: 2 }),
-    runtime: new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 }),
-  };
+const storyGoalDefinition = {
+  goalKey: "story.prep", policyVersion: "story-policy-v1", mode: "deterministic" as const, visible: true,
+  rubric: { kind: "event_count" as const, eventKind: "narration.committed", progressKey: "done", threshold: 1 },
+  outcome: {},
+};
+
+function pools(t?: test.TestContext): { owner: pg.Pool; runtime: pg.Pool } {
+  const close = t ? fixtureCleanup(t) : null;
+  const owner = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+  close?.(() => owner.end());
+  const runtime = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+  close?.(() => runtime.end());
+  return { owner, runtime };
 }
 
 test(
@@ -149,31 +158,27 @@ test(
   "reconcile unlocks from a committed Story-scoped Goal and replays without duplicate topology",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
-    const { owner, runtime } = pools();
-    const storyId = await createStory(owner, randomUUID().replaceAll("-", "").slice(0, 12));
-    t.after(async () => {
-      await owner.query("DELETE FROM stories WHERE workspace_id = $1 AND id = $2", [WS, storyId]);
-      await runtime.end();
-      await owner.end();
-    });
+    const { owner, runtime } = pools(t);
+    const ids = await cloneGoalRecordFixture(owner);
+    const { world: WORLD, worldline: WORLDLINE } = ids;
+    const storyId = await createStory(owner, randomUUID().replaceAll("-", "").slice(0, 12), WORLDLINE, WORLD);
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [storyGoalDefinition] });
     const definition = makeDefinition(true);
     const repository = createPostgresStoryGraphRepository(runtime);
     const scope = { workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, storyId };
     await repository.materialize({ workspaceId: WS, storyId, definition });
 
     const goalKey = "story.prep";
-    await owner.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, story_id, scope_kind, id,
-         goal_key, state, revision, progress, outcome, policy_version, completed_at
-       ) VALUES ($1, $2, $3, $4, 'story', $5, $6, 'completed', 1,
-                 '{"done":true}'::jsonb, '{"ok":true}'::jsonb, 'story-policy-v1', CURRENT_TIMESTAMP)`,
-      [WS, WORLD, WORLDLINE, storyId, goalInstanceIdFor({ kind: "story", ...scope }, goalKey), goalKey],
-    );
+    const [goalId] = await trusted.materialize(owner, runtime, { kind: "story", ...scope });
+    assert.equal(goalId, goalInstanceIdFor({ kind: "story", ...scope }, goalKey));
+    await owner.query(`UPDATE goal_instances SET state='completed',revision=1,
+      progress='{"done":true}'::jsonb,outcome='{"ok":true}'::jsonb,completed_at=CURRENT_TIMESTAMP
+      WHERE workspace_id=$1 AND id=$2`, [WS, goalId]);
 
     const first = await repository.reconcile({ workspaceId: WS, storyId, definition });
     const replay = await repository.reconcile({ workspaceId: WS, storyId, definition });
-    assert.deepEqual(replay, first);
+    assert.deepEqual(replay, { ...first, activatedNodeKeys: [] });
+    assert.deepEqual(first.activatedNodeKeys, ["next"]);
     assert.equal(first.unlockedNodeKeys.includes("next"), true);
     assert.equal(first.nodes.find((node) => node.nodeKey === "next")?.state, "active");
     assert.ok(first.nodes.find((node) => node.nodeKey === "next")?.recordId);
@@ -191,11 +196,14 @@ test(
 test(
   "withdrawn and superseded Goals cannot unlock settled Story conditions; natural settlement can",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
-  async () => {
-    const { owner, runtime } = pools();
-    try {
+  async (t) => {
+    const { owner, runtime } = pools(t);
+    const ids = await cloneGoalRecordFixture(owner);
+    const { world: WORLD, worldline: WORLDLINE } = ids;
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [storyGoalDefinition] });
+    {
       for (const resolution of ["withdrawn", "superseded", "natural"] as const) {
-        const storyId = await createStory(owner, randomUUID().replaceAll("-", "").slice(0, 12));
+        const storyId = await createStory(owner, randomUUID().replaceAll("-", "").slice(0, 12), WORLDLINE, WORLD);
         const definition = normalizeStoryDefinition({ ...makeDefinition(true), nodes: [
           {kind:"record",nodeKey:"start",recordKey:"start-record",title:"Start",sequence:1,initial:true},
           {kind:"record",nodeKey:"next",recordKey:"next-record",title:"Next",sequence:2,
@@ -204,12 +212,9 @@ test(
         const repository = createPostgresStoryGraphRepository(runtime);
         const scope = { workspaceId:WS,worldId:WORLD,worldlineId:WORLDLINE,storyId };
         await repository.materialize({ workspaceId:WS,storyId,definition });
-        await owner.query(`INSERT INTO goal_instances (
-          workspace_id,world_id,worldline_id,story_id,scope_kind,id,goal_key,state,revision,
-          progress,outcome,policy_version,completed_at,resolution_kind
-        ) VALUES ($1,$2,$3,$4,'story',$5,'story.prep','settled',1,'{}'::jsonb,
-          NULL,'story-policy-v1',CURRENT_TIMESTAMP,$6)`,
-          [WS,WORLD,WORLDLINE,storyId,goalInstanceIdFor({kind:"story",...scope},"story.prep"),resolution]);
+        const [goalId] = await trusted.materialize(owner, runtime, { kind: "story", ...scope });
+        await owner.query(`UPDATE goal_instances SET state='settled',revision=1,completed_at=CURRENT_TIMESTAMP,
+          resolution_kind=$3 WHERE workspace_id=$1 AND id=$2`, [WS, goalId, resolution]);
         const result = await repository.reconcile({ workspaceId:WS,storyId,definition });
         assert.equal(result.unlockedNodeKeys.includes("next"), resolution === "natural", resolution);
         assert.equal(result.nodes.find(node=>node.nodeKey==="next")?.state,
@@ -219,7 +224,7 @@ test(
           [WS,storyId]);
         assert.equal(ledger.rows[0].count, resolution === "natural" ? "1" : "0", resolution);
       }
-    } finally { await runtime.end(); await owner.end(); }
+    }
   },
 );
 

@@ -2,6 +2,7 @@ import {
   normalizeGenesisLanguage,
   type WorldGenesisDraft,
 } from "./world-genesis-contract.ts";
+import { parseDeclaredSemanticEvents } from "../world-transfer/semantic-events.ts";
 import { normalizeWorldStyle } from "../style/world-style.ts";
 import type { RealmWorldRuntimeInstantiationPlan } from "../world-transfer/realmworld-runtime-content.ts";
 
@@ -12,7 +13,14 @@ export function realmWorldPlanToGenesisDraft(
 ): WorldGenesisDraft {
   const language = normalizeGenesisLanguage(plan.world.settings.language);
   const style = normalizeWorldStyle(plan.world.settings.style);
+  // Signed package World declaration of semantic event keys. Malformed
+  // declarations fail instantiation closed; they are never silently dropped.
+  const declaredEvents = parseDeclaredSemanticEvents(plan.world.settings.declaredEvents);
+  if (declaredEvents === null) {
+    throw new Error("RealmWorld declaredEvents are invalid.");
+  }
   return {
+    ...(declaredEvents.length > 0 ? { declaredEvents } : {}),
     worldIdentity: plan.binding,
     runtimeIdentity,
     ...(language ? { language } : {}),

@@ -1,3 +1,12 @@
+import {
+  decodeOutboxDeliveryBody,
+  isRecordCommittedBody,
+  normalizeRestoreDelivery,
+  OutboxDeliveryMessageInvalid,
+  type OutboxDeliveryMessage,
+  type OutboxDeliveryRepository,
+  type RestoreDelivery,
+} from "../../modules/application/outbox-delivery-contract.ts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   FatalTurnError,
@@ -1219,107 +1228,13 @@ export function createPostgresRuntimeRepository<
     async claimOutbox(input: ClaimOutboxInput) {
       return inWorkspaceTransaction(options.pool, workspaceId, async (client) => {
         const row = await lockedOutbox(client, workspaceId, input.messageId);
-        const message = toOutboxMessage<TOutbox>(row);
-        const nowEpoch = epoch(input.now, "OUTBOX_NOW_INVALID");
-        const leaseEpoch = epoch(input.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID");
-        if (!input.leaseOwner.trim() || leaseEpoch <= nowEpoch) {
-          throw new RuntimeInvariantError(
-            "OUTBOX_LEASE_INVALID",
-            "Outbox claims require an owner and a future lease expiry.",
-          );
-        }
-        const ready =
-          ["pending", "retryable"].includes(message.state) &&
-          epoch(message.availableAt, "OUTBOX_AVAILABLE_TIME_INVALID") <= nowEpoch;
-        const expired =
-          message.state === "delivering" &&
-          message.leaseExpiresAt !== undefined &&
-          epoch(message.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID") <= nowEpoch;
-        if (message.revision !== input.expectedRevision || (!ready && !expired)) {
-          throw new RuntimeConcurrencyError();
-        }
-        const result = await client.query<OutboxRow>(
-          `${outboxUpdateReturning(`
-             state = 'delivering', revision = revision + 1,
-             attempt_count = attempt_count + 1,
-             lease_owner = $3, lease_expires_at = $4::timestamptz,
-             updated_at = $5::timestamptz
-           `)}`,
-          [
-            workspaceId,
-            input.messageId,
-            input.leaseOwner.trim(),
-            input.leaseExpiresAt,
-            input.now,
-          ],
-        );
-        return toOutboxMessage<TOutbox>(result.rows[0]!);
+        return toOutboxMessage<TOutbox>(await claimOutboxTransition(client, workspaceId, input, toOutboxMessage<TOutbox>(row)));
       });
     },
-
     async settleOutbox(input: SettleOutboxInput) {
       return inWorkspaceTransaction(options.pool, workspaceId, async (client) => {
         const row = await lockedOutbox(client, workspaceId, input.messageId);
-        const message = toOutboxMessage<TOutbox>(row);
-        if (
-          message.revision !== input.expectedRevision ||
-          message.state !== "delivering" ||
-          message.leaseOwner !== input.leaseOwner ||
-          message.leaseExpiresAt === undefined ||
-          epoch(message.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID") <=
-            epoch(input.now, "OUTBOX_NOW_INVALID")
-        ) {
-          throw new RuntimeConcurrencyError();
-        }
-        if (input.outcome !== "delivered" && !input.failure) {
-          throw new RuntimeInvariantError(
-            "OUTBOX_FAILURE_REQUIRED",
-            "Retryable and failed deliveries require a safe failure summary.",
-          );
-        }
-        if (input.outcome === "retryable" && !input.retryAt) {
-          throw new RuntimeInvariantError(
-            "OUTBOX_RETRY_TIME_REQUIRED",
-            "Retryable delivery requires a retry time.",
-          );
-        }
-        if (
-          input.outcome === "retryable" &&
-          epoch(input.retryAt!, "OUTBOX_RETRY_TIME_INVALID") <=
-            epoch(input.now, "OUTBOX_NOW_INVALID")
-        ) {
-          throw new RuntimeInvariantError(
-            "OUTBOX_RETRY_TIME_INVALID",
-            "Outbox retry time must be later than the settlement time.",
-          );
-        }
-
-        const delivered = input.outcome === "delivered";
-        const result = await client.query<OutboxRow>(
-          `${outboxUpdateReturning(`
-             state = $3, revision = revision + 1,
-             available_at = CASE WHEN $3 = 'retryable'
-               THEN $4::timestamptz ELSE available_at END,
-             lease_owner = NULL, lease_expires_at = NULL,
-             published_at = CASE WHEN $3 = 'delivered'
-               THEN $5::timestamptz ELSE published_at END,
-             last_error_code = $6,
-             last_error_message = $7,
-             last_error_at = $8::timestamptz,
-             updated_at = $5::timestamptz
-           `)}`,
-          [
-            workspaceId,
-            input.messageId,
-            input.outcome,
-            input.retryAt ?? null,
-            input.now,
-            delivered ? null : input.failure!.code,
-            delivered ? null : input.failure!.message,
-            delivered ? null : input.failure!.occurredAt,
-          ],
-        );
-        return toOutboxMessage<TOutbox>(result.rows[0]!);
+        return toOutboxMessage<TOutbox>(await settleOutboxTransition(client, workspaceId, input, toOutboxMessage<TOutbox>(row)));
       });
     },
   };
@@ -1754,14 +1669,21 @@ function outboxUpdateReturning(setClause: string): string {
 function toOutboxMessage<T extends JsonValue>(
   row: OutboxRow,
 ): RuntimeOutboxMessage<T> {
-  const state = normalizeOutboxState(row.state);
-  const message: RuntimeOutboxMessage<T> = {
-    messageId: row.id,
+  return {
+    ...outboxDeliveryState(row),
     turnId: row.turn_run_id,
-    recordId: row.record_id,
     topic: row.topic,
-    dedupeKey: row.dedupe_key,
     payload: runtimePayload<T>(row.payload),
+  };
+}
+
+type OutboxDeliveryState = Omit<RuntimeOutboxMessage, "turnId" | "topic" | "payload">;
+function outboxDeliveryState(row: Omit<OutboxRow, "turn_run_id">): OutboxDeliveryState {
+  const state = normalizeOutboxState(row.state);
+  const message: OutboxDeliveryState = {
+    messageId: row.id,
+    recordId: row.record_id,
+    dedupeKey: row.dedupe_key,
     state,
     revision: safeInteger(row.revision, "OUTBOX_REVISION_INVALID"),
     attempts: safeInteger(row.attempt_count, "OUTBOX_ATTEMPT_INVALID"),
@@ -1821,4 +1743,241 @@ function translatePostgresConflict(error: unknown): unknown {
     );
   }
   return error;
+}
+
+async function claimOutboxTransition(
+  client: PoolClient,
+  workspaceId: string,
+  input: ClaimOutboxInput,
+  message: Pick<RuntimeOutboxMessage, "state" | "revision" | "availableAt" | "leaseOwner" | "leaseExpiresAt">,
+): Promise<OutboxRow> {
+  const nowEpoch = epoch(input.now, "OUTBOX_NOW_INVALID");
+  const leaseEpoch = epoch(input.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID");
+  if (!input.leaseOwner.trim() || leaseEpoch <= nowEpoch) {
+    throw new RuntimeInvariantError(
+      "OUTBOX_LEASE_INVALID",
+      "Outbox claims require an owner and a future lease expiry.",
+    );
+  }
+  const ready =
+    ["pending", "retryable"].includes(message.state) &&
+    epoch(message.availableAt, "OUTBOX_AVAILABLE_TIME_INVALID") <= nowEpoch;
+  const expired =
+    message.state === "delivering" &&
+    message.leaseExpiresAt !== undefined &&
+    epoch(message.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID") <= nowEpoch;
+  if (message.revision !== input.expectedRevision || (!ready && !expired)) {
+    throw new RuntimeConcurrencyError();
+  }
+  const result = await client.query<OutboxRow>(
+    `${outboxUpdateReturning(`
+       state = 'delivering', revision = revision + 1,
+       attempt_count = attempt_count + 1,
+       lease_owner = $3, lease_expires_at = $4::timestamptz,
+       updated_at = $5::timestamptz
+     `)}`,
+    [
+      workspaceId,
+      input.messageId,
+      input.leaseOwner.trim(),
+      input.leaseExpiresAt,
+      input.now,
+    ],
+  );
+  return result.rows[0]!;
+}
+
+async function settleOutboxTransition(
+  client: PoolClient,
+  workspaceId: string,
+  input: SettleOutboxInput,
+  message: Pick<RuntimeOutboxMessage, "state" | "revision" | "availableAt" | "leaseOwner" | "leaseExpiresAt">,
+): Promise<OutboxRow> {
+  if (
+    message.revision !== input.expectedRevision ||
+    message.state !== "delivering" ||
+    message.leaseOwner !== input.leaseOwner ||
+    message.leaseExpiresAt === undefined ||
+    epoch(message.leaseExpiresAt, "OUTBOX_LEASE_TIME_INVALID") <=
+      epoch(input.now, "OUTBOX_NOW_INVALID")
+  ) {
+    throw new RuntimeConcurrencyError();
+  }
+  if (input.outcome !== "delivered" && !input.failure) {
+    throw new RuntimeInvariantError(
+      "OUTBOX_FAILURE_REQUIRED",
+      "Retryable and failed deliveries require a safe failure summary.",
+    );
+  }
+  if (input.outcome === "retryable" && !input.retryAt) {
+    throw new RuntimeInvariantError(
+      "OUTBOX_RETRY_TIME_REQUIRED",
+      "Retryable delivery requires a retry time.",
+    );
+  }
+  if (
+    input.outcome === "retryable" &&
+    epoch(input.retryAt!, "OUTBOX_RETRY_TIME_INVALID") <=
+      epoch(input.now, "OUTBOX_NOW_INVALID")
+  ) {
+    throw new RuntimeInvariantError(
+      "OUTBOX_RETRY_TIME_INVALID",
+      "Outbox retry time must be later than the settlement time.",
+    );
+  }
+
+  const delivered = input.outcome === "delivered";
+  const result = await client.query<OutboxRow>(
+    `${outboxUpdateReturning(`
+       state = $3, revision = revision + 1,
+       available_at = CASE WHEN $3 = 'retryable'
+         THEN $4::timestamptz ELSE available_at END,
+       lease_owner = NULL, lease_expires_at = NULL,
+       published_at = CASE WHEN $3 = 'delivered'
+         THEN $5::timestamptz ELSE published_at END,
+       last_error_code = $6,
+       last_error_message = $7,
+       last_error_at = $8::timestamptz,
+       updated_at = $5::timestamptz
+     `)}`,
+    [
+      workspaceId,
+      input.messageId,
+      input.outcome,
+      input.retryAt ?? null,
+      input.now,
+      delivered ? null : input.failure!.code,
+      delivered ? null : input.failure!.message,
+      delivered ? null : input.failure!.occurredAt,
+    ],
+  );
+  return result.rows[0]!;
+}
+
+export interface PostgresOutboxDeliveryRepositoryOptions {
+  pool: Pool;
+  workspaceId: string;
+  topics: readonly string[];
+  restoreDelivery?: RestoreDelivery;
+  batchLimit: number;
+  onInvalidMessage?: (code: "OUTBOX_DELIVERY_MESSAGE_INVALID") => void;
+}
+
+interface DeliveryOutboxRow extends Omit<OutboxRow, "turn_run_id"> {
+  turn_run_id: string | null;
+  workspace_id: string;
+  world_id: string;
+  worldline_id: string;
+  event_id: string | null;
+  restore_delivery_kind?: string | null;
+  scan_available_at: string;
+}
+
+export function createPostgresOutboxDeliveryRepository(
+  options: PostgresOutboxDeliveryRepositoryOptions,
+): OutboxDeliveryRepository {
+  const restoreDelivery = normalizeRestoreDelivery(options.restoreDelivery);
+  const workspaceId = options.workspaceId.trim();
+  if (!workspaceId || !Number.isSafeInteger(options.batchLimit) || options.batchLimit < 1
+    || !Array.isArray(options.topics) || options.topics.length === 0
+    || options.topics.some(topic => typeof topic !== "string" || !topic.trim() || topic !== topic.trim())) {
+    throw new RuntimeInvariantError("OUTBOX_DELIVERY_CONFIG_INVALID", "Delivery requires a workspace, topics and a bounded batch.");
+  }
+  const topics = [...new Set(options.topics)];
+  const enabled = restoreDelivery === "record-events-v2";
+  // Disabled SQL deliberately never mentions the new column (old schema v1).
+  const select = `SELECT o.id, o.turn_run_id, o.record_id, o.topic, o.dedupe_key, o.payload,
+    o.state, o.revision, o.attempt_count, o.available_at, o.lease_owner, o.lease_expires_at,
+    o.created_at, o.updated_at, o.published_at, o.last_error_code, o.last_error_message, o.last_error_at,
+    o.workspace_id, o.world_id, o.worldline_id, o.event_id, o.available_at::text AS scan_available_at${enabled ? ", o.restore_delivery_kind" : ""}
+    FROM outbox AS o`;
+  const native = `o.turn_run_id IS NOT NULL AND length(btrim(o.turn_run_id)) > 0`;
+  const eligibility = `o.workspace_id = $1 AND o.topic = ANY($2::text[]) AND (${enabled
+    ? `(${native} AND o.restore_delivery_kind IS NULL) OR
+       (o.turn_run_id IS NULL AND o.restore_delivery_kind = 'record-events-v1' AND o.topic = 'record.events.committed')`
+    : native})`;
+  let cursor: { availableAt: string; id: string } | null = null;
+
+  async function decode(client: PoolClient, row: DeliveryOutboxRow): Promise<OutboxDeliveryMessage> {
+    const body = decodeOutboxDeliveryBody({turnId: row.turn_run_id, recordId: row.record_id, topic: row.topic,
+      restoreDeliveryKind: enabled ? row.restore_delivery_kind : null, payload: row.payload}, restoreDelivery);
+    const record = await client.query<{id: string}>(
+      `SELECT id FROM records WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND id = $4`,
+      [workspaceId, row.world_id, row.worldline_id, row.record_id],
+    );
+    if (row.workspace_id !== workspaceId || record.rowCount !== 1) throw new OutboxDeliveryMessageInvalid();
+    if (body.topic === "record.events.committed") {
+      // Shape was validated by the decoder; reusing its guard avoids casting
+      // either an arbitrary custom body or a nullable turn into a native type.
+      if (!isRecordCommittedBody(body.payload, row.record_id)) throw new OutboxDeliveryMessageInvalid();
+      const ids = [...new Set(body.payload.eventIds)];
+      const events = await client.query<{id: string}>(
+        `SELECT id FROM events WHERE workspace_id = $1 AND world_id = $2 AND worldline_id = $3 AND record_id = $4 AND id = ANY($5::text[])`,
+        [workspaceId, row.world_id, row.worldline_id, row.record_id, ids],
+      );
+      const present = new Set(events.rows.map(event => event.id));
+      if (ids.some(id => !present.has(id))) throw new OutboxDeliveryMessageInvalid();
+    }
+    try {
+      return { ...outboxDeliveryState(row), ...body };
+    } catch (error) {
+      if (error instanceof RuntimeInvariantError && ["OUTBOX_STATE_INVALID", "OUTBOX_REVISION_INVALID", "OUTBOX_ATTEMPT_INVALID", "RUNTIME_TIMESTAMP_INVALID"].includes(error.code)) {
+        throw new OutboxDeliveryMessageInvalid();
+      }
+      throw error;
+    }
+  }
+
+  async function locked(client: PoolClient, messageId: string): Promise<DeliveryOutboxRow> {
+    const result = await client.query<DeliveryOutboxRow>(
+      `${select} WHERE ${eligibility} AND o.id = $3 FOR UPDATE OF o`, [workspaceId, topics, messageId],
+    );
+    if (result.rowCount !== 1) throw new RuntimeInvariantError("OUTBOX_NOT_FOUND", "Outbox message not found.");
+    return result.rows[0]!;
+  }
+  return {
+    async listOutboxMessages(input) {
+      if (input.limit !== options.batchLimit) {
+        throw new RuntimeInvariantError("OUTBOX_DELIVERY_BATCH_INVALID", "Delivery batch must match the configured bound.");
+      }
+      epoch(input.now, "OUTBOX_NOW_INVALID");
+      return inWorkspaceTransaction(options.pool, workspaceId, async client => {
+        const result = await client.query<DeliveryOutboxRow>(
+          `${select} WHERE ${eligibility}
+            AND ((o.state IN ('pending', 'retryable') AND o.available_at <= $3::timestamptz)
+              OR (o.state = 'delivering' AND o.lease_expires_at <= $3::timestamptz))
+            AND ($4::timestamptz IS NULL OR (o.available_at, o.id COLLATE "C") > ($4::timestamptz, $5::text COLLATE "C"))
+            ORDER BY o.available_at, o.id COLLATE "C" LIMIT $6`,
+          [workspaceId, topics, input.now, cursor?.availableAt ?? null, cursor?.id ?? null, input.limit],
+        );
+        const messages: OutboxDeliveryMessage[] = [];
+        for (const row of result.rows) {
+          try { messages.push(await decode(client, row)); }
+          catch (error) {
+            if (!(error instanceof OutboxDeliveryMessageInvalid)) throw error;
+            options.onInvalidMessage?.("OUTBOX_DELIVERY_MESSAGE_INVALID");
+          }
+        }
+        const last = result.rows.at(-1);
+        cursor = result.rows.length === input.limit && last ? { availableAt: last.scan_available_at, id: last.id } : null;
+        return messages;
+      });
+    },
+    async claimOutbox(input) {
+      return inWorkspaceTransaction(options.pool, workspaceId, async client => {
+        const row = await locked(client, input.messageId);
+        const message = await decode(client, row);
+        const updated = await claimOutboxTransition(client, workspaceId, input, message);
+        return decode(client, { ...row, ...updated, turn_run_id: row.turn_run_id });
+      });
+    },
+    async settleOutbox(input) {
+      return inWorkspaceTransaction(options.pool, workspaceId, async client => {
+        const row = await locked(client, input.messageId);
+        const message = await decode(client, row);
+        const updated = await settleOutboxTransition(client, workspaceId, input, message);
+        return decode(client, { ...row, ...updated, turn_run_id: row.turn_run_id });
+      });
+    },
+  };
 }

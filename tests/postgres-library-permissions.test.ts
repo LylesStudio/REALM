@@ -70,6 +70,8 @@ const MIGRATIONS = [
   "0057_realmworld_record_binding.sql",
   // B1：branch Goal clone reads the retry-attempt columns.
   "0060_goal_scope_terminal_lifecycle.sql",
+  // Current branch readback unconditionally queries committed performance facts.
+  "0066_committed_fact_commands.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

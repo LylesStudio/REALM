@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID, generateKeyPairSync, sign } from "node:crypto";
+import { randomUUID, generateKeyPairSync, sign, verify } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
@@ -50,10 +50,12 @@ import {
 import { createCharacterMemoryService } from "../modules/memory/public.ts";
 import { createMemorySyncScheduler } from "../modules/memory/pipeline.ts";
 import { runGoalAssessmentOnce } from "../modules/goals/assessment-worker.ts";
-import type { GoalDefinition } from "../modules/goals/public.ts";
+import { goalEvidenceSnapshotHash } from "../modules/goals/public.ts";
+import { loadGoalScopeCommittedEvents } from "../database/postgres/goal-scope-evidence.ts";
 import {
   computeRealmWorldContentHash,
   installRealmWorldDirectory,
+  mountRealmWorld,
 } from "../modules/world-transfer/realmworld-loader.ts";
 import {
   REALMWORLD_FORMAT,
@@ -73,8 +75,45 @@ import { POST as restoreRuntimeRecord } from "../app/api/record/restore/route.ts
 import { GET as getRuntimeGoals } from "../app/api/record/goals/route.ts";
 import { GET as getRuntimeGoalEvents } from "../app/api/record/goals/events/route.ts";
 import { POST as instantiateRealmWorld } from "../app/api/realmworld/instantiate/route.ts";
-import { sessionProofFor, seedCapabilitySessionKey } from "./helpers/session-proof.ts";
+import { fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
+import { withWorkspaceTransaction } from "../database/postgres/workspace-transaction.ts";
+import { lockGoalContentWorld } from "../database/postgres/goal-content-binding-repository.ts";
+import { materializeGoalInstances } from "../database/postgres/goal-runtime-materialization.ts";
+import { createDefaultGoalContentBindingSource } from "../modules/application/goal-content-binding-source.ts";
+import { createPostgresLibraryService } from "../modules/application/library-service.ts";
+import { readRealmWorldVerifier } from "../app/api/realmworld/env.ts";
+import { sessionProofFor, seedCapabilitySessionKey, installTestSessionSecret } from "./helpers/session-proof.ts";
 import { createHeadlessRuntime } from "../modules/runtime/headless-runtime.ts";
+import type { JsonValue } from "../modules/runtime/public.ts";
+
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance: pg.Client, name: string) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
+
+import { endSharedRuntimePools, getSharedRuntimePool } from "../app/api/world-scope.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
 
@@ -82,28 +121,41 @@ test(
   "restricted PostgreSQL role completes the Application GET-token-POST-replay/conflict closure",
   { skip: !adminConnectionString },
   async (t) => {
+    const close = fixtureCleanup(t);
     const adminUrl = requireLoopbackUrl(adminConnectionString!);
     const databaseName = `realm_application_test_${randomUUID().replaceAll("-", "")}`;
     const maintenanceUrl = new URL(adminUrl);
     maintenanceUrl.pathname = "/postgres";
     const maintenance = new pg.Client({ connectionString: maintenanceUrl.href });
+    close(() => maintenance.end());
     await maintenance.connect();
     await maintenance.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+    close(async () => {
+      await assertFixtureBackendsGone(maintenance, databaseName);
+      await maintenance.query(`DROP DATABASE ${quoteIdentifier(databaseName)}`);
+    });
 
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
     const owner = new pg.Client({ connectionString: ownerUrl.href });
+    const ownerEnd = new Promise<void>(resolve => owner.once("end", resolve));
+    close(async () => { await owner.end(); await ownerEnd; });
     await owner.connect();
     const runtimeUrl = new URL(ownerUrl);
     runtimeUrl.username = "realm_runtime";
     runtimeUrl.password = "";
-    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 1 });
+    const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 4 });
+    close(() => endFixturePool(runtimePool));
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 1 });
+    close(() => endFixturePool(ownerPool));
+    const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
+    close(async () => { await endSharedRuntimePools(); await Promise.all(fixtureShutdowns.get(routePool) ?? []); });
     const previousRuntimeDatabaseUrl = process.env.REALM_RUNTIME_DATABASE_URL;
     const previousRealmWorldInstallRoot = process.env.REALM_REALMWORLD_INSTALL_ROOT;
     const previousGoalInstallRoot = process.env.REALM_GOAL_WORKER_INSTALL_ROOT;
     const previousTrustStore = process.env.REALM_REALMWORLD_TRUST_STORE;
     const fixtureRoot = await mkdtemp(join(tmpdir(), "realm-goal-projection-route-"));
+    close(() => rm(fixtureRoot, { recursive: true, force: true }));
     const fixtureSource = join(fixtureRoot, "source");
     const fixtureInstallRoot = join(fixtureRoot, "install");
     const realmWorldFixtureSource = join(fixtureRoot, "realmworld-source");
@@ -115,7 +167,7 @@ test(
     delete process.env.REALM_GOAL_WORKER_INSTALL_ROOT;
     delete process.env.REALM_REALMWORLD_TRUST_STORE;
 
-    t.after(async () => {
+    close(async () => {
       if (previousRuntimeDatabaseUrl === undefined) delete process.env.REALM_RUNTIME_DATABASE_URL;
       else process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeDatabaseUrl;
       if (previousRealmWorldInstallRoot === undefined) delete process.env.REALM_REALMWORLD_INSTALL_ROOT;
@@ -124,14 +176,6 @@ test(
       else process.env.REALM_GOAL_WORKER_INSTALL_ROOT = previousGoalInstallRoot;
       if (previousTrustStore === undefined) delete process.env.REALM_REALMWORLD_TRUST_STORE;
       else process.env.REALM_REALMWORLD_TRUST_STORE = previousTrustStore;
-      await runtimePool.end();
-      await ownerPool.end();
-      await owner.end();
-      await maintenance.query(
-        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
-      );
-      await maintenance.end();
-      await rm(fixtureRoot, { recursive: true, force: true });
     });
 
     for (const filename of (await readdir(new URL("../database/postgres/migrations/", import.meta.url))).sort()) {
@@ -139,6 +183,7 @@ test(
       await owner.query(await readFile(new URL(`../database/postgres/migrations/${filename}`, import.meta.url), "utf8"));
     }
     await seedPostgresDemo(ownerPool, { omniscientPlayerCharacter: false });
+    installTestSessionSecret();
     await seedCapabilitySessionKey(owner, LOCAL_RECORD_SCOPE.workspaceId);
 
     const identity = await runtimePool.query<{
@@ -259,23 +304,29 @@ test(
        WHERE workspace_id = $2 AND id = $3`,
       [LOCAL_WORLD_VERSION, LOCAL_RECORD_SCOPE.workspaceId, POSTGRES_DEMO_IDS.world],
     );
-    await owner.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version
-       ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, '{}'::jsonb, NULL, $7)`,
-      [
-        LOCAL_RECORD_SCOPE.workspaceId,
-        POSTGRES_DEMO_IDS.world,
-        POSTGRES_DEMO_IDS.worldline,
-        LOCAL_RECORD_SCOPE.recordId,
-        "base_goal_source",
-        "base.first-narration",
-        "base-v1",
-      ],
+    const baseProbeTitle = `Base Goal projection probe ${randomUUID()}`;
+    await createPostgresLibraryService(runtimePool).create({
+      workspaceId: LOCAL_RECORD_SCOPE.workspaceId, principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
+    }, { kind: "record", storyId: POSTGRES_DEMO_IDS.story, title: baseProbeTitle });
+    // This command intentionally returns void; read the actual created identity.
+    const baseProbeRows = await owner.query<{ id: string }>(
+      "SELECT id FROM records WHERE workspace_id=$1 AND story_id=$2 AND title=$3",
+      [LOCAL_RECORD_SCOPE.workspaceId, POSTGRES_DEMO_IDS.story, baseProbeTitle],
     );
+    assert.equal(baseProbeRows.rowCount, 1);
+    const baseGoalRecordId = baseProbeRows.rows[0]!.id;
+    const resolveGoalSource = createDefaultGoalContentBindingSource();
+    await withWorkspaceTransaction(runtimePool, LOCAL_RECORD_SCOPE.workspaceId, async client => {
+      await lockGoalContentWorld(client, LOCAL_RECORD_SCOPE.workspaceId, POSTGRES_DEMO_IDS.world);
+      await materializeGoalInstances(client, { kind: "record", workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+        worldId: POSTGRES_DEMO_IDS.world, worldlineId: POSTGRES_DEMO_IDS.worldline, recordId: baseGoalRecordId },
+      [{ goalKey: "base.first-narration", policyVersion: "base-v1" }], {
+        sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId), worldVersion: LOCAL_WORLD_VERSION, resolveSource: resolveGoalSource,
+      });
+    });
     const baseGoalProjectionResponse = await getRuntimeGoals(new Request(
-      `http://127.0.0.1/api/record/goals?recordId=${LOCAL_RECORD_SCOPE.recordId}`,
+      `http://127.0.0.1/api/record/goals?recordId=${baseGoalRecordId}`,
       { headers: { cookie: `realm_session=${sessionProofFor(LOCAL_RECORD_SCOPE.principalId)}` } },
     ));
     assert.equal(baseGoalProjectionResponse.status, 200);
@@ -288,11 +339,25 @@ test(
       progress: {},
       outcome: null,
     }]);
-    await owner.query(
-      `DELETE FROM goal_instances
-       WHERE workspace_id = $1 AND id = $2`,
-      [LOCAL_RECORD_SCOPE.workspaceId, "base_goal_source"],
-    );
+    // 共享 route-fixture-key：goal fixture 的 trust store 同时信任它，
+    // 使后续 world-bound demo 存档 restore（ember 包，route key 签名）在
+    // TRUST_STORE 切回 fixtureTrustStore 后仍通过信任闸。
+    const realmWorldFixtureKeyPair = generateKeyPairSync("ed25519");
+    const realmWorldFixturePublicKeyPem = realmWorldFixtureKeyPair.publicKey
+      .export({ type: "spki", format: "pem" })
+      .toString();
+    await installGoalProjectionFixture({
+      sourceDir: fixtureSource,
+      installRoot: fixtureInstallRoot,
+      trustStorePath: fixtureTrustStore,
+      additionalTrustedKeys: [{
+        keyId: "route-fixture-key",
+        publicKeyPem: realmWorldFixturePublicKeyPem,
+      }],
+    });
+    process.env.REALM_REALMWORLD_INSTALL_ROOT = fixtureInstallRoot;
+    process.env.REALM_GOAL_WORKER_INSTALL_ROOT = fixtureInstallRoot;
+    process.env.REALM_REALMWORLD_TRUST_STORE = fixtureTrustStore;
     // Phase 4D：binding 真相在 records.world_version；worlds 行保持创建身份。
     // 本 fixture 同步两侧（真实切换由 switch-version 服务负责，见
     // tests/postgres-realmworld-version.test.ts）。
@@ -316,22 +381,27 @@ test(
       worldId: POSTGRES_DEMO_IDS.world,
       worldVersion: "1.2.0",
     });
-    await owner.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, revision, progress, outcome, policy_version
-       ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 1, $7::jsonb, NULL, $8)`,
-      [
-        LOCAL_RECORD_SCOPE.workspaceId,
-        POSTGRES_DEMO_IDS.world,
-        POSTGRES_DEMO_IDS.worldline,
-        LOCAL_RECORD_SCOPE.recordId,
-        "goal_source_restore",
-        "goal.restore.coverage",
-        JSON.stringify({ count: 1 }),
-        "policy-v1",
-      ],
-    );
+    const [sourceRestoreGoalId] = await withWorkspaceTransaction(runtimePool, LOCAL_RECORD_SCOPE.workspaceId, async client => {
+      await lockGoalContentWorld(client, LOCAL_RECORD_SCOPE.workspaceId, POSTGRES_DEMO_IDS.world);
+      return materializeGoalInstances(client, { kind: "record", workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+        worldId: POSTGRES_DEMO_IDS.world, worldlineId: POSTGRES_DEMO_IDS.worldline, recordId: LOCAL_RECORD_SCOPE.recordId },
+      [{ goalKey: "goal.restore.coverage", policyVersion: "policy-v1" }], {
+        sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId), worldVersion: "1.2.0", resolveSource: resolveGoalSource,
+      });
+    });
+    assert.ok(sourceRestoreGoalId);
+    await owner.query(`UPDATE goal_instances SET revision=1,progress='{"count":1}'::jsonb
+      WHERE workspace_id=$1 AND id=$2`, [LOCAL_RECORD_SCOPE.workspaceId, sourceRestoreGoalId]);
+    const sourceEvidenceEvents = await withWorkspaceTransaction(runtimePool, LOCAL_RECORD_SCOPE.workspaceId,
+      client => loadGoalScopeCommittedEvents(client, { kind: "record", workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
+        worldId: POSTGRES_DEMO_IDS.world, worldlineId: POSTGRES_DEMO_IDS.worldline, recordId: LOCAL_RECORD_SCOPE.recordId }));
+    assert.deepEqual(sourceEvidenceEvents.map(event => event.eventId), [POSTGRES_DEMO_IDS.openingEvent]);
+    const sourceDefinition = (await resolveGoalSource({ worldId: POSTGRES_DEMO_IDS.world,
+      worldVersion: "1.2.0", goalKey: "goal.restore.coverage", policyVersion: "policy-v1" })).definition;
+    const sourceEvidenceHash = goalEvidenceSnapshotHash({ definition: sourceDefinition,
+      instance: { goalInstanceId: sourceRestoreGoalId, recordId: LOCAL_RECORD_SCOPE.recordId,
+        state: "active", revision: 1, progress: { count: 1 }, outcome: null },
+      events: sourceEvidenceEvents, evidenceHead: { recordVersion: 1, ordinal: 1 } });
     await owner.query(
       `INSERT INTO goal_assessments (
          workspace_id, world_id, worldline_id, record_id, id,
@@ -346,16 +416,16 @@ test(
         POSTGRES_DEMO_IDS.worldline,
         LOCAL_RECORD_SCOPE.recordId,
         "assessment_source_restore",
-        "goal_source_restore",
+        sourceRestoreGoalId,
         POSTGRES_DEMO_IDS.openingEvent,
         JSON.stringify({ accepted: true }),
         [POSTGRES_DEMO_IDS.openingEvent],
-        "a".repeat(64),
+        sourceEvidenceHash,
         "policy-v1",
       ],
     );
-    const runtimeSaveReader = createPostgresRealmRuntimeSaveReader(runtimePool);
-    const runtimeSave = await runtimeSaveReader.load({
+    const runtimeSaveReader = createPostgresRealmRuntimeSaveReader(runtimePool, { goalsSchemaVersion: 2, resolveGoalSource });
+    const runtimeSave = await runtimeSaveReader.load({ principalId: POSTGRES_DEMO_IDS.principal, purpose: "record-export",
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       recordId: LOCAL_RECORD_SCOPE.recordId,
     });
@@ -365,7 +435,8 @@ test(
       worldVersion: "1.2.0",
     });
     assert.equal(runtimeSave.record.scope.recordId, LOCAL_RECORD_SCOPE.recordId);
-    assert.equal(runtimeSave.goals.instances.length, 1);
+    assert.ok(runtimeSave.goals.schemaVersion === 2);
+    assert.equal(runtimeSave.goals.roots.flatMap(root => root.instances).length, 1);
     assert.equal(runtimeSave.goals.assessments.length, 1);
     const goalProjection = await createPostgresGoalProjectionRepository(runtimePool).load({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
@@ -388,34 +459,22 @@ test(
       recordId: LOCAL_RECORD_SCOPE.recordId,
       cursor: 0,
     }), []);
-    const runtimeSaveBytes = await buildRealmRuntimeSaveBytes(runtimeSaveReader, {
+    const runtimeSaveBytes = await buildRealmRuntimeSaveBytes(runtimeSaveReader, { principalId: POSTGRES_DEMO_IDS.principal, purpose: "record-export",
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       recordId: LOCAL_RECORD_SCOPE.recordId,
     });
     assert.ok(runtimeSaveBytes && runtimeSaveBytes.byteLength > 0);
     process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
+    // Start from the proven binding; remove only its installed source.
+    process.env.REALM_REALMWORLD_INSTALL_ROOT = join(fixtureRoot, "unavailable");
+    process.env.REALM_GOAL_WORKER_INSTALL_ROOT = join(fixtureRoot, "unavailable");
     const unavailableGoalProjectionResponse = await getRuntimeGoals(new Request(
       `http://127.0.0.1/api/record/goals?recordId=${LOCAL_RECORD_SCOPE.recordId}`,
       { headers: { cookie: `realm_session=${sessionProofFor(LOCAL_RECORD_SCOPE.principalId)}` } },
     ));
     assert.equal(unavailableGoalProjectionResponse.status, 503);
     assert.equal((await unavailableGoalProjectionResponse.json()).error.code, "GOAL_CONTENT_UNAVAILABLE");
-    // 共享 route-fixture-key：goal fixture 的 trust store 同时信任它，
-    // 使后续 world-bound demo 存档 restore（ember 包，route key 签名）在
-    // TRUST_STORE 切回 fixtureTrustStore 后仍通过信任闸。
-    const realmWorldFixtureKeyPair = generateKeyPairSync("ed25519");
-    const realmWorldFixturePublicKeyPem = realmWorldFixtureKeyPair.publicKey
-      .export({ type: "spki", format: "pem" })
-      .toString();
-    await installGoalProjectionFixture({
-      sourceDir: fixtureSource,
-      installRoot: fixtureInstallRoot,
-      trustStorePath: fixtureTrustStore,
-      additionalTrustedKeys: [{
-        keyId: "route-fixture-key",
-        publicKeyPem: realmWorldFixturePublicKeyPem,
-      }],
-    });
+    process.env.REALM_REALMWORLD_INSTALL_ROOT = fixtureInstallRoot;
     process.env.REALM_GOAL_WORKER_INSTALL_ROOT = fixtureInstallRoot;
     process.env.REALM_REALMWORLD_TRUST_STORE = fixtureTrustStore;
     const availableGoalProjectionResponse = await getRuntimeGoals(new Request(
@@ -442,6 +501,7 @@ test(
       },
     });
     process.env.REALM_REALMWORLD_INSTALL_ROOT = realmWorldFixtureInstallRoot;
+    process.env.REALM_GOAL_WORKER_INSTALL_ROOT = realmWorldFixtureInstallRoot;
     process.env.REALM_REALMWORLD_TRUST_STORE = realmWorldFixtureTrustStore;
     const instantiateHeaders = {
       "content-type": "application/json",
@@ -515,6 +575,8 @@ test(
       scene_display_time: "Night watch",
       record_count: "1",
     }]);
+    process.env.REALM_REALMWORLD_INSTALL_ROOT = fixtureInstallRoot;
+    process.env.REALM_GOAL_WORKER_INSTALL_ROOT = fixtureInstallRoot;
     process.env.REALM_REALMWORLD_TRUST_STORE = fixtureTrustStore;
     const goalEventsResponse = await getRuntimeGoalEvents(new Request(
       `http://127.0.0.1/api/record/goals/events?recordId=${LOCAL_RECORD_SCOPE.recordId}`,
@@ -541,7 +603,7 @@ test(
     ));
     assert.equal(routeResponse.status, 200);
     const routeSaveBytes = new Uint8Array(await routeResponse.arrayBuffer());
-    const routeSave = parseRealmRuntimeSaveArchive(routeSaveBytes);
+    const routeSave = parseRealmRuntimeSaveArchive(routeSaveBytes, { goalsSchemaVersion: 2 });
     assert.equal(routeSave.manifest.scope.recordId, LOCAL_RECORD_SCOPE.recordId);
     assert.ok(runtimeSave.topology);
     assert.equal(runtimeSave.topology.participants.length, 3);
@@ -594,11 +656,9 @@ test(
     assert.equal(replayEnvelope.recordId, restoredEnvelope.recordId);
     const changedGoals = {
       ...runtimeSave.goals,
-      instances: runtimeSave.goals.instances.map((row) => (
-        typeof row === "object" && row !== null && !Array.isArray(row)
-          ? { ...row, progress: { count: 99 } }
-          : row
-      )),
+      roots: runtimeSave.goals.roots.map(root => ({ ...root,
+        instances: root.instances.map(row => ({ ...row, progress: { count: 99 } })),
+      })),
     };
     const changedManifest = realmRuntimeSaveManifestFromData({
       engineApi: runtimeSave.manifest.engineApi,
@@ -621,6 +681,23 @@ test(
     ));
     assert.equal(conflictResponse.status, 409);
     assert.equal((await conflictResponse.json()).error.code, "RESTORE_CONFLICT");
+    const firstSavedEvent = runtimeSave.record.events[0]!;
+    assert.ok(firstSavedEvent.payload && typeof firstSavedEvent.payload === "object" && !Array.isArray(firstSavedEvent.payload));
+    const firstSavedPayload = firstSavedEvent.payload as Readonly<Record<string, JsonValue>>;
+    assert.ok(typeof firstSavedPayload.content === "string");
+    const changedTextRecord = { ...runtimeSave.record, events: runtimeSave.record.events.map((event, index) =>
+      index === 0 ? { ...event, payload: { ...firstSavedPayload, content: `${firstSavedPayload.content} changed` } } : event) };
+    const changedTextManifest = realmRuntimeSaveManifestFromData({
+      engineApi: runtimeSave.manifest.engineApi, mode: runtimeSave.manifest.mode, world: runtimeSave.manifest.world,
+      scope: runtimeSave.manifest.scope, record: changedTextRecord, goals: runtimeSave.goals, topology: runtimeSave.topology,
+    });
+    const changedTextArchive = buildRealmRuntimeSaveArchive({ manifest: changedTextManifest,
+      record: changedTextRecord, goals: runtimeSave.goals, topology: runtimeSave.topology });
+    const changedTextConflict = await restoreRuntimeRecord(new Request("http://127.0.0.1/api/record/restore", {
+      method: "POST", headers: restoreHeaders, body: Buffer.from(changedTextArchive),
+    }));
+    assert.equal(changedTextConflict.status, 409);
+    assert.equal((await changedTextConflict.json()).error.code, "RESTORE_CONFLICT");
     const restoredRows = await owner.query<{
       records: string;
       events: string;
@@ -674,13 +751,19 @@ test(
         visibilityPolicies: [...rollbackTopology.visibilityPolicies, duplicatePolicy],
       },
     };
-    // world-bound 存档需要信任闸 validator（本用例聚焦事务回滚，闸另行覆盖）；
-    // 该包已安装可信，故 validator 直接放行。
+    // Verify the installed source before exercising the topology rollback.
     await assert.rejects(() => createPostgresRealmRuntimeSaveRestorer(runtimePool, {
-      validateWorldBinding: async () => {},
+      goalsSchemaVersion: 2,
+      resolveGoalSource,
+      validateWorldBinding: async binding => {
+        const verifier = await readRealmWorldVerifier();
+        assert.ok(verifier);
+        await mountRealmWorld({ ...verifier, ...binding });
+      },
     }).restore({
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
       principalId: LOCAL_RECORD_SCOPE.principalId,
+      sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId),
       archive: rollbackArchive,
       targetWorldId: POSTGRES_DEMO_IDS.world,
       idempotencyKey: "runtime-save-rollback-test",
@@ -999,19 +1082,9 @@ test(
       throw error;
     }
 
-    const goalSseDefinition: GoalDefinition = {
-      goalKey: "goal.restore.coverage",
-      policyVersion: "policy-v1",
-      mode: "deterministic",
-      visible: true,
-      rubric: {
-        kind: "event_count",
-        eventKind: "narration.committed",
-        progressKey: "count",
-        threshold: 1,
-      },
-      outcome: { title: "Restore coverage" },
-    };
+    const goalSseDefinition = (await resolveGoalSource({ worldId: POSTGRES_DEMO_IDS.world,
+      worldVersion: "1.2.0", goalKey: "goal.restore.coverage", policyVersion: "policy-v1" })).definition;
+    assert.equal(goalSseDefinition.goalKey, "goal.restore.coverage");
     const goalQueue = createPostgresGoalAssessmentJobQueue({
       pool: runtimePool,
       workspaceId: LOCAL_RECORD_SCOPE.workspaceId,
@@ -1024,7 +1097,7 @@ test(
       worldId: POSTGRES_DEMO_IDS.world,
       worldlineId: POSTGRES_DEMO_IDS.worldline,
       recordId: LOCAL_RECORD_SCOPE.recordId,
-      goalInstanceId: "goal_source_restore",
+      goalInstanceId: sourceRestoreGoalId,
       goalKey: "goal.restore.coverage",
       sourceEventId: POSTGRES_DEMO_IDS.openingEvent,
       input: { trigger: "sse-application-test" },
@@ -1032,7 +1105,7 @@ test(
     }), "inserted");
     assert.deepEqual(await runGoalAssessmentOnce({
       repository: goalQueue,
-      resolveDefinition: async () => goalSseDefinition,
+      resolveDefinition: async job => (await resolveGoalSource(job)).definition,
       now: new Date().toISOString(),
     }), { kind: "settled", status: "accepted" });
     const secondGoalEventsChunk = await readWithTimeout(goalEventsReader, 5_000);
@@ -1083,15 +1156,16 @@ test(
     const runtimeUrl = new URL(ownerUrl);
     runtimeUrl.username = "realm_runtime";
     runtimeUrl.password = "";
-    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 1 });
+    const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 4 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 1 });
 
     t.after(async () => {
-      await runtimePool.end();
-      await ownerPool.end();
+      await endFixturePool(runtimePool);
+      await endFixturePool(ownerPool);
       await owner.end();
+      await assertFixtureBackendsGone(maintenance, databaseName);
       await maintenance.query(
-        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+        `DROP DATABASE ${quoteIdentifier(databaseName)}`,
       );
       await maintenance.end();
     });
@@ -1278,17 +1352,18 @@ test(
 
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
     const runtimeUrl = new URL(ownerUrl);
     runtimeUrl.username = "realm_runtime";
     runtimeUrl.password = "";
-    const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 4 });
+    const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 4 });
 
     t.after(async () => {
-      await runtimePool.end();
-      await ownerPool.end();
+      await endFixturePool(runtimePool);
+      await endFixturePool(ownerPool);
+      await assertFixtureBackendsGone(maintenance, databaseName);
       await maintenance.query(
-        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+        `DROP DATABASE ${quoteIdentifier(databaseName)}`,
       );
       await maintenance.end();
     });
@@ -1506,7 +1581,9 @@ async function installRealmWorldInstantiationFixture(input: {
     await installRealmWorldDirectory({
       sourceDir: input2.sourceDir,
       installRoot: input.installRoot,
-      verifySignature: ({ manifest: candidate }) => candidate.signature.value === signature,
+      verifySignature: ({ manifest: candidate }) => verify(null,
+        Buffer.from(serializeRealmWorldManifestSigningPayload(candidate), "utf8"),
+        publicKeyPem, Buffer.from(candidate.signature.value, "base64url")),
     });
   };
   await installPackage({
@@ -1714,7 +1791,9 @@ async function installGoalProjectionFixture(input: {
   await installRealmWorldDirectory({
     sourceDir: input.sourceDir,
     installRoot: input.installRoot,
-    verifySignature: ({ manifest: candidate }) => candidate.signature.value === signature,
+    verifySignature: ({ manifest: candidate }) => verify(null,
+      Buffer.from(serializeRealmWorldManifestSigningPayload(candidate), "utf8"),
+      publicKey, Buffer.from(candidate.signature.value, "base64url")),
   });
 }
 

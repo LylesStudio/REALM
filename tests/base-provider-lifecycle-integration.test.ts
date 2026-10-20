@@ -50,6 +50,7 @@ import { POST as instantiateRealmWorld } from "../app/api/realmworld/instantiate
 import { POST as saveRuntimeRecord } from "../app/api/record/save/route.ts";
 import { POST as restoreRuntimeRecord } from "../app/api/record/restore/route.ts";
 import { GET as baseProviderStatus } from "../app/api/base-provider/status/route.ts";
+import { endSharedRuntimePools } from "../app/api/world-scope.ts";
 import { sessionProofFor } from "./helpers/session-proof.ts";
 import { installSignedRealmWorldFixture } from "./helpers/realmworld-package-fixture.ts";
 
@@ -92,10 +93,16 @@ test(
   "base provider lifecycle: base genesis → turn → save → install world → upgrade restore → base change fail-closed → rollback continue",
   { skip: !adminConnectionString || !runtimeConnectionString, timeout: 300_000 },
   async (t) => {
+    // Explicit server backup capability for this isolated fixture only.
+    const previousBackupOperators = process.env.REALM_OPERATOR_PRINCIPALS;
+    process.env.REALM_OPERATOR_PRINCIPALS = PRINCIPAL;
+    try {
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
     ownerPool.on("error", () => {});
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 4 });
     runtimePool.on("error", () => {});
+    // Imported route handlers own an additional cached pool, not runtimePool.
+    t.after(endSharedRuntimePools);
     const dataHome = await mkdtemp(join(tmpdir(), "realm-base-lifecycle-"));
     const installRoot = join(dataHome, "installed");
     const trustStorePath = join(dataHome, "trust-store.json");
@@ -132,10 +139,7 @@ test(
           `DELETE FROM goal_assessment_jobs WHERE workspace_id = $1 AND record_id = $2`,
           [WS, createdRecordId],
         );
-        await ownerPool.query(
-          `DELETE FROM goal_instances WHERE workspace_id = $1 AND record_id = $2`,
-          [WS, createdRecordId],
-        );
+        // Bound Goal history belongs to disposable cluster teardown, not DELETE.
         await ownerPool.query(
           `DELETE FROM realm_durable_jobs WHERE workspace_id = $1 AND record_id = $2`,
           [WS, createdRecordId],
@@ -300,7 +304,7 @@ test(
     ));
     assert.equal(saveResponse.status, 200, JSON.stringify(await saveResponse.clone().json().catch(() => null)));
     const saveBytes = new Uint8Array(await saveResponse.arrayBuffer());
-    const saveArchive = parseRealmRuntimeSaveArchive(saveBytes);
+    const saveArchive = parseRealmRuntimeSaveArchive(saveBytes, { goalsSchemaVersion: 2 });
     assert.equal(saveArchive.manifest.format, "realm-save");
     assert.equal(saveArchive.manifest.formatVersion, 2);
     assert.equal(saveArchive.manifest.mode, "base");
@@ -484,5 +488,9 @@ test(
 
     // 引擎常量不变：当前构建 base 版本仍是规范声明值。
     assert.equal(ENGINE_BASE_CONTENT_VERSION, "1.0.0");
+    } finally {
+      if (previousBackupOperators === undefined) delete process.env.REALM_OPERATOR_PRINCIPALS;
+      else process.env.REALM_OPERATOR_PRINCIPALS = previousBackupOperators;
+    }
   },
 );

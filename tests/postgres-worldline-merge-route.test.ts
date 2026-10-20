@@ -17,7 +17,7 @@ import {
 } from "../database/postgres/public.ts";
 import { createPostgresLibraryService } from "../modules/application/library-service.ts";
 import { POST } from "../app/api/worldline/merge/route.ts";
-import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { endSharedRuntimePools, getSharedRuntimePool } from "../app/api/world-scope.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
 import {
   installTestSessionSecret,
@@ -28,6 +28,33 @@ installTestSessionSecret();
 
 // 新门禁（0051）：runtime DB 存在即要求账户会话；路由请求统一携带。
 const sessionCookie = `realm_session=${createSessionValue("principal_demo_player")}`;
+
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance: pg.Client, name: string) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -58,6 +85,9 @@ const MIGRATIONS = [
   // 合并物化经 restricted 角色写 participants/instances/continuities/record_heads
   // （0023）与 scenes/visibility_policies 全行（0056）。
   "0023_library_runtime_grants.sql",
+  // Production Canon readback requires campaign revision and audience security.
+  "0025_propagation_topology_semantic_scope.sql",
+  "0026_canon_security_audience.sql",
   // branch 命令现在创建可玩拓扑：scene 快照列（0029/0039/0040）与
   // records.timeline_kind='branch' 枚举（0044）。
   "0029_record_scene_tension.sql",
@@ -74,6 +104,8 @@ const MIGRATIONS = [
   "0057_realmworld_record_binding.sql",
   "0058_durable_job_queue.sql",
   "0060_goal_scope_terminal_lifecycle.sql",
+  // Current branch readback unconditionally queries committed performance facts.
+  "0066_committed_fact_commands.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -110,10 +142,11 @@ test(
 
     const ownerUrl = new URL(adminUrl);
     ownerUrl.pathname = `/${databaseName}`;
-    const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+    const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
     const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
     runtimeUrl.pathname = `/${databaseName}`;
 
+    const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
     const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
     const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
     // 路由级调用走本地回落身份（principal_demo_player）；摘除门禁，用后还原。
@@ -122,6 +155,7 @@ test(
 
     t.after(async () => {
       await endSharedRuntimePools();
+      await Promise.all(fixtureShutdowns.get(routePool) ?? []);
       if (previousAccessToken === undefined) {
         delete process.env.REALM_ACCESS_TOKEN;
       } else {
@@ -132,9 +166,10 @@ test(
       } else {
         process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeUrl;
       }
-      await ownerPool.end();
+      await endFixturePool(ownerPool);
+      await assertFixtureBackendsGone(maintenance, databaseName);
       await maintenance.query(
-        `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+        `DROP DATABASE ${quoteIdentifier(databaseName)}`,
       );
       await maintenance.end();
     });
@@ -352,7 +387,7 @@ test(
 async function createMergeSliceDatabase(
   t: test.TestContext,
   label: string,
-): Promise<{ ownerPool: pg.Pool; runtimeUrl: URL }> {
+): Promise<{ ownerPool: pg.Pool; runtimeUrl: URL; registerPool: (pool: pg.Pool) => pg.Pool }> {
   const adminUrl = requireLoopbackUrl(adminConnectionString!);
   const databaseName = `realm_merge_${label}_${randomUUID().replaceAll("-", "")}`;
   const maintenanceUrl = new URL(adminUrl);
@@ -363,17 +398,24 @@ async function createMergeSliceDatabase(
 
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
-  const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+  const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 2 });
   const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
   runtimeUrl.pathname = `/${databaseName}`;
 
+  const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
   const previousRuntimeUrl = process.env.REALM_RUNTIME_DATABASE_URL;
   const previousAccessToken = process.env.REALM_ACCESS_TOKEN;
   process.env.REALM_RUNTIME_DATABASE_URL = runtimeUrl.href;
   delete process.env.REALM_ACCESS_TOKEN;
 
+  const ownedPools = [ownerPool];
+  const registerPool = (pool: pg.Pool) => {
+    ownedPools.push(observeFixturePool(pool));
+    return pool;
+  };
   t.after(async () => {
     await endSharedRuntimePools();
+    await Promise.all(fixtureShutdowns.get(routePool) ?? []);
     if (previousAccessToken === undefined) {
       delete process.env.REALM_ACCESS_TOKEN;
     } else {
@@ -384,9 +426,10 @@ async function createMergeSliceDatabase(
     } else {
       process.env.REALM_RUNTIME_DATABASE_URL = previousRuntimeUrl;
     }
-    await ownerPool.end();
+    await Promise.all(ownedPools.map(endFixturePool));
+    await assertFixtureBackendsGone(maintenance, databaseName);
     await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
+      `DROP DATABASE ${quoteIdentifier(databaseName)}`,
     );
     await maintenance.end();
   });
@@ -400,7 +443,7 @@ async function createMergeSliceDatabase(
   }
   await seedPostgresDemo(ownerPool);
   await seedCapabilitySessionKey(ownerPool, "ws_demo");
-  return { ownerPool, runtimeUrl };
+  return { ownerPool, runtimeUrl, registerPool };
 }
 
 /** 经 library 受限路径建世界 + 分支（demo principal 是 owner）。 */
@@ -514,15 +557,12 @@ test(
   "merge materialization: bridgeable reschedule copies events into a playable target",
   { skip: !adminConnectionString || !runtimeConnectionString },
   async (t) => {
-    const { ownerPool, runtimeUrl } = await createMergeSliceDatabase(t, "mat");
-    const restrictedPool = new pg.Pool({
+    const { ownerPool, runtimeUrl, registerPool } = await createMergeSliceDatabase(t, "mat");
+    const restrictedPool = registerPool(createFixturePool({
       connectionString: runtimeUrl.href,
       max: 1,
-    });
+    }));
     restrictedPool.on("error", () => {});
-    t.after(async () => {
-      await restrictedPool.end();
-    });
     const { world, origin, branch, originRecordId, branchRecordId } =
       await createWorldWithBranch(ownerPool, "物化试验场");
 
@@ -660,6 +700,22 @@ test(
       [body.mergedWorldlineId, originRecordId],
     );
     assert.equal(originCopy.rows.length, 1);
+    // Eligible Canon in the actual merged worldline must survive the real
+    // restricted scope loader; an empty fail-closed fallback is insufficient.
+    await ownerPool.query(
+      `INSERT INTO world_entities (workspace_id, world_id, worldline_id, id, entity_kind, name)
+       VALUES ('ws_demo', $1, $2, 'c5_merge_canon_entity', 'setting', 'C5 merge beacon')`,
+      [world.id, body.mergedWorldlineId],
+    );
+    await ownerPool.query(
+      `INSERT INTO world_claims (workspace_id, world_id, worldline_id, id, subject_entity_id,
+                                 predicate, object_value, scope, truth_status)
+       VALUES ('ws_demo', $1, $2, 'c5_merge_canon_claim', 'c5_merge_canon_entity',
+               'signals', 'C5 merge Canon positive', 'world', 'world_canon')`,
+      [world.id, body.mergedWorldlineId],
+    );
+    const role = await restrictedPool.query("SELECT current_user AS role");
+    assert.equal(role.rows[0]?.role, "realm_runtime");
     const scopeReader = createPostgresRecordRuntimeScopeRepository(restrictedPool);
     const resolved = await scopeReader.resolve({
       workspaceId: "ws_demo",
@@ -670,6 +726,8 @@ test(
     assert.equal(resolved.worldlineId, body.mergedWorldlineId);
     assert.ok(resolved.sceneId);
     assert.ok(resolved.publicPolicyId);
+    assert.ok(resolved.brief.canon.includes("C5 merge Canon positive"),
+      "restricted production Canon loader must return the eligible claim");
 
     // 同一 workspace 之外不可读写（restricted 角色 + RLS）。
     const mergeRepository = createPostgresWorldlineMergeRepository(restrictedPool);

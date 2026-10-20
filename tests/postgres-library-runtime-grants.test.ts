@@ -95,6 +95,8 @@ const CURRENT_MIGRATIONS = [
   "0060_goal_scope_terminal_lifecycle.sql",
   // 创世请求幂等台账（合并后迁移序号为 0063）。
   "0063_genesis_creation_requests.sql",
+  // Only the current fixture needs the committed performance read model.
+  "0066_committed_fact_commands.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {
@@ -110,7 +112,7 @@ function quoteIdentifier(value: string): string {
 }
 
 async function createDatabase(
-  t: test.TestContext,
+  registerCleanup: (cleanup: () => Promise<void>) => void,
   maintenance: pg.Client,
   adminUrl: URL,
   label: string,
@@ -118,19 +120,22 @@ async function createDatabase(
 ) {
   const databaseName = `realm_t10b7_${label}_${randomUUID().replaceAll("-", "")}`;
   await maintenance.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
-  const ownerUrl = new URL(adminUrl);
-  ownerUrl.pathname = `/${databaseName}`;
-  const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
-  const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
-  runtimeUrl.pathname = `/${databaseName}`;
-  const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 2 });
-  t.after(async () => {
-    await ownerPool.end();
-    await runtimePool.end();
+  // Own teardown immediately: setup may fail before either pool is allocated.
+  const pools: { owner?: pg.Pool; runtime?: pg.Pool } = {};
+  registerCleanup(async () => {
+    const shutdowns = await Promise.allSettled([pools.owner?.end(), pools.runtime?.end()]);
+    const failures = shutdowns.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length > 0) throw new AggregateError(failures, "Fixture pools did not close.");
     await maintenance.query(
       `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
     );
   });
+  const ownerUrl = new URL(adminUrl);
+  ownerUrl.pathname = `/${databaseName}`;
+  const ownerPool = pools.owner = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+  const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
+  runtimeUrl.pathname = `/${databaseName}`;
+  const runtimePool = pools.runtime = new pg.Pool({ connectionString: runtimeUrl.href, max: 2 });
   for (const filename of migrations) {
     const sql = await readFile(
       new URL(`../database/postgres/migrations/${filename}`, import.meta.url),
@@ -166,10 +171,26 @@ test(
     const maintenance = new pg.Client({
       connectionString: new URL("/postgres", adminUrl).href,
     });
+    const fixtureCleanups: (() => Promise<void>)[] = [];
+    const registerFixtureCleanup = (cleanup: () => Promise<void>) => { fixtureCleanups.push(cleanup); };
+    // Register the owner before any fallible connect/setup. Close every allocated
+    // fixture before maintenance, also when the body or another finalizer fails.
+    t.after(async () => {
+      const failures: unknown[] = [];
+      try {
+        try { await endSharedRuntimePools(); } catch (error) { failures.push(error); }
+        for (const cleanup of [...fixtureCleanups].reverse()) {
+          try { await cleanup(); } catch (error) { failures.push(error); }
+        }
+      } finally {
+        try { await maintenance.end(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length > 0) throw new AggregateError(failures, "Fixture teardown failed.");
+    });
     await maintenance.connect();
 
     // ---- 迁移前缺口证据（0001–0022 库）：world 创建被授权拒绝 ----
-    const pre = await createDatabase(t, maintenance, adminUrl, "pre", MIGRATIONS.slice(0, -1));
+    const pre = await createDatabase(registerFixtureCleanup, maintenance, adminUrl, "pre", MIGRATIONS.slice(0, -1));
 
     // ---- 迁移前缺口证据（0001–0022 库）：world 创建被授权拒绝 ----
 
@@ -196,7 +217,7 @@ test(
     assert.equal(preGrants.rows[0].participants_insert, false);
 
     // ---- 0023 库：runtime-only 全命令逐项成功 ----
-    const post = await createDatabase(t, maintenance, adminUrl, "post", CURRENT_MIGRATIONS);
+    const post = await createDatabase(registerFixtureCleanup, maintenance, adminUrl, "post", CURRENT_MIGRATIONS);
     const postGrants = await post.ownerPool.query(
       `SELECT has_table_privilege('realm_runtime', 'worlds', 'INSERT') AS worlds_insert,
               has_table_privilege('realm_runtime', 'participants', 'INSERT') AS participants_insert,
@@ -464,9 +485,5 @@ test(
       }
       await endSharedRuntimePools();
     }
-    // 最后拆维护连接（t.after 按注册顺序执行——必须晚于各库 DROP）。
-    t.after(async () => {
-      await maintenance.end();
-    });
   },
 );

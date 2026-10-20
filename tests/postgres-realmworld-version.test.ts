@@ -36,7 +36,14 @@ import { POST as restoreRuntimeRecord } from "../app/api/record/restore/route.ts
 import {
   parseRealmRuntimeSaveArchive,
 } from "../modules/world-transfer/realm-runtime-save.ts";
-import { sessionProofFor } from "./helpers/session-proof.ts";
+import { withWorkspaceTransaction } from "../database/postgres/workspace-transaction.ts";
+import { materializeGoalInstances } from "../database/postgres/goal-runtime-materialization.ts";
+import { lockGoalContentWorld } from "../database/postgres/goal-content-binding-repository.ts";
+import { createGoalContentBindingSource } from "../modules/application/goal-content-binding-source.ts";
+import { mountRealmWorld } from "../modules/world-transfer/realmworld-loader.ts";
+import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
+import { sessionProofFor, installTestSessionSecret, seedCapabilitySessionKey } from "./helpers/session-proof.ts";
 import { installSignedRealmWorldFixture } from "./helpers/realmworld-package-fixture.ts";
 
 const adminConnectionString = process.env.DATABASE_URL;
@@ -49,11 +56,21 @@ test(
   "Phase 4D：Record 级 binding 与显式版本切换全链验收",
   { skip: !adminConnectionString || !runtimeConnectionString, timeout: 300_000 },
   async (t) => {
+    // Explicit server backup capability for this isolated fixture only.
+    const previousBackupOperators = process.env.REALM_OPERATOR_PRINCIPALS;
+    process.env.REALM_OPERATOR_PRINCIPALS = LOCAL_RECORD_SCOPE.principalId;
+    try {
+    const close = fixtureCleanup(t);
+    // Route handlers allocate their own cached runtime pool as well.
+    close(endSharedRuntimePools);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     ownerPool.on("error", () => {});
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 4 });
+    close(() => runtimePool.end());
     runtimePool.on("error", () => {});
     const dataHome = await mkdtemp(join(tmpdir(), "realm-p4d-"));
+    close(() => rm(dataHome, { recursive: true, force: true }));
     const installRoot = join(dataHome, "installed");
     const trustStorePath = join(dataHome, "trust-store.json");
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -63,20 +80,19 @@ test(
     };
     const previousInstallRoot = process.env.REALM_REALMWORLD_INSTALL_ROOT;
     const previousTrustStore = process.env.REALM_REALMWORLD_TRUST_STORE;
-    t.after(async () => {
+    close(async () => {
       if (previousInstallRoot === undefined) delete process.env.REALM_REALMWORLD_INSTALL_ROOT;
       else process.env.REALM_REALMWORLD_INSTALL_ROOT = previousInstallRoot;
       if (previousTrustStore === undefined) delete process.env.REALM_REALMWORLD_TRUST_STORE;
       else process.env.REALM_REALMWORLD_TRUST_STORE = previousTrustStore;
-      await rm(dataHome, { recursive: true, force: true });
       // events 是 append-only（guard_event_append_only），fixture 世界的 records/worlds
       // 行无法物理删除；但 pending outbox 必须清掉——本套件共享同一个 disposable
       // realm_dev，后续 outbox-worker 测试的真实 worker 会认领任意 pending 行。
       // 其余残留行均以 fixture Record/World id 为键，不影响其他用例。
       await ownerPool.query(`DELETE FROM outbox WHERE workspace_id = $1 AND world_id = $2`, [WS, FIXTURE_WORLD]);
-      await runtimePool.end();
-      await ownerPool.end();
     });
+    installTestSessionSecret();
+    await seedCapabilitySessionKey(ownerPool, WS);
     await mkdir(installRoot, { recursive: true });
     await writeFile(trustStorePath, JSON.stringify({
       format: "realmworld-trust-store",
@@ -306,7 +322,7 @@ test(
     ));
     assert.equal(saveResponse.status, 200, `save: ${JSON.stringify(await saveResponse.clone().json().catch(()=>null))}`);
     const saveBytes = new Uint8Array(await saveResponse.arrayBuffer());
-    const saveArchive = parseRealmRuntimeSaveArchive(saveBytes);
+    const saveArchive = parseRealmRuntimeSaveArchive(saveBytes, { goalsSchemaVersion: 2 });
     assert.equal(saveArchive.manifest.world?.worldVersion, "1.3.0", "存档记录当前 binding");
     const downAgain = await callSwitch(
       { recordId, targetWorldVersion: "1.2.0", operation: "downgrade" },
@@ -449,17 +465,73 @@ test(
     assert.equal((await bindingRows()).record_version, "1.2.0", "负路径零副作用");
     assert.equal(await auditRows(), 4, "台账=up/branch/up2/down2 四条");
 
-    // O. Goal 队列 claim 以 Record binding 取版本（不再读 worlds 默认）。
-    const goalInstanceId = `goal_p4d_${recordId.slice(-8)}`;
-    const jobId = `goal_job_p4d_${recordId.slice(-8)}`;
-    await ownerPool.query(
-      `INSERT INTO goal_instances (
-         workspace_id, world_id, worldline_id, record_id, id, goal_key,
-         state, policy_version
-       ) SELECT workspace_id, world_id, worldline_id, id, $2, 'goal.p4d', 'active', 'policy-test'
-         FROM records WHERE workspace_id = $1 AND id = $3`,
-      [WS, goalInstanceId, recordId],
+    // The real queue claims across a Workspace, not just this World/Record.
+    // Own a fresh Workspace for O; do not reorder or filter the production queue.
+    {
+    const { randomUUID } = await import("node:crypto");
+    const { readRealmWorldVerifier } = await import("../app/api/realmworld/env.ts");
+    const { createInstalledRealmWorldInstantiationResolver } = await import("../modules/world-transfer/realmworld-runtime-content.ts");
+    const { createRealmWorldBindingService } = await import("../modules/application/realmworld-binding-service.ts");
+    const WS = `ws_p4d_queue_${randomUUID().replaceAll("-", "")}`;
+    await ownerPool.query("INSERT INTO workspaces (id,name) VALUES ($1,'P4D queue workspace')", [WS]);
+    await ownerPool.query("INSERT INTO accounts (workspace_id,principal_id,display_name) VALUES ($1,$2,'P4D queue owner')", [WS, LOCAL_RECORD_SCOPE.principalId]);
+    await seedCapabilitySessionKey(ownerPool, WS);
+    const configuredVerifier = await readRealmWorldVerifier();
+    assert.ok(configuredVerifier);
+    // The original A–M version/save journey has no Goals. Only queue control O
+    // needs this definition: keep its signed packages in a separate owned root.
+    const queueInstallRoot = join(dataHome, "queue-installed");
+    for (const version of ["1.2.0", "1.3.0"]) {
+      await installSignedRealmWorldFixture({ installRoot: queueInstallRoot, worldId: FIXTURE_WORLD,
+        version, recordTitle: FIXTURE_RECORD_TITLE,
+        goals: [{ goalKey: "goal.p4d", policyVersion: "policy-test", mode: "deterministic", visible: true,
+          rubric: { kind: "event_count", eventKind: "narration.committed", progressKey: "narrations", threshold: 1 }, outcome: {} }],
+        keyId: "version-fixture-key", keyPair });
+    }
+    const verifier = { ...configuredVerifier, installRoot: queueInstallRoot };
+    const resolver = createInstalledRealmWorldInstantiationResolver({ ...verifier, locale: "en" });
+    const queuePlan = await resolver({ kind: "world", worldId: FIXTURE_WORLD, worldVersion: "1.3.0" });
+    assert.ok(queuePlan);
+    const queueCreated = await service.instantiateRealmWorld(
+      { workspaceId: WS, principalId: LOCAL_RECORD_SCOPE.principalId, sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId) },
+      { ...queuePlan, goals: [] }, "p4d-isolated-queue",
     );
+    const recordId = queueCreated.recordId;
+    const queueBindingService = createRealmWorldBindingService({
+      database: runtimePool,
+      validateTargetContent: async (worldId, worldVersion) => {
+        assert.ok(await resolver({ kind: "world", worldId, worldVersion }));
+      },
+    });
+    const queueDowngrade = await queueBindingService.switchRecordWorldVersion(
+      { workspaceId: WS, principalId: LOCAL_RECORD_SCOPE.principalId },
+      { recordId, targetWorldVersion: "1.2.0", operation: "downgrade" },
+      "p4d-isolated-queue-downgrade",
+    );
+    assert.equal(queueDowngrade.switched, true);
+    const queueBinding = (await ownerPool.query<{ world_version: string; record_version: string }>(
+      `SELECT world.world_version,record.world_version AS record_version
+       FROM records record JOIN worlds world ON world.workspace_id=record.workspace_id AND world.id=record.world_id
+       WHERE record.workspace_id=$1 AND record.id=$2`, [WS, recordId])).rows;
+    assert.deepEqual(queueBinding, [{ world_version: "1.3.0", record_version: "1.2.0" }], "queue control distinguishes Record binding from World default");
+    const opening = (await ownerPool.query<{ id: string }>(
+      "SELECT id FROM events WHERE workspace_id=$1 AND record_id=$2 ORDER BY record_ordinal ASC LIMIT 1", [WS, recordId])).rows;
+    assert.equal(opening.length, 1);
+    const foreignSnapshot = async () => (await ownerPool.query(
+      `SELECT id,world_id,worldline_id,record_id,goal_instance_id,source_event_id,state,attempt_count,lease_owner,lease_expires_at,available_at
+       FROM goal_assessment_jobs WHERE workspace_id=$1 ORDER BY id`, [LOCAL_RECORD_SCOPE.workspaceId])).rows;
+    const foreignBefore = await foreignSnapshot();
+    // O. Goal 队列 claim 以 Record binding 取版本（不再读 worlds 默认）。
+    const jobId = `goal_job_p4d_${recordId.slice(-8)}`;
+    const resolveSource = createGoalContentBindingSource({ mount: identity => mountRealmWorld({ ...verifier, ...identity }) });
+    const [goalInstanceId] = await withWorkspaceTransaction(runtimePool, WS, async client => {
+      await lockGoalContentWorld(client, WS, FIXTURE_WORLD);
+      return materializeGoalInstances(client, { kind: "record", workspaceId: WS, worldId: FIXTURE_WORLD,
+        worldlineId: queueCreated.worldlineId, recordId }, [{ goalKey: "goal.p4d", policyVersion: "policy-test" }], {
+        sessionProof: sessionProofFor(LOCAL_RECORD_SCOPE.principalId), worldVersion: "1.2.0", resolveSource,
+      });
+    });
+    assert.ok(goalInstanceId);
     await ownerPool.query(
       `INSERT INTO goal_assessment_jobs (
          workspace_id, world_id, worldline_id, record_id, id,
@@ -481,15 +553,29 @@ test(
     });
     const claimed = await queue.claimNext({ now: new Date().toISOString() });
     assert.ok(claimed);
+    assert.deepEqual({
+      jobId: claimed.jobId, workspaceId: claimed.workspaceId, worldId: claimed.worldId,
+      worldlineId: claimed.worldlineId, recordId: claimed.recordId, goalInstanceId: claimed.goalInstanceId,
+      sourceEventId: claimed.sourceEventId, goalKey: claimed.goalKey, attemptCount: claimed.attemptCount,
+      leaseOwner: claimed.leaseOwner,
+    }, {
+      jobId, workspaceId: WS, worldId: FIXTURE_WORLD, worldlineId: queueCreated.worldlineId,
+      recordId, goalInstanceId, sourceEventId: opening[0]!.id, goalKey: "goal.p4d", attemptCount: 1,
+      leaseOwner: "p4d-test-worker",
+    }, "claim must belong to this exact queue fixture, not another eligible job");
+    t.diagnostic(`P4D actual claim identity: ${JSON.stringify({ expectedJobId: jobId, expectedRecordId: recordId, claimed })}`);
     assert.equal(claimed.worldVersion, "1.2.0", "claim 取 Record binding 版本");
     await queue.fail({ job: claimed, code: "P4D_DONE", now: new Date().toISOString() });
     await ownerPool.query(
       `DELETE FROM goal_assessment_jobs WHERE workspace_id = $1 AND id = $2`,
       [WS, jobId],
     );
-    await ownerPool.query(
-      `DELETE FROM goal_instances WHERE workspace_id = $1 AND id = $2`,
-      [WS, goalInstanceId],
-    );
+    assert.deepEqual(await foreignSnapshot(), foreignBefore, "queue claim/fail/cleanup must not mutate another Workspace's jobs");
+    t.diagnostic(`P4D isolated queue: ${JSON.stringify({ workspaceId: WS, jobId, recordId, worldVersion: queueBinding[0]!.world_version, recordVersion: queueBinding[0]!.record_version, foreignJobsUnchanged: foreignBefore.length })}`);
+    }
+    } finally {
+      if (previousBackupOperators === undefined) delete process.env.REALM_OPERATOR_PRINCIPALS;
+      else process.env.REALM_OPERATOR_PRINCIPALS = previousBackupOperators;
+    }
   },
 );

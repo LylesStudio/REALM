@@ -3,7 +3,7 @@
  *（content 随版本变化使 contentHash 不同）。仅面向 disposable 测试环境：
  * 包内容由测试常量组成，签名用一次性 ed25519 测试密钥。
  */
-import { sign, type KeyObject } from "node:crypto";
+import { sign, verify, type KeyObject } from "node:crypto";
 import type { GoalDefinition } from "../../modules/goals/public.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -31,7 +31,12 @@ export async function installSignedRealmWorldFixture(input: {
   worldId: string;
   version: string;
   recordTitle: string;
+  sceneObjective?: string;
+  /** Optional signed observer genesis, with no implicit player holding. */
+  playerStance?: "player" | "observer";
   goals?: readonly GoalDefinition[];
+  commandPolicy?: unknown;
+  declaredEvents?: readonly string[];
   keyId: string;
   keyPair: RealmWorldFixtureKeyPair;
   /** manifest engineCompat.baseRange（缺省兼容引擎当前 base 版本段）。 */
@@ -44,12 +49,12 @@ export async function installSignedRealmWorldFixture(input: {
     ["content/index.json", Buffer.from(JSON.stringify({
       format: "realmworld-content",
       schemaVersion: 1,
-      modules: ["content/world.json", "content/runtime.json", "content/goals.json"],
+      modules: ["content/world.json", "content/runtime.json", "content/goals.json", ...(input.commandPolicy !== undefined ? ["content/command-policy.json"] : [])],
     }))],
     ["content/world.json", Buffer.from(JSON.stringify({
       worldId: input.worldId,
       title: { en: `Version Harbor ${input.version}` },
-      settings: { era: "V", language: "en", weather: "calm", tension: "none" },
+      settings: { era: "V", language: "en", weather: "calm", tension: "none", ...(input.declaredEvents ? { declaredEvents: input.declaredEvents } : {}) },
     }))],
     ["content/runtime.json", Buffer.from(JSON.stringify({
       format: "realmworld-runtime",
@@ -59,13 +64,13 @@ export async function installSignedRealmWorldFixture(input: {
       scene: {
         title: { en: "S" },
         location: { en: "L" },
-        objective: { en: "O" },
+        objective: { en: input.sceneObjective ?? "O" },
         tension: { en: "T" },
         weather: { en: "W" },
         displayTime: { en: "D" },
       },
       playerRole: { en: "Keeper" },
-      playerStance: "player",
+      playerStance: input.playerStance ?? "player",
       characters: [],
     }))],
     ["content/goals.json", Buffer.from(JSON.stringify({
@@ -74,6 +79,7 @@ export async function installSignedRealmWorldFixture(input: {
       goals: input.goals ?? [],
     }))],
   ]);
+  if (input.commandPolicy !== undefined) files.set("content/command-policy.json", Buffer.from(typeof input.commandPolicy === "string" ? input.commandPolicy : JSON.stringify(input.commandPolicy)));
   const unsigned: RealmWorldManifestV1 = {
     format: REALMWORLD_FORMAT,
     formatVersion: REALMWORLD_FORMAT_VERSION,
@@ -107,7 +113,20 @@ export async function installSignedRealmWorldFixture(input: {
     installRoot: input.installRoot,
     engineBaseVersion: input.engineBaseVersion,
     verifySignature: ({ manifest: candidate }: { manifest: RealmWorldManifestV1 }) =>
-      candidate.signature.value === signature,
+      verify(null, Buffer.from(serializeRealmWorldManifestSigningPayload(candidate)), input.keyPair.publicKeyPem, Buffer.from(candidate.signature.value, "base64url")),
   });
   await rm(sourceDir, { recursive: true, force: true });
+}
+
+/** Synthetic only: the engine does not approve these as any product World rule. */
+export function syntheticCommandPolicyFixture() {
+  return {
+    format: "realmworld-command-policy", schemaVersion: 1, policyVersion: "synthetic.v1",
+    projects: [{ projectKey: "p", kind: "production", title: { en: "Synthetic", "zh-CN": "合成测试" }, milestones: [
+      { milestoneKey: "prior", title: { en: "Prior" } }, { milestoneKey: "target", title: { en: "Target" } },
+    ] }],
+    bindings: [{ bindingKey: "target.ready", command: "confirm_milestone", projectKey: "p", milestoneKey: "target",
+      semanticEventKey: "synthetic.ready", storySelector: "genesis", recordSelector: "genesis",
+      all: [{ kind: "milestone_status", milestoneKey: "prior", status: "completed" }] }],
+  };
 }

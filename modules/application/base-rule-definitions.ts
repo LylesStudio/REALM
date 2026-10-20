@@ -15,7 +15,7 @@
 import type { PoolClient } from "pg";
 import { normalizeWorldStyle, type WorldStyle } from "../style/world-style.ts";
 
-const BASE_RULE_PACK_KEY = "realm.base.v1";
+export const BASE_RULE_PACK_KEY = "realm.base.v1";
 
 interface BaseSkillSeed {
   skillKey: string;

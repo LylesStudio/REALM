@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const ROOT = new URL("..", import.meta.url);
 
@@ -92,6 +93,10 @@ const HELPER_CALLERS = [
     "modules/application/tavern-import-service.ts",
     "modules/application/library-service.ts",
     "modules/application/base-rule-definitions.ts",
+    // runtime-save restore materializes the engine-owned base rule pack into
+    // the restore target World (base → installed World upgrade path), exactly
+    // the same engine content the runtime grants lazily at Record creation.
+    "database/postgres/realm-runtime-save-repository.ts",
   ]],
   ["modules/application/library-service.ts", "insertOpeningEvent", null],
   ["modules/application/library-service.ts", "attachCharacterToRecord", null],
@@ -274,7 +279,7 @@ test("D.0 helper 调用图：内部写 helper 的 caller ⊆ 允许集合", asyn
   }
 });
 
-test("D.0 worlds 行锁形围栏：内容面 KEY SHARE，仅归档/删除命令 FOR UPDATE", async () => {
+test("D.0 worlds 行锁形围栏：普通内容 KEY SHARE，归档/删除和声明Goal创世窄例外 FOR UPDATE", async () => {
   // worlds FOR UPDATE 只允许出现在 K 面状态转换（world-archive/delete-world）。
   const files = [
     "database/postgres/runtime-repository.ts",
@@ -301,9 +306,37 @@ test("D.0 worlds 行锁形围栏：内容面 KEY SHARE，仅归档/删除命令 
       `${file} 不得对 worlds 取 FOR UPDATE（仅 KEY SHARE）`,
     );
   }
-  // library-service：worlds FOR UPDATE 仅 world-archive/delete-world 分支。
+  // 0083 admission already requires World -> worldline UPDATE locks. Genesis
+  // must choose that lock before child topology writes, not upgrade KEY SHARE.
   const library = await readSource("modules/application/library-service.ts");
-  const worldsForUpdate = library.match(/FROM worlds[^`;]*?FOR UPDATE/g) ?? [];
-  assert.equal(worldsForUpdate.length, 2,
-    "library-service worlds FOR UPDATE 必须恰好 2 处（world-archive/delete-world）");
+  const ast=ts.createSourceFile("library-service.ts",library,ts.ScriptTarget.Latest,true);
+  const declarations=[];
+  function visit(node) {
+    if(ts.isVariableDeclaration(node)&&node.name.getText(ast)==="persistedWorld")declarations.push(node);
+    ts.forEachChild(node,visit);
+  }
+  visit(ast); assert.equal(declarations.length,1);
+  const declaration=declarations[0];
+  assert.ok(ts.isAwaitExpression(declaration.initializer));
+  const call=declaration.initializer.expression;
+  assert.ok(ts.isCallExpression(call)); assert.equal(call.expression.getText(ast),"client.query");
+  assert.equal(call.arguments[1].getText(ast),"[scope.workspaceId, worldId]");
+  const sql=call.arguments[0]; assert.ok(ts.isTemplateExpression(sql)); assert.equal(sql.templateSpans.length,1);
+  const lock=sql.templateSpans[0].expression; assert.ok(ts.isConditionalExpression(lock));
+  assert.equal(lock.condition.getText(ast),"declaredGoals.length");
+  assert.ok(ts.isStringLiteral(lock.whenTrue)&&ts.isStringLiteral(lock.whenFalse));
+  assert.equal(lock.whenTrue.text,"FOR UPDATE"); assert.equal(lock.whenFalse.text,"FOR KEY SHARE");
+  assert.equal(sql.head.text.replace(/\s+/g," ").trim(),"SELECT world_version, status FROM worlds WHERE workspace_id = $1 AND id = $2");
+  assert.equal(sql.templateSpans[0].literal.text.trim(),"");
+  let enclosing=declaration.parent;
+  while(enclosing&&!ts.isFunctionDeclaration(enclosing))enclosing=enclosing.parent;
+  assert.equal(enclosing?.name?.getText(ast),"createGenesisInternal");
+  const genesis=enclosing.getText(ast);
+  assert.ok(genesis.indexOf("validateGenesisGoalDeclarations(draft.goals)")<genesis.indexOf("const persistedWorld"));
+  assert.ok(genesis.indexOf("const persistedWorld")<genesis.indexOf("INSERT INTO worldlines"));
+  // Remove only this exact, proven genesis query; the old two-point fence stays.
+  const withoutGenesis=library.slice(0,sql.getStart(ast))+library.slice(sql.getEnd());
+  const worldsForUpdate=withoutGenesis.match(/FROM worlds[^`;]*?FOR UPDATE/g)??[];
+  assert.equal(worldsForUpdate.length,2,
+    "outside the exact declared-Goal genesis query, only world-archive/delete-world may take the World UPDATE lock");
 });

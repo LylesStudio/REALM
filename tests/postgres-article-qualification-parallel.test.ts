@@ -22,10 +22,37 @@ import {
   createArticleQualificationRepository,
 } from "../database/postgres/article-qualification-repository.ts";
 import { createSessionValue } from "../modules/identity/auth.ts";
-import { endSharedRuntimePools } from "../app/api/world-scope.ts";
+import { endSharedRuntimePools, getSharedRuntimePool } from "../app/api/world-scope.ts";
 import {
   POST as qualifyPOST,
 } from "../app/api/world-knowledge/articles/qualify/route.ts";
+
+// Observe actual Client end events: pg-pool can resolve end() after removing
+// idle clients but before their graceful Terminate has completed.
+const fixtureShutdowns = new WeakMap<pg.Pool, Promise<void>[]>();
+function observeFixturePool(pool: pg.Pool): pg.Pool {
+  if (!fixtureShutdowns.has(pool)) {
+    const shutdowns: Promise<void>[] = [];
+    fixtureShutdowns.set(pool, shutdowns);
+    pool.on("connect", client => {
+      shutdowns.push(new Promise<void>(resolve => client.once("end", resolve)));
+    });
+  }
+  return pool;
+}
+function createFixturePool(options: pg.PoolConfig): pg.Pool {
+  return observeFixturePool(new pg.Pool(options));
+}
+async function endFixturePool(pool: pg.Pool): Promise<void> {
+  await pool.end();
+  await Promise.all(fixtureShutdowns.get(pool) ?? []);
+}
+async function assertFixtureBackendsGone(maintenance: pg.Client, name: string) {
+  const remaining = await maintenance.query(
+    "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [name],
+  );
+  assert.deepEqual(remaining.rows, [], "all fixture backends must end before DROP");
+}
 
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
@@ -53,16 +80,24 @@ async function createTempDatabase(t: test.TestContext, label: string) {
   await maintenance.query(`CREATE DATABASE "${databaseName}"`);
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
-  const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 8 });
+  const ownerPool = createFixturePool({ connectionString: ownerUrl.href, max: 8 });
   const runtimeUrl = new URL(requireLoopbackUrl(runtimeConnectionString!).href);
   runtimeUrl.pathname = `/${databaseName}`;
-  const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 8 });
+  const runtimePool = createFixturePool({ connectionString: runtimeUrl.href, max: 8 });
   ownerPool.on("error", () => undefined);
   runtimePool.on("error", () => undefined);
+  const ownedPools = [ownerPool, runtimePool];
+  const registerPool = (pool: pg.Pool) => {
+    ownedPools.push(observeFixturePool(pool));
+    return pool;
+  };
+  const routePool = observeFixturePool(getSharedRuntimePool(runtimeUrl.href));
   t.after(async () => {
-    await runtimePool.end().catch(() => undefined);
-    await ownerPool.end().catch(() => undefined);
-    await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+    await endSharedRuntimePools();
+    await Promise.all(fixtureShutdowns.get(routePool) ?? []);
+    await Promise.all(ownedPools.map(endFixturePool));
+    await assertFixtureBackendsGone(maintenance, databaseName);
+    await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
     await maintenance.end();
   });
   const migrationDir = new URL("../database/postgres/migrations/", import.meta.url);
@@ -71,7 +106,7 @@ async function createTempDatabase(t: test.TestContext, label: string) {
     await ownerPool.query(await readFile(new URL(filename, migrationDir), "utf8"));
   }
   await seedPostgresDemo(ownerPool);
-  return { ownerPool, runtimePool, runtimeUrl };
+  return { ownerPool, runtimePool, runtimeUrl, registerPool };
 }
 
 async function insertArticle(pool: pg.Pool, id: string) {

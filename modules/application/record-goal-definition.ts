@@ -1,4 +1,7 @@
 import type { PoolClient } from "pg";
+import { loadGoalContentBinding } from "../../database/postgres/goal-content-binding-repository.ts";
+import { canonicalGoalJson } from "../goals/content-binding.ts";
+import { createDefaultGoalContentBindingSource, verifyGoalContentBinding, type GoalContentSourceResolver } from "./goal-content-binding-source.ts";
 import { loadRecordAuthoredGoalDefinition } from "../../database/postgres/record-goal-authoring-repository.ts";
 import { withWorkspaceTransaction, type WorkspaceDatabase } from "../../database/postgres/workspace-transaction.ts";
 import type { ClaimedGoalAssessmentJob } from "../goals/assessment-worker.ts";
@@ -6,6 +9,7 @@ import type { GoalDefinition, GoalRuntimeScope } from "../goals/public.ts";
 import { RuntimeInvariantError } from "../runtime/public.ts";
 
 export interface RecordGoalDefinitionBinding {
+  instanceId?: string;
   definitionSource?: string;
   definitionId?: string | null;
   goalKey: string;
@@ -20,6 +24,7 @@ export async function loadBoundRecordGoalDefinition(client: PoolClient, input: {
   scope: GoalRuntimeScope;
   binding: RecordGoalDefinitionBinding;
   resolveContentDefinition?: ContentResolver;
+  resolveGoalSource?: GoalContentSourceResolver;
 }): Promise<GoalDefinition> {
   const { binding, scope } = input;
   if (binding.definitionSource === 'record') {
@@ -33,20 +38,36 @@ export async function loadBoundRecordGoalDefinition(client: PoolClient, input: {
   if (binding.definitionSource !== undefined && binding.definitionSource !== 'content') {
     throw new RuntimeInvariantError('GOAL_DEFINITION_SOURCE_INVALID','The Goal definition source is invalid.');
   }
-  if (!input.resolveContentDefinition) {
-    throw new RuntimeInvariantError('GOAL_CONTENT_UNAVAILABLE','Goal content is unavailable.');
+  // Present-day key/policy equality cannot prove historical content. A
+  // projection without an instance id must prove every matching attempt.
+  const instances = await client.query<{id:string}>(`SELECT id FROM goal_instances
+    WHERE workspace_id=$1 AND world_id=$2 AND worldline_id=$3 AND record_id=$4
+      AND scope_kind='record' AND definition_source='content' AND goal_key=$5 AND policy_version=$6
+      AND ($7::text IS NULL OR id=$7) ORDER BY attempt`,
+    [scope.workspaceId,scope.worldId,scope.worldlineId,scope.recordId,binding.goalKey,binding.policyVersion ?? null,binding.instanceId ?? null]);
+  if (!instances.rows.length) throw new RuntimeInvariantError("GOAL_HISTORICAL_BINDING_UNRESOLVED", "Historical Goal source is unresolved.");
+  let exact: string | undefined;
+  let resolved: GoalDefinition | undefined;
+  for (const instance of instances.rows) {
+    const content = await loadGoalContentBinding(client, scope.workspaceId, instance.id);
+    if (content.owner.scopeKind !== "record" || content.owner.recordId !== scope.recordId
+      || content.owner.worldId !== scope.worldId || content.owner.worldlineId !== scope.worldlineId
+      || content.goalKey !== binding.goalKey || content.policyVersion !== binding.policyVersion
+      || content.source.sourceWorldVersion !== binding.worldVersion) {
+      throw new RuntimeInvariantError("GOAL_SCOPE_MISMATCH", "Goal source binding does not match the instance.");
+    }
+    const identity = canonicalGoalJson([content.source,content.definitionHash]);
+    if (exact !== undefined && identity !== exact) throw new RuntimeInvariantError("GOAL_HISTORICAL_BINDING_UNRESOLVED", "Goal source is ambiguous.");
+    exact = identity;
+    resolved = (await verifyGoalContentBinding(content, input.resolveGoalSource ?? createDefaultGoalContentBindingSource())).definition;
   }
-  const definition = await input.resolveContentDefinition({ worldId: scope.worldId,
-    worldVersion: binding.worldVersion, goalKey: binding.goalKey });
-  if (!definition || definition.goalKey !== binding.goalKey) {
-    throw new RuntimeInvariantError('GOAL_DEFINITION_UNAVAILABLE','The exact Goal content is unavailable.');
-  }
-  return definition;
+  return resolved!;
 }
 
 /** Trusted worker adapter: resolves the job's exact instance, not the latest goal family version. */
 export function createRecordGoalDefinitionResolver(database: WorkspaceDatabase, options: {
   resolveContentDefinition?: ContentResolver;
+  resolveGoalSource?: GoalContentSourceResolver;
 } = {}): (job: ClaimedGoalAssessmentJob) => Promise<GoalDefinition> {
   return job => withWorkspaceTransaction(database, job.workspaceId, async client => {
     const result = await client.query<{ definition_source: string; definition_id: string | null;
@@ -62,8 +83,8 @@ export function createRecordGoalDefinitionResolver(database: WorkspaceDatabase, 
       throw new RuntimeInvariantError('GOAL_SCOPE_MISMATCH','The Goal job does not match its immutable Record binding.');
     }
     return loadBoundRecordGoalDefinition(client, { scope: job, binding: {
-      definitionSource: row.definition_source, definitionId: row.definition_id, goalKey: row.goal_key,
+      instanceId: job.goalInstanceId, definitionSource: row.definition_source, definitionId: row.definition_id, goalKey: row.goal_key,
       policyVersion: row.policy_version, worldVersion: row.world_version,
-    }, resolveContentDefinition: options.resolveContentDefinition });
+    }, resolveContentDefinition: options.resolveContentDefinition, resolveGoalSource: options.resolveGoalSource });
   }, { readOnly: true });
 }

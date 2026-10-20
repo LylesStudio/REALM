@@ -1,3 +1,5 @@
+import type { RequestPolicy } from "../world-transfer/realmworld-command-policy.ts";
+import { compareReplay, type ResolvedReplayProofV1 } from "./command-replay-lineage.ts";
 import {
   deriveCashPosition,
   normalizeFinanceAccount,
@@ -11,10 +13,13 @@ import {
   readScope,
   type ProjectScope,
 } from "../projects/public.ts";
+import { isSemanticEventKey } from "../world-transfer/semantic-events.ts";
 
 export const PROJECT_FINANCE_COMMAND_POLICY_VERSION = "project-finance-command.v1" as const;
 
 export type ProjectFinanceCommandErrorCode =
+  | "BUSINESS_POLICY_MISSING"
+  | "BUSINESS_PRECONDITION_FAILED"
   | "COMMAND_INVALID"
   | "FINANCE_ACCOUNT_NOT_FOUND"
   | "WRITE_CONFLICT"
@@ -58,6 +63,8 @@ export interface ExpenseCommitInput {
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  /** Canonical fingerprinted request payload, persisted for replay provenance. */
+  request: Readonly<Record<string, unknown>>;
   accountId: string;
   entryId: string;
   sourceEventId: string;
@@ -99,6 +106,7 @@ export interface StageChangeInput {
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  request: Readonly<Record<string, unknown>>;
   projectId: string;
   stage: ProjectStage;
   expectedProjectVersion: number;
@@ -144,6 +152,7 @@ export interface ObligationCommitInput {
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  request: Readonly<Record<string, unknown>>;
   obligationId: string;
   projectId: string | null;
   kind: "loan" | "presale" | "revenue_share";
@@ -166,6 +175,7 @@ export interface ObligationSettlementInput {
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  request: Readonly<Record<string, unknown>>;
   obligationId: string;
   amountMinor: number;
   expectedOutstandingMinor: number;
@@ -179,18 +189,41 @@ export interface ObligationSettlementInput {
   settlementKind: "repayment" | "draw" | "share";
 }
 
+/**
+ * Declared semantic event key carried by a generic formal completion event.
+ * World/content vocabulary (for example a World-declared completion signal),
+ * never an engine event kind. Shape primitives live in
+ * modules/world-transfer/semantic-events.ts (shared with package
+ * instantiation and runtime-save restore). Shape validation is NOT
+ * authorization: the PostgreSQL command store additionally requires the key
+ * to be declared by the installed World (worlds.settings.declaredEvents)
+ * before any write.
+ */
+
+/** Returns the validated key, or null when absent. Throws COMMAND_INVALID otherwise. */
+export function normalizeSemanticEventKey(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (!isSemanticEventKey(value)) {
+    throw new ProjectFinanceCommandError("COMMAND_INVALID", "semanticEventKey is invalid.");
+  }
+  return value;
+}
+
 export interface MilestoneConfirmInput {
   scope: ProjectScope;
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  request: Readonly<Record<string, unknown>>;
   projectId: string;
   milestoneId: string;
   expectedProjectVersion: number;
   evidence?: RecordEvidence | null;
+  semanticEventKey?: string | null;
 }
 
 export interface MilestoneCommandResult {
+  requestPolicy?: RequestPolicy;
   status: "committed" | "replayed";
   commandGroupId: string;
   projectId: string;
@@ -198,6 +231,8 @@ export interface MilestoneCommandResult {
   projectVersion: number;
   eventKind: "project.milestone.confirmed";
   worldCursor?: { worldTick: number; worldOrdinal: number } | null;
+  /** Echo of the declared semantic event key, present iff one was declared. */
+  semanticEventKey?: string;
 }
 
 export interface BudgetCommitInput {
@@ -205,6 +240,7 @@ export interface BudgetCommitInput {
   commandGroupId: string;
   requestFingerprint: string;
   idempotencyKey: string;
+  request: Readonly<Record<string, unknown>>;
   projectId: string;
   category: string;
   amountMinor: number;
@@ -249,7 +285,16 @@ export interface ProjectFinanceCommandStore {
   loadCommand(
     scope: ProjectScope,
     idempotencyKey: string,
-  ): Promise<{ requestFingerprint: string; result: StoredCommandResult } | null>;
+  ): Promise<{
+    requestFingerprint: string;
+    state?: "committed" | "rejected";
+    policyVersion?: string;
+    provenance?: "legacy-result-v1" | "request-result-v1";
+    replayProof?: ResolvedReplayProofV1;
+    result: StoredCommandResult;
+    /** Canonical request payload persisted at commit; null only for pre-provenance rows. */
+    request: Readonly<Record<string, unknown>> | null;
+  } | null>;
   loadAccount(scope: ProjectScope, accountId: string): Promise<FinanceAccount | null>;
   loadDefaultAccount(scope: ProjectScope): Promise<FinanceAccount | null>;
   loadLedger(scope: ProjectScope, accountId: string): Promise<readonly LedgerEntry[]>;
@@ -265,6 +310,7 @@ export interface ProjectFinanceCommandStore {
     idempotencyKey: string;
     evidence: RecordEvidence | null;
     actions: readonly ProjectFinanceAction[];
+    request: Readonly<Record<string, unknown>>;
   }): Promise<ApplyProjectFinanceResult>;
   createObligation(input: ObligationCommitInput): Promise<ObligationResult>;
   settleObligation(input: ObligationSettlementInput): Promise<ObligationResult & {
@@ -279,7 +325,7 @@ export function createProjectFinanceCommandService(options: {
     async recordExpense(command: RecordExpenseCommand): Promise<ExpenseCommandResult> {
       const scope = readScope(command.scope);
       const amountMinor = positiveAmount(command.amountMinor);
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "finance.expense.recorded",
         accountId: command.accountId ?? null,
         amountMinor,
@@ -290,17 +336,12 @@ export function createProjectFinanceCommandService(options: {
         occurredAt: required(command.occurredAt, "occurredAt"),
         expectedBalanceMinor: command.expectedBalanceMinor,
         evidence: evidenceFingerprint(command.evidence),
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError(
-            "IDEMPOTENCY_KEY_REUSE",
-            "This idempotency key was already used for a different command.",
-          );
-        }
-        return { ...(existing.result as ExpenseCommandResult), status: "replayed" };
+        return replayStoredCommand<ExpenseCommandResult>(existing, scope, request, requestFingerprint);
       }
 
       const account = command.accountId
@@ -338,6 +379,7 @@ export function createProjectFinanceCommandService(options: {
         commandGroupId,
         requestFingerprint,
         idempotencyKey,
+        request,
         accountId: normalizedAccount.id,
         entryId: `${commandGroupId}:entry`,
         sourceEventId: `${commandGroupId}:event`,
@@ -371,32 +413,35 @@ export function createProjectFinanceCommandService(options: {
       expectedProjectVersion: number;
       idempotencyKey: string;
       evidence?: RecordEvidence | null;
+      semanticEventKey?: string | null;
     }): Promise<MilestoneCommandResult> {
       const scope = readScope(command.scope);
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const semanticEventKey = normalizeSemanticEventKey(command.semanticEventKey);
+      const request = {
         command: "project.milestone.confirmed",
         projectId: required(command.projectId, "projectId"),
         milestoneId: required(command.milestoneId, "milestoneId"),
         expectedProjectVersion: command.expectedProjectVersion,
         evidence: evidenceFingerprint(command.evidence),
-      });
+        ...(semanticEventKey ? { semanticEventKey } : {}),
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return { ...(existing.result as MilestoneCommandResult), status: "replayed" };
+        return replayStoredCommand<MilestoneCommandResult>(existing, scope, request, requestFingerprint);
       }
       return options.store.confirmMilestone({
         scope,
         commandGroupId: projectFinanceCommandGroupIdFor(scope, idempotencyKey, requestFingerprint),
         requestFingerprint,
         idempotencyKey,
+        request,
         projectId: required(command.projectId, "projectId"),
         milestoneId: required(command.milestoneId, "milestoneId"),
         expectedProjectVersion: command.expectedProjectVersion,
         evidence: command.evidence ?? null,
+        semanticEventKey,
       });
     },
     async changeStage(command: {
@@ -409,26 +454,25 @@ export function createProjectFinanceCommandService(options: {
     }): Promise<StageCommandResult> {
       const scope = readScope(command.scope);
       const stage = readStage(command.stage);
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "project.stage.changed",
         projectId: required(command.projectId, "projectId"),
         stage,
         expectedProjectVersion: command.expectedProjectVersion,
         evidence: evidenceFingerprint(command.evidence),
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return { ...(existing.result as StageCommandResult), status: "replayed" };
+        return replayStoredCommand<StageCommandResult>(existing, scope, request, requestFingerprint);
       }
       return options.store.changeStage({
         scope,
         commandGroupId: projectFinanceCommandGroupIdFor(scope, idempotencyKey, requestFingerprint),
         requestFingerprint,
         idempotencyKey,
+        request,
         projectId: required(command.projectId, "projectId"),
         stage,
         expectedProjectVersion: command.expectedProjectVersion,
@@ -446,18 +490,16 @@ export function createProjectFinanceCommandService(options: {
         throw new ProjectFinanceCommandError("COMMAND_INVALID", "actions must be a bounded non-empty list.");
       }
       const actions = command.actions.map((action) => normalizeFinanceAction(action));
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "record.apply_project_finance",
         evidence: evidenceFingerprint(command.evidence),
         actions,
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return { ...(existing.result as Awaited<ReturnType<ProjectFinanceCommandStore["applyRecordProjectFinance"]>>), status: "replayed" as const };
+        return replayStoredCommand<Awaited<ReturnType<ProjectFinanceCommandStore["applyRecordProjectFinance"]>>>(existing, scope, request, requestFingerprint);
       }
       return options.store.applyRecordProjectFinance({
         scope,
@@ -466,6 +508,7 @@ export function createProjectFinanceCommandService(options: {
         idempotencyKey,
         evidence: command.evidence ?? null,
         actions,
+        request,
       });
     },
     async createObligation(command: {
@@ -485,21 +528,19 @@ export function createProjectFinanceCommandService(options: {
         throw new ProjectFinanceCommandError("COMMAND_INVALID", "shareBps is only valid for revenue_share.");
       }
       const undeliveredCount = kind === "presale" ? readCount(command.undeliveredCount ?? 0) : 0;
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "finance.obligation.created",
         projectId: command.projectId ?? null,
         kind,
         principalMinor,
         shareBps,
         undeliveredCount,
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return { ...(existing.result as ObligationResult), status: "replayed" };
+        return replayStoredCommand<ObligationResult>(existing, scope, request, requestFingerprint);
       }
       const commandGroupId = projectFinanceCommandGroupIdFor(scope, idempotencyKey, requestFingerprint);
       return options.store.createObligation({
@@ -507,6 +548,7 @@ export function createProjectFinanceCommandService(options: {
         commandGroupId,
         requestFingerprint,
         idempotencyKey,
+        request,
         obligationId: `${commandGroupId}:obligation`,
         projectId: command.projectId ?? null,
         kind,
@@ -531,7 +573,7 @@ export function createProjectFinanceCommandService(options: {
       const scope = readScope(command.scope);
       const settlementKind = readSettlementKind(command.settlementKind);
       const amountMinor = positiveAmount(command.amountMinor);
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "finance.obligation.settled",
         obligationId: required(command.obligationId, "obligationId"),
         settlementKind,
@@ -541,17 +583,12 @@ export function createProjectFinanceCommandService(options: {
         accountId: command.accountId ?? null,
         category: required(command.category, "category"),
         occurredAt: required(command.occurredAt, "occurredAt"),
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return {
-          ...(existing.result as ObligationResult & { cash: ReturnType<typeof deriveCashPosition> }),
-          status: "replayed" as const,
-        };
+        return replayStoredCommand<ObligationResult & { cash: ReturnType<typeof deriveCashPosition> }>(existing, scope, request, requestFingerprint);
       }
       const commandGroupId = projectFinanceCommandGroupIdFor(scope, idempotencyKey, requestFingerprint);
       return options.store.settleObligation({
@@ -559,6 +596,7 @@ export function createProjectFinanceCommandService(options: {
         commandGroupId,
         requestFingerprint,
         idempotencyKey,
+        request,
         obligationId: required(command.obligationId, "obligationId"),
         amountMinor,
         expectedOutstandingMinor: command.expectedOutstandingMinor,
@@ -582,26 +620,25 @@ export function createProjectFinanceCommandService(options: {
     }): Promise<BudgetCommandResult> {
       const scope = readScope(command.scope);
       const amountMinor = positiveAmount(command.amountMinor);
-      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+      const request = {
         command: "finance.budget.allocated",
         projectId: required(command.projectId, "projectId"),
         category: required(command.category, "category"),
         amountMinor,
         expectedVersion: command.expectedVersion,
-      });
+      };
+      const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
       const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
       const existing = await options.store.loadCommand(scope, idempotencyKey);
       if (existing) {
-        if (existing.requestFingerprint !== requestFingerprint) {
-          throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-        }
-        return { ...(existing.result as BudgetCommandResult), status: "replayed" };
+        return replayStoredCommand<BudgetCommandResult>(existing, scope, request, requestFingerprint);
       }
       return options.store.allocateBudget({
         scope,
         commandGroupId: projectFinanceCommandGroupIdFor(scope, idempotencyKey, requestFingerprint),
         requestFingerprint,
         idempotencyKey,
+        request,
         projectId: required(command.projectId, "projectId"),
         category: required(command.category, "category"),
         amountMinor,
@@ -610,6 +647,21 @@ export function createProjectFinanceCommandService(options: {
       });
     },
   };
+}
+
+/** The same full-candidate comparator also guards transaction-local occupied keys. */
+function replayStoredCommand<T extends { status: "committed" | "replayed" }>(
+  existing: NonNullable<Awaited<ReturnType<ProjectFinanceCommandStore["loadCommand"]>>>,
+  scope: ProjectScope,
+  request: Readonly<Record<string, unknown>>,
+  requestFingerprint: string,
+): T {
+  const { result, ...receipt } = existing;
+  if (!compareReplay({ family: "finance", trustedScope: scope, candidate: request,
+    expectedOperation: request.command, existing: receipt, suppliedTargetFingerprint: requestFingerprint })) {
+    throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
+  }
+  return { ...(result as object), status: "replayed" } as T;
 }
 
 async function recordLedger(
@@ -622,7 +674,7 @@ async function recordLedger(
 ): Promise<ExpenseCommandResult> {
   const scope = readScope(command.scope);
   const amountMinor = positiveAmount(command.amountMinor);
-  const requestFingerprint = projectFinanceCommandFingerprintFor(scope, {
+  const request = {
     command: eventKind,
     accountId: command.accountId ?? null,
     amountMinor,
@@ -634,14 +686,12 @@ async function recordLedger(
     expectedBalanceMinor: command.expectedBalanceMinor,
     direction,
     evidence: evidenceFingerprint(command.evidence),
-  });
+  };
+  const requestFingerprint = projectFinanceCommandFingerprintFor(scope, request);
   const idempotencyKey = required(command.idempotencyKey, "idempotencyKey");
   const existing = await store.loadCommand(scope, idempotencyKey);
   if (existing) {
-    if (existing.requestFingerprint !== requestFingerprint) {
-      throw new ProjectFinanceCommandError("IDEMPOTENCY_KEY_REUSE", "This idempotency key was already used for a different command.");
-    }
-    return { ...(existing.result as ExpenseCommandResult), status: "replayed" };
+    return replayStoredCommand<ExpenseCommandResult>(existing, scope, request, requestFingerprint);
   }
   const account = command.accountId
     ? await store.loadAccount(scope, command.accountId)
@@ -664,6 +714,7 @@ async function recordLedger(
     commandGroupId,
     requestFingerprint,
     idempotencyKey,
+    request,
     accountId: normalizedAccount.id,
     entryId: `${commandGroupId}:entry`,
     sourceEventId: `${commandGroupId}:event`,

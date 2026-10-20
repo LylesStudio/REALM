@@ -85,6 +85,8 @@ const MIGRATIONS = [
   "0058_durable_job_queue.sql",
   // B1：branch Goal clone reads scope/retry columns.
   "0060_goal_scope_terminal_lifecycle.sql",
+  // Current branch readback unconditionally queries committed performance facts.
+  "0066_committed_fact_commands.sql",
 ];
 
 function requireLoopbackUrl(value: string): URL {

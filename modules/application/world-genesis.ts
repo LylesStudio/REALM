@@ -142,6 +142,9 @@ export function genesisDraftFingerprint(draft: WorldGenesisDraft): string {
     style: draft.style,
     story: { title: draft.story.title, premise: draft.story.premise },
     record: { title: draft.record.title },
+    ...(draft.playerName?.trim()
+      ? { playerName: draft.playerName.trim().slice(0, GENESIS_LIMITS.playerName) }
+      : {}),
     playerRole: draft.playerRole,
     companions: draft.companions.map((companion) => ({
       name: companion.name,

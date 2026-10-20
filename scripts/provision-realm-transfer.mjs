@@ -66,13 +66,13 @@ try {
   const preload = await client.query("SHOW shared_preload_libraries");
   const preloadValue = String(preload.rows[0]?.shared_preload_libraries ?? "");
   if (/pgaudit|pg_stat_statements/i.test(preloadValue)) {
-    fail("shared_preload_libraries contains an audit extension; no-go.");
+    throw new Error("shared_preload_libraries contains an audit extension; no-go.");
   }
   const extensions = await client.query(
     "SELECT extname FROM pg_extension WHERE extname IN ('pgaudit', 'pg_stat_statements')",
   );
   if (extensions.rowCount > 0) {
-    fail("audit extension present (pgaudit/pg_stat_statements); no-go.");
+    throw new Error("audit extension present (pgaudit/pg_stat_statements); no-go.");
   }
   for (const name of GUC_NAMES) {
     const value = await client.query(`SHOW ${name}`);
@@ -123,7 +123,9 @@ try {
   // 成功输出不含任何凭据/连接信息。
   console.log("realm_transfer provisioned (LOGIN, negative attributes, password set).");
 } catch (error) {
-  fail(`provisioning failed: ${error instanceof Error ? error.message : String(error)}`);
+  // Do not exit while owning a connection: refusal must still run finally.
+  console.error(`provision-realm-transfer: provisioning failed: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 } finally {
   // ④ 恢复三项 GUC 原值（连接异常则 session 随连接销毁失效）。
   if (gucsGated) {

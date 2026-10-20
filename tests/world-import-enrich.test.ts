@@ -8,12 +8,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   utf8,
+  tableWireDigest,
   type PackColumnSpec,
   type RealmManifest,
   type ValidatedPack,
 } from "../modules/world-transfer/realm-pack.ts";
 import { LOCAL_WORLD_VERSION } from "../modules/world-transfer/realm-save.ts";
 import { enrichPack } from "../modules/application/world-import-service.ts";
+import { declaredSemanticEventsFromWorldSettings } from "../modules/world-transfer/semantic-events.ts";
 
 /** 目标库为 0054 之后形态（含 world_version 列）。 */
 const WORLDS_COLUMNS: readonly PackColumnSpec[] = [
@@ -129,3 +131,62 @@ test("pack already carrying worldVersion keeps it untouched", () => {
   assert.ok(worldRows && worldRows.length === 1);
   assert.equal(worldRows[0]?.["world_version"], "1.4.0");
 });
+
+for (const copyKey of ["", "a1-copy"]) {
+  const mode = copyKey ? "copy" : "preserve";
+  test(`A1 ${mode}: unsigned declaration metadata is removed before encoding without changing source bytes`, () => {
+    const settings = {
+      style: "modern",
+      language: "ja",
+      declaredEvents: ["example.completed"],
+      custom: { declaredEvents: ["descriptive.only"], note: "ordinary user data" },
+    };
+    const pack = packWithWorldsRow({ ...baseRow, settings, worldVersion: "1.4.0" });
+    const originalBytes = Buffer.from(pack.tables.get("worlds")!);
+    const enrichment = enrichPack(pack, new Map([["worlds", WORLDS_COLUMNS]]), {
+      ...enrichOptions, copyKey,
+    });
+    const row = enrichment.tables.get("worlds")![0]!;
+    const imported = JSON.parse(row.settings as string) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(imported, "declaredEvents"), false);
+    assert.deepEqual(imported, {
+      style: "modern", language: "ja", custom: settings.custom,
+    });
+    assert.equal(declaredSemanticEventsFromWorldSettings(imported).size, 0);
+    assert.equal(enrichment.worldDeclarationMetadataRedacted, true);
+    assert.equal(row.world_version, "1.4.0");
+    const wire = enrichment.transferEntries.find((entry) => entry.name === "worlds")!.wireDigest;
+    assert.equal(wire, tableWireDigest([row]));
+    assert.notEqual(wire, tableWireDigest([{ ...row, settings: JSON.stringify(settings) }]));
+    assert.deepEqual(Buffer.from(pack.tables.get("worlds")!), originalBytes);
+    assert.deepEqual(settings.declaredEvents, ["example.completed"]);
+    // Replaying enrichment must not produce a different ledger entry.
+    const repeated = enrichPack(pack, new Map([["worlds", WORLDS_COLUMNS]]), {
+      ...enrichOptions, copyKey,
+    });
+    assert.deepEqual(repeated.transferEntries, enrichment.transferEntries);
+  });
+
+  for (const declaration of [[], null, "not-a-declaration-list", { malformed: true }]) {
+    test(`A1 ${mode}: reserved declaration key is removed for ${JSON.stringify(declaration)}`, () => {
+      const enrichment = enrichPack(
+        packWithWorldsRow({ ...baseRow, settings: { style: "anime", declaredEvents: declaration } }),
+        new Map([["worlds", WORLDS_COLUMNS]]),
+        { ...enrichOptions, copyKey },
+      );
+      assert.deepEqual(JSON.parse(enrichment.tables.get("worlds")![0]!.settings as string), { style: "anime" });
+      assert.equal(enrichment.worldDeclarationMetadataRedacted, true);
+    });
+  }
+
+  test(`A1 ${mode}: ordinary backup settings are preserved with no false redaction`, () => {
+    const settings = { style: "classical", language: "zh-CN", custom: { arbitrary: [1, 2, 3] } };
+    const enrichment = enrichPack(
+      packWithWorldsRow({ ...baseRow, settings }),
+      new Map([["worlds", WORLDS_COLUMNS]]),
+      { ...enrichOptions, copyKey },
+    );
+    assert.deepEqual(JSON.parse(enrichment.tables.get("worlds")![0]!.settings as string), settings);
+    assert.equal(enrichment.worldDeclarationMetadataRedacted, false);
+  });
+}

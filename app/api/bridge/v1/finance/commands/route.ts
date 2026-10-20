@@ -6,9 +6,15 @@ import {
 import { ProjectFinanceError } from "../../../../../../modules/projects/public.ts";
 import { createPostgresProjectFinanceCommandStore } from "../../../../../../database/postgres/project-finance-command-repository.ts";
 import {
+  authorizeProjectFinanceWrite,
   projectFinanceRouteError,
   resolveProjectFinanceContext,
 } from "../../project-finance-context.ts";
+import {
+  runCommandWithStoryContinuation,
+  storyContinuationMeta,
+  type StoryContinuationOutcome,
+} from "../../../../../../modules/application/story-graph-continuation.ts";
 
 export const runtime = "nodejs";
 
@@ -16,7 +22,7 @@ const MAX_TEXT = 256;
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const context = await resolveProjectFinanceContext(request);
+    const context = await resolveProjectFinanceContext(request, { access: "write" });
     const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
     if (!idempotencyKey || idempotencyKey.length > 128) {
       return projectFinanceRouteError(new ProjectFinanceCommandError(
@@ -39,21 +45,93 @@ export async function POST(request: Request): Promise<Response> {
         "Unsupported finance command.",
       ));
     }
-    const service = createProjectFinanceCommandService({
-      store: createPostgresProjectFinanceCommandStore(context.database),
-    });
-    if (body.command === "create_obligation") {
-      const result = await service.createObligation({
-        scope: context.scope,
-        idempotencyKey,
-        projectId: optionalText(body.projectId),
-        kind: requiredKind(body.kind),
-        principalMinor: requiredInteger(body.principalMinor),
-        shareBps: body.shareBps === undefined || body.shareBps === null ? null : requiredInteger(body.shareBps),
-        undeliveredCount: body.undeliveredCount === undefined || body.undeliveredCount === null
-          ? 0
-          : nonNegativeInteger(body.undeliveredCount),
-      });
+    // F1b: one outer transaction carries the finance command store/service
+    // AND the full Story continuation on the SAME client; cash/obligation
+    // changes and every Story unlock commit once or roll back together.
+    const { command: executed, continuation } = await runCommandWithStoryContinuation(
+      context.database,
+      context.scope,
+      async (client) => {
+        await authorizeProjectFinanceWrite(client, context);
+        const service = createProjectFinanceCommandService({
+          store: createPostgresProjectFinanceCommandStore(client),
+        });
+        if (body.command === "create_obligation") {
+          return {
+            kind: "create_obligation" as const,
+            result: await service.createObligation({
+              scope: context.scope,
+              idempotencyKey,
+              projectId: optionalText(body.projectId),
+              kind: requiredKind(body.kind),
+              principalMinor: requiredInteger(body.principalMinor),
+              shareBps: body.shareBps === undefined || body.shareBps === null ? null : requiredInteger(body.shareBps),
+              undeliveredCount: body.undeliveredCount === undefined || body.undeliveredCount === null
+                ? 0
+                : nonNegativeInteger(body.undeliveredCount),
+            }),
+          };
+        }
+        if (body.command === "settle_obligation") {
+          return {
+            kind: "settle_obligation" as const,
+            result: await service.settleObligation({
+              scope: context.scope,
+              idempotencyKey,
+              obligationId: requiredText(body.obligationId, "obligationId"),
+              settlementKind: requiredSettlementKind(body.settlementKind),
+              amountMinor: requiredInteger(body.amountMinor),
+              expectedOutstandingMinor: nonNegativeInteger(body.expectedOutstandingMinor),
+              expectedBalanceMinor: nonNegativeInteger(body.expectedBalanceMinor),
+              accountId: optionalText(body.accountId),
+              category: requiredText(body.category, "category"),
+              memo: requiredText(body.memo, "memo"),
+              occurredAt: requiredText(body.occurredAt, "occurredAt"),
+            }),
+          };
+        }
+        if (body.command === "allocate_budget") {
+          return {
+            kind: "allocate_budget" as const,
+            result: await service.allocateBudget({
+              scope: context.scope,
+              projectId: requiredText(body.projectId, "projectId"),
+              category: requiredText(body.category, "category"),
+              amountMinor: requiredInteger(body.amountMinor),
+              expectedVersion: requiredInteger(body.expectedVersion),
+              idempotencyKey,
+            }),
+          };
+        }
+        const ledgerCommand = {
+          scope: context.scope,
+          accountId: optionalText(body.accountId),
+          amountMinor: requiredInteger(body.amountMinor),
+          category: requiredText(body.category, "category"),
+          memo: requiredText(body.memo, "memo"),
+          projectId: optionalText(body.projectId),
+          recordId: optionalText(body.recordId),
+          occurredAt: requiredText(body.occurredAt, "occurredAt"),
+          idempotencyKey,
+          expectedBalanceMinor: requiredInteger(body.expectedBalanceMinor),
+          evidence,
+        };
+        return {
+          kind: "ledger" as const,
+          result: body.command === "record_income"
+            ? await service.recordIncome(ledgerCommand)
+            : body.command === "record_adjustment"
+              ? await service.recordAdjustment({
+                ...ledgerCommand,
+                direction: body.direction === "income" ? "income" : "expense",
+              })
+              : await service.recordExpense(ledgerCommand),
+        };
+      },
+    );
+    // The response is constructed only after the outer COMMIT succeeded.
+    if (executed.kind === "create_obligation") {
+      const result = executed.result;
       return jsonData(context.scope, {
         status: result.status,
         commandGroupId: result.commandGroupId,
@@ -61,22 +139,10 @@ export async function POST(request: Request): Promise<Response> {
         kind: result.kind,
         outstandingMinor: result.outstandingMinor,
         undeliveredCount: result.undeliveredCount,
-      });
+      }, continuation);
     }
-    if (body.command === "settle_obligation") {
-      const result = await service.settleObligation({
-        scope: context.scope,
-        idempotencyKey,
-        obligationId: requiredText(body.obligationId, "obligationId"),
-        settlementKind: requiredSettlementKind(body.settlementKind),
-        amountMinor: requiredInteger(body.amountMinor),
-        expectedOutstandingMinor: nonNegativeInteger(body.expectedOutstandingMinor),
-        expectedBalanceMinor: nonNegativeInteger(body.expectedBalanceMinor),
-        accountId: optionalText(body.accountId),
-        category: requiredText(body.category, "category"),
-        memo: requiredText(body.memo, "memo"),
-        occurredAt: requiredText(body.occurredAt, "occurredAt"),
-      });
+    if (executed.kind === "settle_obligation") {
+      const result = executed.result;
       return jsonData(context.scope, {
         status: result.status,
         commandGroupId: result.commandGroupId,
@@ -85,17 +151,10 @@ export async function POST(request: Request): Promise<Response> {
         outstandingMinor: result.outstandingMinor,
         undeliveredCount: result.undeliveredCount,
         cash: result.cash,
-      });
+      }, continuation);
     }
-    if (body.command === "allocate_budget") {
-      const result = await service.allocateBudget({
-        scope: context.scope,
-        projectId: requiredText(body.projectId, "projectId"),
-        category: requiredText(body.category, "category"),
-        amountMinor: requiredInteger(body.amountMinor),
-        expectedVersion: requiredInteger(body.expectedVersion),
-        idempotencyKey,
-      });
+    if (executed.kind === "allocate_budget") {
+      const result = executed.result;
       return jsonData(context.scope, {
         status: result.status,
         commandGroupId: result.commandGroupId,
@@ -104,29 +163,9 @@ export async function POST(request: Request): Promise<Response> {
         category: result.category,
         amountMinor: result.amountMinor,
         version: result.version,
-      });
+      }, continuation);
     }
-    const ledgerCommand = {
-      scope: context.scope,
-      accountId: optionalText(body.accountId),
-      amountMinor: requiredInteger(body.amountMinor),
-      category: requiredText(body.category, "category"),
-      memo: requiredText(body.memo, "memo"),
-      projectId: optionalText(body.projectId),
-      recordId: optionalText(body.recordId),
-      occurredAt: requiredText(body.occurredAt, "occurredAt"),
-      idempotencyKey,
-      expectedBalanceMinor: requiredInteger(body.expectedBalanceMinor),
-      evidence,
-    };
-    const result = body.command === "record_income"
-      ? await service.recordIncome(ledgerCommand)
-      : body.command === "record_adjustment"
-        ? await service.recordAdjustment({
-          ...ledgerCommand,
-          direction: body.direction === "income" ? "income" : "expense",
-        })
-        : await service.recordExpense(ledgerCommand);
+    const result = executed.result;
     return jsonData(context.scope, {
       status: result.status,
       commandGroupId: result.commandGroupId,
@@ -143,13 +182,17 @@ export async function POST(request: Request): Promise<Response> {
       },
       cash: result.cash,
       ...(result.worldCursor ? { worldCursor: result.worldCursor } : {}),
-    });
+    }, continuation);
   } catch (error) {
     return projectFinanceRouteError(error);
   }
 }
 
-function jsonData(scope: { worldId: string; worldlineId: string }, data: unknown): Response {
+function jsonData(
+  scope: { worldId: string; worldlineId: string },
+  data: unknown,
+  continuation: StoryContinuationOutcome,
+): Response {
   return Response.json({
     ok: true as const,
     data,
@@ -157,6 +200,7 @@ function jsonData(scope: { worldId: string; worldlineId: string }, data: unknown
       worldId: scope.worldId,
       worldlineId: scope.worldlineId,
       projectionVersion: 1,
+      ...storyContinuationMeta(continuation),
     },
   }, { headers: { "Cache-Control": "no-store" } });
 }

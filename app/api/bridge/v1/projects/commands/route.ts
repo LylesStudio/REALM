@@ -1,3 +1,5 @@
+import { createInstalledRealmWorldCommandPolicyResolver } from "../../../../../../modules/world-transfer/realmworld-command-policy.ts";
+import { readRealmWorldVerifier } from "../../../../realmworld/env.ts";
 import {
   createProjectFinanceCommandService,
   PROJECT_STAGES,
@@ -8,9 +10,14 @@ import {
 } from "../../../../../../modules/application/project-finance-command.ts";
 import { createPostgresProjectFinanceCommandStore } from "../../../../../../database/postgres/project-finance-command-repository.ts";
 import {
+  authorizeProjectFinanceWrite,
   projectFinanceRouteError,
   resolveProjectFinanceContext,
 } from "../../project-finance-context.ts";
+import {
+  runCommandWithStoryContinuation,
+  storyContinuationMeta,
+} from "../../../../../../modules/application/story-graph-continuation.ts";
 
 export const runtime = "nodejs";
 
@@ -18,7 +25,7 @@ const MAX_TEXT = 256;
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const context = await resolveProjectFinanceContext(request);
+    const context = await resolveProjectFinanceContext(request, { access: "write" });
     const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
     if (!idempotencyKey || idempotencyKey.length > 128) {
       return projectFinanceRouteError(new ProjectFinanceCommandError(
@@ -28,18 +35,76 @@ export async function POST(request: Request): Promise<Response> {
     }
     const body = await readBody(request);
     const evidence = readRecordEvidence(body);
-    const service = createProjectFinanceCommandService({
-      store: createPostgresProjectFinanceCommandStore(context.database),
-    });
-    if (body.command === "change_stage") {
-      const result = await service.changeStage({
-        scope: context.scope,
-        projectId: requiredText(body.projectId, "projectId"),
-        stage: requiredText(body.stage, "stage"),
-        expectedProjectVersion: requiredInteger(body.expectedProjectVersion),
-        idempotencyKey,
-        evidence,
-      });
+    // F1b: one outer transaction carries the command store/service AND the
+    // full Story continuation on the SAME client; everything commits once or
+    // rolls back together. A replayed historical receipt reports an explicit
+    // blocked continuation instead of a fake success.
+    const { command: executed, continuation } = await runCommandWithStoryContinuation(
+      context.database,
+      context.scope,
+      async (client) => {
+        await authorizeProjectFinanceWrite(client, context);
+        const service = createProjectFinanceCommandService({
+          store: createPostgresProjectFinanceCommandStore(client, { resolveCommandPolicy: async binding => {
+            const verifier = await readRealmWorldVerifier();
+            if (!verifier) return null;
+            return createInstalledRealmWorldCommandPolicyResolver(verifier)(binding);
+          } }),
+        });
+        if (body.command === "change_stage") {
+          return {
+            kind: "change_stage" as const,
+            result: await service.changeStage({
+              scope: context.scope,
+              projectId: requiredText(body.projectId, "projectId"),
+              stage: requiredText(body.stage, "stage"),
+              expectedProjectVersion: requiredInteger(body.expectedProjectVersion),
+              idempotencyKey,
+              evidence,
+            }),
+          };
+        }
+        if (body.command === "apply_project_finance") {
+          return {
+            kind: "apply_project_finance" as const,
+            result: await service.applyRecordProjectFinance({
+              scope: context.scope,
+              idempotencyKey,
+              evidence,
+              actions: readActions(body.actions),
+            }),
+          };
+        }
+        if (body.command === "confirm_milestone") {
+          return {
+            kind: "confirm_milestone" as const,
+            result: await service.confirmMilestone({
+              scope: context.scope,
+              projectId: requiredText(body.projectId, "projectId"),
+              milestoneId: requiredText(body.milestoneId, "milestoneId"),
+              expectedProjectVersion: requiredInteger(body.expectedProjectVersion),
+              idempotencyKey,
+              evidence,
+              // Optional World-declared semantic completion key; validated
+              // generically by the command service, never interpreted by the engine.
+              semanticEventKey: body.semanticEventKey === undefined
+                ? undefined
+                : requiredText(body.semanticEventKey, "semanticEventKey"),
+            }),
+          };
+        }
+        throw new ProjectFinanceCommandError("COMMAND_INVALID", "Unsupported project command.");
+      },
+    );
+    // The response is constructed only after the outer COMMIT succeeded.
+    const meta = {
+      worldId: context.scope.worldId,
+      worldlineId: context.scope.worldlineId,
+      projectionVersion: 1,
+      ...storyContinuationMeta(continuation),
+    };
+    if (executed.kind === "change_stage") {
+      const result = executed.result;
       return Response.json({
         ok: true as const,
         data: {
@@ -51,20 +116,11 @@ export async function POST(request: Request): Promise<Response> {
           projectVersion: result.projectVersion,
           ...(result.worldCursor ? { worldCursor: result.worldCursor } : {}),
         },
-        meta: {
-          worldId: context.scope.worldId,
-          worldlineId: context.scope.worldlineId,
-          projectionVersion: 1,
-        },
+        meta,
       }, { headers: { "Cache-Control": "no-store" } });
     }
-    if (body.command === "apply_project_finance") {
-      const result = await service.applyRecordProjectFinance({
-        scope: context.scope,
-        idempotencyKey,
-        evidence,
-        actions: readActions(body.actions),
-      });
+    if (executed.kind === "apply_project_finance") {
+      const result = executed.result;
       return Response.json({
         ok: true as const,
         data: {
@@ -72,27 +128,10 @@ export async function POST(request: Request): Promise<Response> {
           commandGroupId: result.commandGroupId,
           ...(result.worldCursor ? { worldCursor: result.worldCursor } : {}),
         },
-        meta: {
-          worldId: context.scope.worldId,
-          worldlineId: context.scope.worldlineId,
-          projectionVersion: 1,
-        },
+        meta,
       }, { headers: { "Cache-Control": "no-store" } });
     }
-    if (body.command !== "confirm_milestone") {
-      return projectFinanceRouteError(new ProjectFinanceCommandError(
-        "COMMAND_INVALID",
-        "Unsupported project command.",
-      ));
-    }
-    const result = await service.confirmMilestone({
-      scope: context.scope,
-      projectId: requiredText(body.projectId, "projectId"),
-      milestoneId: requiredText(body.milestoneId, "milestoneId"),
-      expectedProjectVersion: requiredInteger(body.expectedProjectVersion),
-      idempotencyKey,
-      evidence,
-    });
+    const result = executed.result;
     return Response.json({
       ok: true as const,
       data: {
@@ -103,12 +142,10 @@ export async function POST(request: Request): Promise<Response> {
         milestoneId: result.milestoneId,
         projectVersion: result.projectVersion,
         ...(result.worldCursor ? { worldCursor: result.worldCursor } : {}),
+        ...(result.semanticEventKey ? { semanticEventKey: result.semanticEventKey } : {}),
+        ...(result.requestPolicy ? { requestPolicy: result.requestPolicy } : {}),
       },
-      meta: {
-        worldId: context.scope.worldId,
-        worldlineId: context.scope.worldlineId,
-        projectionVersion: 1,
-      },
+      meta,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return projectFinanceRouteError(error);

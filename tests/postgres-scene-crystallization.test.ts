@@ -51,6 +51,8 @@ const MIGRATIONS = [
       "0016_world_files.sql",
       "0017_account_last_opened.sql",
       "0018_account_last_opened_fk_set_null.sql",
+  "0025_propagation_topology_semantic_scope.sql",
+  "0026_canon_security_audience.sql",
       "0029_record_scene_tension.sql",
       "0030_character_instance_state.sql",
       "0031_keen_insight_discovery.sql",
@@ -77,6 +79,12 @@ const CRYSTALLIZATION_SCOPE = {
   publicPolicyId: POSTGRES_DEMO_IDS.publicPolicy,
 } as const;
 
+function observePoolEnds(pool: pg.Pool): Promise<void>[] {
+  const ends: Promise<void>[] = [];
+  pool.on("connect", client => ends.push(new Promise<void>(resolve => client.once("end", resolve))));
+  return ends;
+}
+
 async function createMigratedDatabase(t: test.TestContext) {
   const adminUrl = requireLoopbackUrl(adminConnectionString!);
   const databaseName = `realm_scene_test_${randomUUID().replaceAll("-", "")}`;
@@ -89,14 +97,19 @@ async function createMigratedDatabase(t: test.TestContext) {
   const ownerUrl = new URL(adminUrl);
   ownerUrl.pathname = `/${databaseName}`;
   const ownerPool = new pg.Pool({ connectionString: ownerUrl.href, max: 2 });
+  const ownerEnds = observePoolEnds(ownerPool);
 
   const runtimeUrl = new URL(runtimeConnectionString!);
   runtimeUrl.pathname = `/${databaseName}`;
   const runtimePool = new pg.Pool({ connectionString: runtimeUrl.href, max: 2 });
+  const runtimeEnds = observePoolEnds(runtimePool);
 
   t.after(async () => {
     await ownerPool.end();
     await runtimePool.end();
+    await Promise.all([...ownerEnds, ...runtimeEnds]);
+    const remaining = await maintenance.query("SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [databaseName]);
+    assert.equal(remaining.rows.length, 0, "fixture backends must end before DROP");
     await maintenance.query(
       `DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`,
     );
@@ -111,6 +124,17 @@ async function createMigratedDatabase(t: test.TestContext) {
     await ownerPool.query(sql);
   }
   await seedPostgresDemo(ownerPool);
+  await ownerPool.query(`INSERT INTO world_entities(workspace_id,world_id,worldline_id,id,entity_kind,name)
+    VALUES($1,$2,$3,'c4_scene_canon_entity','setting','C4 Canon beacon')`,
+  [POSTGRES_DEMO_IDS.workspace,POSTGRES_DEMO_IDS.world,POSTGRES_DEMO_IDS.worldline]);
+  await ownerPool.query(`INSERT INTO world_claims(workspace_id,world_id,worldline_id,id,subject_entity_id,predicate,object_value,scope,truth_status)
+    VALUES($1,$2,$3,'c4_scene_canon_claim','c4_scene_canon_entity','signals','C4 scene Canon positive','world','world_canon')`,
+  [POSTGRES_DEMO_IDS.workspace,POSTGRES_DEMO_IDS.world,POSTGRES_DEMO_IDS.worldline]);
+  const canonScope = await createPostgresRecordRuntimeScopeRepository(runtimePool).resolve({
+    workspaceId: POSTGRES_DEMO_IDS.workspace, principalId: POSTGRES_DEMO_IDS.principal, recordId: POSTGRES_DEMO_IDS.record,
+  });
+  assert.ok(canonScope);
+  assert.ok(canonScope.brief.canon.includes("C4 scene Canon positive"), "real Canon loader must return the eligible claim");
   return { ownerPool, runtimePool };
 }
 

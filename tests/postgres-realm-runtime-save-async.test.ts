@@ -360,7 +360,7 @@ test(
 
     // ---- save：三段异步运行态进入存档 ------------------------------------
     const reader = createPostgresRealmRuntimeSaveReader(runtimePool);
-    const archive = await reader.load({
+    const archive = await reader.load({ principalId: POSTGRES_DEMO_IDS.principal, purpose: "record-export",
       workspaceId: SCOPE.workspaceId,
       recordId: SCOPE.recordId,
     });

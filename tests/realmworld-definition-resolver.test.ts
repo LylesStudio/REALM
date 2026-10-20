@@ -34,22 +34,35 @@ const goals = Buffer.from(JSON.stringify({
   }],
 }));
 
-test("RealmWorld definition resolver consumes WorldBinding and caches the exact mounted identity", async () => {
-  let mountCount = 0;
+test("RealmWorld definition resolver revalidates the exact WorldBinding on every request", async () => {
+  let mountCount = 0, revoked = false;
+  let mountedGoals = goals;
+  const revocation = new Error("fixture-trust-revoked");
   const resolver = createRealmWorldDefinitionResolver({
     mount: async () => {
       mountCount += 1;
+      if (revoked) throw revocation;
       return {
         manifest,
-        files: new Map([["content/goals.json", goals]]),
+        files: new Map([["content/goals.json", mountedGoals]]),
       };
     },
   });
   const job = { worldId: "world-harbor", worldVersion: "1.2.0", goalKey: "harbor-letter" };
   assert.equal((await resolver(job))?.goalKey, "harbor-letter");
   assert.equal((await resolver(job))?.policyVersion, "v1");
-  assert.equal(mountCount, 1);
+  assert.equal(mountCount, 2);
   assert.equal(await resolver({ ...job, goalKey: "missing" }), null);
+  assert.equal(mountCount, 3);
+  revoked = true;
+  await assert.rejects(resolver(job), error => error === revocation);
+  assert.equal(mountCount, 4, "same identity must not bypass revoked mount trust");
+  revoked = false; mountedGoals = Buffer.from("{");
+  await assert.rejects(resolver(job), { code: "GOALS_INVALID" });
+  assert.equal(mountCount, 5, "same identity must not reuse old valid definition bytes");
+  mountedGoals = goals;
+  assert.equal((await resolver(job))?.goalKey, "harbor-letter");
+  assert.equal(mountCount, 6);
 });
 
 test("RealmWorld definition resolver rejects a mounted identity mismatch and isolates base mode", async () => {

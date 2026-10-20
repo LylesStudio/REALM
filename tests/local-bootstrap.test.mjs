@@ -40,26 +40,52 @@ test(
       roles: ["realm_runtime", "realm_control"],
     });
     const secretDirectory = await mkdtemp(join(tmpdir(), "realm-prov-"));
+    const clients = [];
+    const clientErrors = [];
+    function ownClient(connectionString, name) {
+      const client = new pg.Client({ connectionString });
+      const ended = new Promise((resolve) => client.once("end", resolve));
+      client.on("error", (error) => clientErrors.push(`${name}:${error.message}`));
+      clients.push({ client, ended });
+      return client;
+    }
     t.after(async () => {
-      await cluster.stop();
-      await rm(secretDirectory, { recursive: true, force: true });
+      try {
+        await Promise.all(clients.map(async ({ client, ended }) => {
+          await client.end();
+          await ended;
+        }));
+        // Use a separate maintenance connection after both actual end events.
+        const maintenance = ownClient(cluster.adminUrl, "maintenance");
+        try {
+          await maintenance.connect();
+          const backends = await maintenance.query(
+            "SELECT pid, state FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+            ["realm_dev"],
+          );
+          assert.deepEqual(backends.rows, [], "bootstrap database has no live clients before cluster stop");
+          const adminBackends = await maintenance.query(
+            "SELECT pid, state FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+            ["postgres"],
+          );
+          assert.deepEqual(adminBackends.rows, [], "bootstrap admin client actually ended");
+        } finally {
+          await maintenance.end();
+          await clients.at(-1).ended;
+        }
+        assert.deepEqual(clientErrors, [], "including teardown, bootstrap sockets must close cleanly");
+      } finally {
+        await cluster.stop();
+        await rm(secretDirectory, { recursive: true, force: true });
+      }
     });
 
-    const admin = new pg.Client({ connectionString: cluster.adminUrl });
-    const clientErrors = [];
-    admin.on("error", (error) => clientErrors.push(`admin:${error.message}`));
+    const admin = ownClient(cluster.adminUrl, "admin");
     await admin.connect();
-    t.after(async () => {
-      await admin.end().catch(() => undefined);
-    });
     await admin.query(`CREATE DATABASE realm_dev`);
     const databaseUrl = cluster.adminUrl.replace(/\/postgres$/, "/realm_dev");
-    const devClient = new pg.Client({ connectionString: databaseUrl });
-    devClient.on("error", (error) => clientErrors.push(`dev:${error.message}`));
+    const devClient = ownClient(databaseUrl, "dev");
     await devClient.connect();
-    t.after(async () => {
-      await devClient.end().catch(() => undefined);
-    });
 
     // ① provision：exit 0，角色读回 LOGIN + 全负向属性。
     const provision = run("scripts/local-provision-realm-transfer.mjs", {

@@ -1,4 +1,9 @@
+import { materializeCommandPolicy, verifyInstalledCommandPolicy } from "../../database/postgres/business-command-policy.ts";
+import { assertMountedCommandPolicy, CommandPolicyError, type CommandPolicyResolver, type ResolvedCommandPolicy } from "../world-transfer/realmworld-command-policy.ts";
 import { createHash, randomUUID } from "node:crypto";
+import { createDefaultGoalContentBindingSource, verifyGoalContentBinding, type GoalContentSourceResolver } from "./goal-content-binding-source.ts";
+import { goalDefinitionHash, type GoalSource } from "../goals/content-binding.ts";
+import { loadGoalContentBinding } from "../../database/postgres/goal-content-binding-repository.ts";
 import {createPostgresRealmRuntimeSaveReader,createPostgresRealmRuntimeSaveRestorer} from '../../database/postgres/realm-runtime-save-repository.ts';
 import {buildRealmRuntimeSaveArchive,parseRealmRuntimeSaveArchive} from '../world-transfer/realm-runtime-save.ts';
 import {validateRecordBranchWorldBinding} from './record-branch-world-binding.ts';
@@ -486,6 +491,11 @@ async function claimGenesisCreation(
     );
     const row = locked.rows[0];
     if (!row) continue;
+    // Pre-correction named receipts omitted the input name from their digest.
+    // Neither the mutable actor name nor the resolved first-night name proves
+    // that original input (it may have been an unnamed account fallback).
+    // Without immutable original-request provenance, retain conflict semantics;
+    // never rehash receipts or relax the comparison to the legacy digest.
     if (row.draft_fingerprint !== fingerprint) {
       throw new LibraryServiceError(
         "GENESIS_REQUEST_CONFLICT",
@@ -516,11 +526,340 @@ async function claimGenesisCreation(
 export function createPostgresLibraryService(
   database: WorkspaceDatabase,
   writeDatabase: WorkspaceDatabase = database,
-  options: { contentResolver?: ContentResolver } = {},
+  options: { contentResolver?: ContentResolver; resolveCommandPolicy?: CommandPolicyResolver; resolveGoalSource?: GoalContentSourceResolver; performanceWitnessesSchemaVersion?: 1 } = {},
 ): LibraryService {
   // 内容解析层（§2.2）：base 内置内容默认走 engine-owned BaseContentResolver；
   // 调用方可注入其它实现（测试/未来 RealmWorld 组合），绝不静默降级。
   const contentResolver = options.contentResolver ?? createBaseContentResolver();
+  const resolveGoalSource = options.resolveGoalSource ?? createDefaultGoalContentBindingSource();
+  async function createGenesisInternal(scope: LibraryScope, draft: WorldGenesisDraft, options?: { creationRequestId?: string }, policy?: ResolvedCommandPolicy, expectedGoalSource?: GoalSource) {
+      const creationRequestId = options?.creationRequestId?.trim() ?? "";
+      const recordGoals = normalizeRecordGoalDrafts(draft.recordGoals ?? []);
+      if (recordGoals.length && (!creationRequestId || genesisBindingFromDraft(draft).kind !== 'base')) {
+        throw new LibraryServiceError('INVALID_COMMAND','Authored genesis Goals require an identified native creation request.');
+      }
+      if (creationRequestId && !GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) {
+        throw new LibraryServiceError("INVALID_COMMAND", "Creation request id is invalid.");
+      }
+      return withWorkspaceTransaction(
+        database,
+        scope.workspaceId,
+        async (client) => {
+          const declaredGoals = validateGenesisGoalDeclarations(draft.goals);
+          // Preserve the base declaration error contract before source authority
+          // preflight, creation claims/replays, or topology writes.
+          const contentLanguage = draft.language
+            ?? await resolveAccountLanguage(client, scope);
+          const contentBinding = genesisBindingFromDraft(draft);
+          if (contentBinding.kind === "base") {
+            for (const goal of declaredGoals) {
+              const definition = contentResolver.resolveGoal({
+                binding: contentBinding,
+                worldId: "",
+                worldVersion: LOCAL_WORLD_VERSION,
+                language: contentLanguage,
+                goalKey: goal.goalKey,
+              });
+              if (!definition || definition.policyVersion !== goal.policyVersion) {
+                throw new LibraryServiceError(
+                  "INVALID_COMMAND",
+                  "Base genesis Goal declaration does not resolve to an engine-owned definition.",
+                );
+              }
+            }
+          }
+          // Recheck before claiming/replaying. Drafts carry declarations, while
+          // the server mount/registry supplies exact source authority.
+          for (const goal of declaredGoals) await resolveGoalSource({
+            worldId: draft.worldIdentity?.worldId ?? "",
+            worldVersion: draft.worldIdentity?.worldVersion ?? LOCAL_WORLD_VERSION,
+            goalKey: goal.goalKey, policyVersion: goal.policyVersion, expectedSource: expectedGoalSource });
+          const claimed = creationRequestId
+            ? await claimGenesisCreation(
+              client,
+              scope,
+              creationRequestId,
+              genesisDraftFingerprint({ ...draft, recordGoals }),
+            )
+            : null;
+          if (claimed?.kind === "replay") {
+            return {
+              worldId: claimed.worldId,
+              storyId: claimed.storyId,
+              recordId: claimed.recordId,
+            };
+          }
+          const worldId = claimed?.worldId
+            ?? draft.worldIdentity?.worldId
+            ?? newGenesisTopologyId("world");
+          const worldlineId = draft.runtimeIdentity?.worldlineId
+            ?? newGenesisTopologyId("worldline");
+          const storyId = claimed?.storyId
+            ?? draft.runtimeIdentity?.storyId
+            ?? newGenesisTopologyId("story");
+          const recordId = claimed?.recordId
+            ?? draft.runtimeIdentity?.recordId
+            ?? newGenesisTopologyId("record");
+          if (draft.runtimeIdentity) {
+            const existing = await client.query<{
+              world_id: string;
+              worldline_id: string;
+              story_id: string;
+            }>(
+              `SELECT world_id, worldline_id, story_id
+               FROM records
+               WHERE workspace_id = $1 AND id = $2`,
+              [scope.workspaceId, recordId],
+            );
+            if (existing.rows[0]) {
+              const row = existing.rows[0];
+              if (row.world_id !== worldId
+                || row.worldline_id !== worldlineId
+                || row.story_id !== storyId) {
+                throw new LibraryServiceError(
+                  "REALMWORLD_INSTANCE_CONFLICT",
+                  "RealmWorld instance identity conflicts with an existing Record.",
+                );
+              }
+              if (policy) await verifyInstalledCommandPolicy(client, { workspaceId: scope.workspaceId, worldId, worldlineId }, policy, storyId, recordId);
+              return { worldId, storyId, recordId };
+            }
+          }
+          // base（无 worldIdentity）落库恒为 LOCAL_WORLD_VERSION 哨兵——
+          // 绝不伪装成 RealmWorld package 版本。
+          const worldVersion = draft.worldIdentity?.worldVersion ?? LOCAL_WORLD_VERSION;
+
+          await client.query(
+            `INSERT INTO worlds (
+               workspace_id, id, name, status, calendar_id, summary, settings, world_version
+             ) VALUES ($1, $2, $3, 'active', 'native_calendar', $4, $5::jsonb, $6)
+             ON CONFLICT (workspace_id, id) DO NOTHING`,
+            [
+              scope.workspaceId,
+              worldId,
+              draft.world.name,
+              draft.world.summary,
+              JSON.stringify({
+                era: draft.world.era,
+                style: draft.style,
+                language: contentLanguage,
+                weather: draft.scene.weather,
+                tension: draft.scene.tension,
+                displayTime: draft.scene.displayTime,
+                // World-declared semantic event keys (RealmWorld packages
+                // only); authorizes generic semantic completion events.
+                ...(draft.declaredEvents?.length
+                  ? { declaredEvents: [...draft.declaredEvents] }
+                  : {}),
+              }),
+              worldVersion,
+            ],
+          );
+          const persistedWorld = await client.query<{ world_version: string; status: string }>(
+            `SELECT world_version, status
+             FROM worlds
+             WHERE workspace_id = $1 AND id = $2
+             ${declaredGoals.length ? "FOR UPDATE" : "FOR KEY SHARE"}`,
+            [scope.workspaceId, worldId],
+          );
+          const worldRow = persistedWorld.rows[0];
+          if (!worldRow) {
+            throw new LibraryServiceError("WORLD_NOT_FOUND", "RealmWorld target world was not created.");
+          }
+          if (worldRow.world_version !== worldVersion) {
+            throw new LibraryServiceError(
+              "REALMWORLD_IDENTITY_CONFLICT",
+              "RealmWorld world identity conflicts with the persisted world version.",
+            );
+          }
+          if (worldRow.status === "archived") {
+            throw new LibraryServiceError("WORLD_ARCHIVED", "RealmWorld target world is archived.");
+          }
+          await client.query(
+            `INSERT INTO worldlines (
+               workspace_id, world_id, id, label, status, head_tick, head_ordinal
+             ) VALUES ($1, $2, $3, '原初世界线', 'active', 0, 0)`,
+            [scope.workspaceId, worldId, worldlineId],
+          );
+          // 批次 S：观察者姿态 → membership role='observer'（omniscient 仍 true，
+          // 其不可变约束不受影响）；入局仍为 owner。0053：经 capability 窄通道。
+          const observer = draft.playerStance === "observer";
+          await grantMembershipWithCapability(client, {
+            sessionProof: scope.sessionProof ?? "",
+            op: "genesis_creator",
+            workspaceId: scope.workspaceId,
+            worldId,
+            worldlineId,
+            principalId: scope.principalId,
+            role: observer ? "observer" : "owner",
+          });
+          const companions = draft.companions.map((companion) => ({
+            id: `char_def_${randomUUID().replaceAll("-", "").slice(0, 18)}`,
+            name: companion.name,
+            role: companion.role,
+          }));
+          for (const [index, companion] of draft.companions.entries()) {
+            await client.query(
+              `INSERT INTO character_definitions (
+                 workspace_id, world_id, id, display_name, source_format, profile
+               ) VALUES ($1, $2, $3, $4, 'native', $5::jsonb)`,
+              [
+                scope.workspaceId,
+                worldId,
+                companions[index]!.id,
+                companion.name,
+                JSON.stringify({ role: companion.role, summary: companion.summary }),
+              ],
+            );
+          }
+          await client.query(
+            `INSERT INTO stories (
+               workspace_id, world_id, worldline_id, id, title, status,
+               premise, start_tick, start_ordinal
+             ) VALUES ($1, $2, $3, $4, $5, 'active', $6, 0, 0)`,
+            [
+              scope.workspaceId,
+              worldId,
+              worldlineId,
+              storyId,
+              draft.story.title,
+              draft.story.premise,
+            ],
+          );
+          await client.query(
+            `INSERT INTO records (
+               workspace_id, world_id, worldline_id, story_id, id, title,
+               status, start_tick, start_ordinal, timeline_kind, linked_record_id,
+               world_version
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 'primary', NULL, $7)`,
+            [
+              scope.workspaceId,
+              worldId,
+              worldlineId,
+              storyId,
+              recordId,
+              draft.record.title,
+              worldVersion,
+            ],
+          );
+          await client.query(
+            `INSERT INTO record_heads (
+               workspace_id, world_id, worldline_id, record_id,
+               record_version, next_record_ordinal, last_world_tick,
+               last_world_ordinal
+             ) VALUES ($1, $2, $3, $4, 0, 0, 0, 0)`,
+            [scope.workspaceId, worldId, worldlineId, recordId],
+          );
+          const assembled = await assembleDefaultRecord(
+            client,
+            scope,
+            { world_id: worldId, worldline_id: worldlineId },
+            recordId,
+            companions,
+            {
+              playerName: draft.playerName,
+              playerRole: draft.playerRole,
+              observer,
+              scene: {
+                title: draft.scene.title,
+                location: draft.scene.location,
+                weather: draft.scene.weather,
+                tension: draft.scene.tension,
+                displayTime: draft.scene.displayTime,
+                objective: draft.scene.objective,
+              },
+            },
+          );
+          // 批次 T1：开场旁白永远落库——opening 优先，否则由草稿场景字段
+          // 确定性合成风格化定格句；同事务写入初夜 pending 状态行与上下文快照。
+          const firstNightContext: FirstNightContext = {
+            world: {
+              name: draft.world.name,
+              era: draft.world.era,
+              summary: draft.world.summary,
+            },
+            style: draft.style,
+            language: contentLanguage,
+            story: { title: draft.story.title, premise: draft.story.premise },
+            playerRole: draft.playerRole,
+            playerName: (await resolvePlayerPersona(client, scope, worldId)).name,
+            playerPrincipalId: scope.principalId,
+            playerStance: draft.playerStance,
+            companions: draft.companions.map((companion, index) => ({
+              definitionId: companions[index]!.id,
+              name: companion.name,
+              role: companion.role,
+              summary: companion.summary,
+            })),
+            scene: {
+              ...(draft.scene.title ? { title: draft.scene.title } : {}),
+              location: draft.scene.location,
+              weather: draft.scene.weather,
+              tension: draft.scene.tension,
+              ...(draft.scene.displayTime ? { displayTime: draft.scene.displayTime } : {}),
+              objective: draft.scene.objective,
+            },
+            opening: draft.opening,
+            ...firstNightGoalDirections(recordGoals),
+          };
+          if (recordGoals.length) await materializeGenesisRecordGoals(client, { scope: {
+            workspaceId: scope.workspaceId, worldId, worldlineId, recordId }, sessionProof: scope.sessionProof ?? '',
+            creationRequestId, drafts: recordGoals });
+          const openingEventId = await insertOpeningEvent(
+            client,
+            scope,
+            { world_id: worldId, worldline_id: worldlineId },
+            recordId,
+            assembled,
+            composeDeterministicOpening(firstNightContext),
+            draft.scene.displayTime ?? "",
+          );
+          // Goal runtime materialization：声明式 Goal 在创建 Record 的同
+          // 一 workspace 事务内物化为 goal_instances（仅 Record-scoped
+          // 运行态；定义/rubric 留在 RealmWorld 内容层），并对同一事务内
+          // 真实落库的 opening 事件 enqueue durable assessment job。
+          // 旧 base/genesis 路径无 goals——零行为变化、零写入。
+          if (declaredGoals.length > 0 || recordGoals.length > 0) {
+            const goalScope = {
+              workspaceId: scope.workspaceId,
+              worldId,
+              worldlineId,
+              recordId,
+            };
+            if (declaredGoals.length) await materializeGoalInstances(client, goalScope, declaredGoals, {
+              sessionProof: scope.sessionProof, resolveSource: resolveGoalSource,
+              worldVersion: draft.worldIdentity?.worldVersion ?? LOCAL_WORLD_VERSION, expectedSource: expectedGoalSource });
+            await reconcileGoalAssessmentJobsForCommittedEvents(client, {
+              ...goalScope,
+              eventIds: [openingEventId],
+            });
+          }
+          await client.query(
+            `INSERT INTO record_first_nights (
+               workspace_id, record_id, world_id, state, attempts, context
+             ) VALUES ($1, $2, $3, 'pending', 0, $4::jsonb)`,
+            [
+              scope.workspaceId,
+              recordId,
+              worldId,
+              JSON.stringify(firstNightContext),
+            ],
+          );
+          if (policy) await materializeCommandPolicy(client, { workspaceId: scope.workspaceId, worldId, worldlineId }, policy, storyId, recordId, contentLanguage);
+          if (creationRequestId) {
+            await client.query(
+              `UPDATE genesis_creation_requests
+               SET state = 'committed', updated_at = CURRENT_TIMESTAMP
+               WHERE workspace_id = $1
+                 AND principal_id = $2
+                 AND creation_request_id = $3`,
+              [scope.workspaceId, scope.principalId, creationRequestId],
+            );
+          }
+          return { worldId, storyId, recordId };
+        },
+      );
+  }
   return {
     async list(scope) {
       return withWorkspaceTransaction(
@@ -1000,7 +1339,7 @@ export function createPostgresLibraryService(
               sourceRecordId,
               label: command.label,
               idempotencyKey: `library-branch:${scope.principalId}:${sourceRecordId}:${command.label.trim()}`,
-            });
+            }, options.resolveCommandPolicy, resolveGoalSource);
             return;
           }
 
@@ -1126,325 +1465,7 @@ export function createPostgresLibraryService(
       );
     },
 
-    async createGenesis(scope, draft, options) {
-      const creationRequestId = options?.creationRequestId?.trim() ?? "";
-      const recordGoals = normalizeRecordGoalDrafts(draft.recordGoals ?? []);
-      if (recordGoals.length && (!creationRequestId || genesisBindingFromDraft(draft).kind !== 'base')) {
-        throw new LibraryServiceError('INVALID_COMMAND','Authored genesis Goals require an identified native creation request.');
-      }
-      if (creationRequestId && !GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) {
-        throw new LibraryServiceError("INVALID_COMMAND", "Creation request id is invalid.");
-      }
-      return withWorkspaceTransaction(
-        database,
-        scope.workspaceId,
-        async (client) => {
-          const claimed = creationRequestId
-            ? await claimGenesisCreation(
-              client,
-              scope,
-              creationRequestId,
-              genesisDraftFingerprint({ ...draft, recordGoals }),
-            )
-            : null;
-          if (claimed?.kind === "replay") {
-            return {
-              worldId: claimed.worldId,
-              storyId: claimed.storyId,
-              recordId: claimed.recordId,
-            };
-          }
-          // Goal 声明在任何 topology 写入前校验（fail-closed）；事务
-          // 回滚兜底零残留。
-          const declaredGoals = validateGenesisGoalDeclarations(draft.goals);
-          const contentLanguage = draft.language
-            ?? await resolveAccountLanguage(client, scope);
-          // 内容解析层：草稿 → WorldBinding 一级分发。base 声明的 Goal
-          // 必须经 ContentResolver 解析到 engine-owned 定义且
-          // policyVersion 精确一致——未知/不符 fail-closed，绝不把未解析
-          // 的声明物化进运行态。world-bound 草稿的定义由
-          // instantiateRealmWorld 的包内容层解析（本 slice 之外），此处
-          // 保持既有声明校验。
-          const contentBinding = genesisBindingFromDraft(draft);
-          if (contentBinding.kind === "base") {
-            for (const goal of declaredGoals) {
-              const definition = contentResolver.resolveGoal({
-                binding: contentBinding,
-                worldId: "",
-                worldVersion: LOCAL_WORLD_VERSION,
-                language: contentLanguage,
-                goalKey: goal.goalKey,
-              });
-              if (!definition || definition.policyVersion !== goal.policyVersion) {
-                throw new LibraryServiceError(
-                  "INVALID_COMMAND",
-                  "Base genesis Goal declaration does not resolve to an engine-owned definition.",
-                );
-              }
-            }
-          }
-          const worldId = claimed?.worldId
-            ?? draft.worldIdentity?.worldId
-            ?? newGenesisTopologyId("world");
-          const worldlineId = draft.runtimeIdentity?.worldlineId
-            ?? newGenesisTopologyId("worldline");
-          const storyId = claimed?.storyId
-            ?? draft.runtimeIdentity?.storyId
-            ?? newGenesisTopologyId("story");
-          const recordId = claimed?.recordId
-            ?? draft.runtimeIdentity?.recordId
-            ?? newGenesisTopologyId("record");
-          if (draft.runtimeIdentity) {
-            const existing = await client.query<{
-              world_id: string;
-              worldline_id: string;
-              story_id: string;
-            }>(
-              `SELECT world_id, worldline_id, story_id
-               FROM records
-               WHERE workspace_id = $1 AND id = $2`,
-              [scope.workspaceId, recordId],
-            );
-            if (existing.rows[0]) {
-              const row = existing.rows[0];
-              if (row.world_id !== worldId
-                || row.worldline_id !== worldlineId
-                || row.story_id !== storyId) {
-                throw new LibraryServiceError(
-                  "REALMWORLD_INSTANCE_CONFLICT",
-                  "RealmWorld instance identity conflicts with an existing Record.",
-                );
-              }
-              return { worldId, storyId, recordId };
-            }
-          }
-          // base（无 worldIdentity）落库恒为 LOCAL_WORLD_VERSION 哨兵——
-          // 绝不伪装成 RealmWorld package 版本。
-          const worldVersion = draft.worldIdentity?.worldVersion ?? LOCAL_WORLD_VERSION;
-
-          await client.query(
-            `INSERT INTO worlds (
-               workspace_id, id, name, status, calendar_id, summary, settings, world_version
-             ) VALUES ($1, $2, $3, 'active', 'native_calendar', $4, $5::jsonb, $6)
-             ON CONFLICT (workspace_id, id) DO NOTHING`,
-            [
-              scope.workspaceId,
-              worldId,
-              draft.world.name,
-              draft.world.summary,
-              JSON.stringify({
-                era: draft.world.era,
-                style: draft.style,
-                language: contentLanguage,
-                weather: draft.scene.weather,
-                tension: draft.scene.tension,
-                displayTime: draft.scene.displayTime,
-              }),
-              worldVersion,
-            ],
-          );
-          const persistedWorld = await client.query<{ world_version: string; status: string }>(
-            `SELECT world_version, status
-             FROM worlds
-             WHERE workspace_id = $1 AND id = $2
-             FOR KEY SHARE`,
-            [scope.workspaceId, worldId],
-          );
-          const worldRow = persistedWorld.rows[0];
-          if (!worldRow) {
-            throw new LibraryServiceError("WORLD_NOT_FOUND", "RealmWorld target world was not created.");
-          }
-          if (worldRow.world_version !== worldVersion) {
-            throw new LibraryServiceError(
-              "REALMWORLD_IDENTITY_CONFLICT",
-              "RealmWorld world identity conflicts with the persisted world version.",
-            );
-          }
-          if (worldRow.status === "archived") {
-            throw new LibraryServiceError("WORLD_ARCHIVED", "RealmWorld target world is archived.");
-          }
-          await client.query(
-            `INSERT INTO worldlines (
-               workspace_id, world_id, id, label, status, head_tick, head_ordinal
-             ) VALUES ($1, $2, $3, '原初世界线', 'active', 0, 0)`,
-            [scope.workspaceId, worldId, worldlineId],
-          );
-          // 批次 S：观察者姿态 → membership role='observer'（omniscient 仍 true，
-          // 其不可变约束不受影响）；入局仍为 owner。0053：经 capability 窄通道。
-          const observer = draft.playerStance === "observer";
-          await grantMembershipWithCapability(client, {
-            sessionProof: scope.sessionProof ?? "",
-            op: "genesis_creator",
-            workspaceId: scope.workspaceId,
-            worldId,
-            worldlineId,
-            principalId: scope.principalId,
-            role: observer ? "observer" : "owner",
-          });
-          const companions = draft.companions.map((companion) => ({
-            id: `char_def_${randomUUID().replaceAll("-", "").slice(0, 18)}`,
-            name: companion.name,
-            role: companion.role,
-          }));
-          for (const [index, companion] of draft.companions.entries()) {
-            await client.query(
-              `INSERT INTO character_definitions (
-                 workspace_id, world_id, id, display_name, source_format, profile
-               ) VALUES ($1, $2, $3, $4, 'native', $5::jsonb)`,
-              [
-                scope.workspaceId,
-                worldId,
-                companions[index]!.id,
-                companion.name,
-                JSON.stringify({ role: companion.role, summary: companion.summary }),
-              ],
-            );
-          }
-          await client.query(
-            `INSERT INTO stories (
-               workspace_id, world_id, worldline_id, id, title, status,
-               premise, start_tick, start_ordinal
-             ) VALUES ($1, $2, $3, $4, $5, 'active', $6, 0, 0)`,
-            [
-              scope.workspaceId,
-              worldId,
-              worldlineId,
-              storyId,
-              draft.story.title,
-              draft.story.premise,
-            ],
-          );
-          await client.query(
-            `INSERT INTO records (
-               workspace_id, world_id, worldline_id, story_id, id, title,
-               status, start_tick, start_ordinal, timeline_kind, linked_record_id,
-               world_version
-             ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 'primary', NULL, $7)`,
-            [
-              scope.workspaceId,
-              worldId,
-              worldlineId,
-              storyId,
-              recordId,
-              draft.record.title,
-              worldVersion,
-            ],
-          );
-          await client.query(
-            `INSERT INTO record_heads (
-               workspace_id, world_id, worldline_id, record_id,
-               record_version, next_record_ordinal, last_world_tick,
-               last_world_ordinal
-             ) VALUES ($1, $2, $3, $4, 0, 0, 0, 0)`,
-            [scope.workspaceId, worldId, worldlineId, recordId],
-          );
-          const assembled = await assembleDefaultRecord(
-            client,
-            scope,
-            { world_id: worldId, worldline_id: worldlineId },
-            recordId,
-            companions,
-            {
-              playerName: draft.playerName,
-              playerRole: draft.playerRole,
-              observer,
-              scene: {
-                title: draft.scene.title,
-                location: draft.scene.location,
-                weather: draft.scene.weather,
-                tension: draft.scene.tension,
-                displayTime: draft.scene.displayTime,
-                objective: draft.scene.objective,
-              },
-            },
-          );
-          // 批次 T1：开场旁白永远落库——opening 优先，否则由草稿场景字段
-          // 确定性合成风格化定格句；同事务写入初夜 pending 状态行与上下文快照。
-          const firstNightContext: FirstNightContext = {
-            world: {
-              name: draft.world.name,
-              era: draft.world.era,
-              summary: draft.world.summary,
-            },
-            style: draft.style,
-            language: contentLanguage,
-            story: { title: draft.story.title, premise: draft.story.premise },
-            playerRole: draft.playerRole,
-            playerName: (await resolvePlayerPersona(client, scope, worldId)).name,
-            playerPrincipalId: scope.principalId,
-            playerStance: draft.playerStance,
-            companions: draft.companions.map((companion, index) => ({
-              definitionId: companions[index]!.id,
-              name: companion.name,
-              role: companion.role,
-              summary: companion.summary,
-            })),
-            scene: {
-              ...(draft.scene.title ? { title: draft.scene.title } : {}),
-              location: draft.scene.location,
-              weather: draft.scene.weather,
-              tension: draft.scene.tension,
-              ...(draft.scene.displayTime ? { displayTime: draft.scene.displayTime } : {}),
-              objective: draft.scene.objective,
-            },
-            opening: draft.opening,
-            ...firstNightGoalDirections(recordGoals),
-          };
-          if (recordGoals.length) await materializeGenesisRecordGoals(client, { scope: {
-            workspaceId: scope.workspaceId, worldId, worldlineId, recordId }, sessionProof: scope.sessionProof ?? '',
-            creationRequestId, drafts: recordGoals });
-          const openingEventId = await insertOpeningEvent(
-            client,
-            scope,
-            { world_id: worldId, worldline_id: worldlineId },
-            recordId,
-            assembled,
-            composeDeterministicOpening(firstNightContext),
-            draft.scene.displayTime ?? "",
-          );
-          // Goal runtime materialization：声明式 Goal 在创建 Record 的同
-          // 一 workspace 事务内物化为 goal_instances（仅 Record-scoped
-          // 运行态；定义/rubric 留在 RealmWorld 内容层），并对同一事务内
-          // 真实落库的 opening 事件 enqueue durable assessment job。
-          // 旧 base/genesis 路径无 goals——零行为变化、零写入。
-          if (declaredGoals.length > 0 || recordGoals.length > 0) {
-            const goalScope = {
-              workspaceId: scope.workspaceId,
-              worldId,
-              worldlineId,
-              recordId,
-            };
-            if (declaredGoals.length) await materializeGoalInstances(client, goalScope, declaredGoals);
-            await reconcileGoalAssessmentJobsForCommittedEvents(client, {
-              ...goalScope,
-              eventIds: [openingEventId],
-            });
-          }
-          await client.query(
-            `INSERT INTO record_first_nights (
-               workspace_id, record_id, world_id, state, attempts, context
-             ) VALUES ($1, $2, $3, 'pending', 0, $4::jsonb)`,
-            [
-              scope.workspaceId,
-              recordId,
-              worldId,
-              JSON.stringify(firstNightContext),
-            ],
-          );
-          if (creationRequestId) {
-            await client.query(
-              `UPDATE genesis_creation_requests
-               SET state = 'committed', updated_at = CURRENT_TIMESTAMP
-               WHERE workspace_id = $1
-                 AND principal_id = $2
-                 AND creation_request_id = $3`,
-              [scope.workspaceId, scope.principalId, creationRequestId],
-            );
-          }
-          return { worldId, storyId, recordId };
-        },
-      );
-    },
+    async createGenesis(scope, draft, options) { return createGenesisInternal(scope, draft, options); },
 
     async readGenesisCreation(scope, creationRequestId) {
       if (!GENESIS_CREATION_REQUEST_ID.test(creationRequestId)) return null;
@@ -1506,6 +1527,22 @@ export function createPostgresLibraryService(
     },
 
     async instantiateRealmWorld(scope, plan, idempotencyKey) {
+      if (plan.goals.length && !plan.contentHash) throw new LibraryServiceError("INVALID_COMMAND", "Goal package content identity is required.");
+      for (const goal of plan.goals) await resolveGoalSource({
+        worldId: plan.binding.worldId, worldVersion: plan.binding.worldVersion, goalKey: goal.goalKey,
+        policyVersion: goal.policyVersion, expectedDefinitionHash: goalDefinitionHash(goal),
+        expectedSource: { sourceKind: "installed", sourceWorldId: plan.binding.worldId,
+          sourceWorldVersion: plan.binding.worldVersion, packageContentHash: plan.contentHash!,
+          baseRevision: null, baseContentHash: null } });
+      let policy: ResolvedCommandPolicy | undefined;
+      if (plan.commandPolicy) {
+        if (!options.resolveCommandPolicy) throw new CommandPolicyError();
+        const resolved = await options.resolveCommandPolicy(plan.binding);
+        if (!resolved || resolved.worldId !== plan.binding.worldId || resolved.worldVersion !== plan.binding.worldVersion
+          || resolved.contentHash !== plan.contentHash || JSON.stringify(resolved.document) !== JSON.stringify(plan.commandPolicy)) throw new CommandPolicyError();
+        assertMountedCommandPolicy(resolved);
+        policy = resolved;
+      }
       const stableKey = idempotencyKey.trim();
       if (!stableKey) {
         throw new LibraryServiceError("INVALID_COMMAND", "RealmWorld idempotency key is required.");
@@ -1549,10 +1586,14 @@ export function createPostgresLibraryService(
             "RealmWorld idempotency key resolves to a conflicting Record.",
           );
         }
+        if (policy) await withWorkspaceTransaction(database, scope.workspaceId, client => verifyInstalledCommandPolicy(client,
+          { workspaceId: scope.workspaceId, worldId: row.world_id, worldlineId: runtimeIdentity.worldlineId }, policy!, runtimeIdentity.storyId, runtimeIdentity.recordId), { readOnly: true });
         return { ...runtimeIdentity, worldId: row.world_id, replayed: true };
       }
       const draft = instantiationPlanToGenesisDraft(plan, runtimeIdentity);
-      const created = await this.createGenesis(scope, draft);
+      const created = await createGenesisInternal(scope, draft, undefined, policy, plan.goals.length ? {
+        sourceKind: "installed", sourceWorldId: plan.binding.worldId, sourceWorldVersion: plan.binding.worldVersion,
+        packageContentHash: plan.contentHash!, baseRevision: null, baseContentHash: null } : undefined);
       return { ...created, worldlineId: runtimeIdentity.worldlineId, replayed: false };
     },
     async instantiateBaseWorld(scope, plan) {
@@ -1584,7 +1625,7 @@ export function createPostgresLibraryService(
       return withRecordBranchSnapshotTransaction(
         writeDatabase,
         scope.workspaceId,
-        async (client) => createRecordBranchInTransaction(client, scope, input),
+        async (client) => createRecordBranchInTransaction(client, scope, input, options.resolveCommandPolicy, resolveGoalSource, options.performanceWitnessesSchemaVersion),
 
       );
     },
@@ -1881,7 +1922,7 @@ function compareBranchCursor(
  * 场景继承取「覆盖 fork 点的场景」（最近一个 start<=fork），而非恒为
  * 首个 scene。events 不复制、源 record 不改写。
  *
- * 锁序（world-write-gate.ts 头注释）：worlds(KEY SHARE) → records(FOR
+ * 锁序（native snapshot branch）：worlds(FOR UPDATE) → records(FOR
  * UPDATE) → record_heads(FOR UPDATE) → goal_instances(FOR UPDATE) →
  * worldlines/stories/records 插入。Slice 5 统一锁序后 record_heads 在
  * goal_instances 之前——与 assessment settle 路径（records →
@@ -1917,6 +1958,9 @@ async function createRecordBranchInTransaction(
   client: PoolClient,
   scope: LibraryScope,
   input: RecordBranchInput,
+  resolveCommandPolicy?: CommandPolicyResolver,
+  resolveGoalSource: GoalContentSourceResolver = createDefaultGoalContentBindingSource(),
+  performanceWitnessesSchemaVersion?: 1,
 ): Promise<RecordBranchResult> {
   const sourceRecordId = input.sourceRecordId?.trim() ?? "";
   if (!sourceRecordId) {
@@ -1937,9 +1981,11 @@ async function createRecordBranchInTransaction(
     throw new LibraryServiceError("RECORD_NOT_FOUND", "Record not found.");
   }
 
-  // ② 内容写门禁 + world 写 gate（KEY SHARE，与归档互斥）。
+  // ② Native restore later requires World UPDATE. Acquire it before Record/head
+  // locks, so an authorized command holding World SHARE cannot form an upgrade
+  // cycle. Other callers retain their existing KEY SHARE gate.
+  await assertWorldWritable(client, scope.workspaceId, worldId, "FOR UPDATE");
   await assertWorldContentMember(client, scope, worldId);
-  await assertWorldWritable(client, scope.workspaceId, worldId);
 
   // ③ 锁内重读源 record（FOR UPDATE）：归档源拒绝；故事标题/前提随锁读取。
   const source = await client.query<{
@@ -2015,8 +2061,10 @@ async function createRecordBranchInTransaction(
   const headRow = await client.query<{
     last_world_tick: string | null;
     last_world_ordinal: string | null;
+    record_version: string;
+    next_record_ordinal: string;
   }>(
-    `SELECT last_world_tick::text, last_world_ordinal::text
+    `SELECT last_world_tick::text, last_world_ordinal::text, record_version::text, next_record_ordinal::text
      FROM record_heads
      WHERE workspace_id = $1 AND record_id = $2
      FOR UPDATE`,
@@ -2035,10 +2083,29 @@ async function createRecordBranchInTransaction(
     scope.workspaceId,
     sourceRecordId,
   );
-  const narrative=await client.query<{present:boolean}>(`SELECT EXISTS(SELECT 1 FROM events WHERE workspace_id=$1 AND record_id=$2
+  // Shared by both branch paths and exact replays. Neither cloning nor a
+  // current-head snapshot can substitute today's rubric for a historical one.
+  for (const goal of branchGoalSources) {
+    if (goal.definitionSource === "record") continue;
+    if (!goal.instanceId) throw new LibraryServiceError("INVALID_COMMAND", "Goal source identity is unavailable.");
+    const binding = await loadGoalContentBinding(client, scope.workspaceId, goal.instanceId);
+    if (binding.owner.scopeKind !== "record" || binding.owner.recordId !== sourceRecordId
+      || binding.owner.worldId !== worldId || binding.owner.worldlineId !== sourceRow.worldline_id
+      || binding.goalKey !== goal.goalKey || binding.policyVersion !== goal.policyVersion
+      || binding.source.sourceWorldVersion !== sourceRow.world_version) {
+      throw new LibraryServiceError("INVALID_COMMAND", "Goal source binding does not match the branch Record.");
+    }
+    await verifyGoalContentBinding(binding, resolveGoalSource);
+  }
+  // Performance history also requires the complete snapshot path, even when
+  // the Record has no Goal or narrative state. Reuse this one scoped probe
+  // under the existing source/head locks; do not silently take the old clone.
+  const snapshotRuntime=await client.query<{present:boolean}>(`SELECT EXISTS(SELECT 1 FROM events WHERE workspace_id=$1 AND record_id=$2
     AND event_kind='narration.committed' AND (jsonb_typeof(payload#>'{__realmRuntimePayload,narrativeState}')='object'
-      OR jsonb_typeof(payload->'narrativeState')='object')) AS present`,[scope.workspaceId,sourceRecordId]);
-  const snapshotBranch=branchGoalSources.some(goal=>goal.definitionSource==='record')||narrative.rows[0]?.present===true;
+      OR jsonb_typeof(payload->'narrativeState')='object'))
+    OR EXISTS(SELECT 1 FROM performance_assessments WHERE workspace_id=$1 AND record_id=$2 AND world_id=$3 AND worldline_id=$4) AS present`,
+    [scope.workspaceId,sourceRecordId,worldId,sourceRow.worldline_id]);
+  const snapshotBranch=branchGoalSources.some(goal=>goal.definitionSource==='record'||goal.attempt>1)||snapshotRuntime.rows[0]?.present===true;
   const start = {
     tick: Math.max(0, Number(sourceRow.start_tick) || 0),
     ordinal: Math.max(0, Number(sourceRow.start_ordinal) || 0),
@@ -2169,7 +2236,7 @@ async function createRecordBranchInTransaction(
   if ((branchGoalSources.length > 0||snapshotBranch) && compareBranchCursor(fork, head) !== 0) {
     throw new LibraryServiceError(
       "BRANCH_GOAL_STATE_UNAVAILABLE",
-      branchGoalSources.length?'Records with Goal runtime state can only be branched at the current head.':'Records with narrative runtime state can only be branched at the current head.',
+      branchGoalSources.length?'Records with Goal runtime state can only be branched at the current head.':'Records with runtime snapshots can only be branched at the current head.',
     );
   }
 
@@ -2177,10 +2244,14 @@ async function createRecordBranchInTransaction(
     // Preserve the immutable event/evidence history in a fresh scope. A lossy
     // goal-only copy cannot satisfy definition, assessment or situation binding.
     await assertWorldOwner(client,scope,worldId);
-    const loaded=await createPostgresRealmRuntimeSaveReader(client).load({workspaceId:scope.workspaceId,recordId:sourceRecordId,principalId:scope.principalId});
+    const performanceOptions=performanceWitnessesSchemaVersion===1?{performanceWitnessesSchemaVersion}:{};
+    const loaded=await createPostgresRealmRuntimeSaveReader(client,{goalsSchemaVersion:2,resolveGoalSource,...performanceOptions}).load({workspaceId:scope.workspaceId,recordId:sourceRecordId,principalId:scope.principalId,purpose:"native-record-branch",sessionProof:scope.sessionProof});
     if(!loaded)throw new LibraryServiceError('RECORD_NOT_FOUND','Record not found.');
-    const archive=parseRealmRuntimeSaveArchive(buildRealmRuntimeSaveArchive(loaded));
-    const restored=await createPostgresRealmRuntimeSaveRestorer(client,{validateWorldBinding:validateRecordBranchWorldBinding}).restore({
+    if(loaded.goals.schemaVersion===2 && loaded.goals.roots.some(root=>root.owner.scopeKind!=='record'||root.owner.recordId!==sourceRecordId)) {
+      throw new LibraryServiceError('BRANCH_GOAL_STATE_UNAVAILABLE','Native branch requires a single Record Goal closure.');
+    }
+    const archive=parseRealmRuntimeSaveArchive(buildRealmRuntimeSaveArchive(loaded),{goalsSchemaVersion:2});
+    const restored=await createPostgresRealmRuntimeSaveRestorer(client,{goalsSchemaVersion:2,resolveGoalSource,...performanceOptions,validateWorldBinding:validateRecordBranchWorldBinding,resolveCommandPolicy}).restore({
       workspaceId:scope.workspaceId,principalId:scope.principalId,sessionProof:scope.sessionProof,archive,targetWorldId:worldId,idempotencyKey:idempotencyKey||randomUUID(),
       recordTitle:normalizeBranchText(input.recordTitle,`分支：${sourceRow.record_title}`),storyTitle:normalizeBranchText(input.storyTitle,`分支：${sourceRow.story_title}`),
       branch:{sourceRecordId,sourceWorldlineId:sourceRow.worldline_id,fork,label:normalizeBranchText(input.label,`分支：${sourceRow.record_title}`),premise:sourceRow.story_premise},
@@ -2333,6 +2404,8 @@ async function createRecordBranchInTransaction(
       client,
       { workspaceId: scope.workspaceId, worldId, worldlineId, recordId },
       branchGoalSources,
+      { sessionProof: scope.sessionProof, resolveSource: resolveGoalSource, worldVersion: sourceRow.world_version,
+        source: { recordId: sourceRecordId, recordVersion: Number(headRow.rows[0]?.record_version), nextRecordOrdinal: Number(headRow.rows[0]?.next_record_ordinal) } },
     );
   }
   return { worldId, worldlineId, storyId, recordId, fork, replayed: false };
@@ -2958,9 +3031,10 @@ async function assertWorldWritable(
   client: PoolClient,
   workspaceId: string,
   worldId: string,
+  lock: "FOR KEY SHARE" | "FOR UPDATE" = "FOR KEY SHARE",
 ): Promise<void> {
   const world = await client.query<{ status: string }>(
-    `SELECT status FROM worlds WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE`,
+    `SELECT status FROM worlds WHERE workspace_id = $1 AND id = $2 ${lock}`,
     [workspaceId, worldId],
   );
   const row = world.rows[0];

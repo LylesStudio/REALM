@@ -41,6 +41,8 @@ export function normalizeGenesisLanguage(value: unknown): GenesisLanguage | unde
 }
 
 export interface WorldGenesisDraft {
+  /** Signed package vocabulary; provenance and business admission remain separately gated. */
+  declaredEvents?: readonly string[];
   /** Engine-owned identity override used only by declarative RealmWorld instantiation. */
   worldIdentity?: { worldId: string; worldVersion: string };
   /** Stable runtime topology IDs used for idempotent RealmWorld instantiation. */

@@ -25,6 +25,50 @@ import {
   type GoalWorldlineScope,
 } from "../modules/goals/public.ts";
 
+import { cloneGoalRecordFixture, trustedGoalFixture, fixtureCleanup } from "./helpers/trusted-goal-fixture.ts";
+import { installTestSessionSecret, seedCapabilitySessionKey } from "./helpers/session-proof.ts";
+import { lockGoalContentWorld, type GoalContentWriteContext } from "../database/postgres/goal-content-binding-repository.ts";
+import type { GoalScope } from "../modules/goals/public.ts";
+
+async function materializeScopedGoals(client: pg.PoolClient, scope: GoalScope,
+  goals: readonly { goalKey: string; policyVersion: string }[], context: GoalContentWriteContext) {
+  await lockGoalContentWorld(client, scope.workspaceId, scope.worldId);
+  return materializeGoalInstances(client, scope, goals, context);
+}
+
+function scopeGoalDefinition(goalKey: string, retryable = false): GoalDefinition {
+  return { goalKey, policyVersion: "v1", mode: "deterministic", visible: true, retryable,
+    rubric: { kind: "event_count", eventKind: "narration.committed", progressKey: "narrations", threshold: 1 }, outcome: {} };
+}
+
+// Admission intentionally precedes these low-level checks on the real table.
+// Probe the installed definitions in a connection-owned TEMP table; true-table
+// positives below still use real session proof and signed content bindings.
+async function probeGoalConstraint(pool: pg.Pool, sql: string, values: unknown[], seedId?: string) {
+  const client = await pool.connect();
+  try {
+    await client.query("CREATE TEMP TABLE goal_scope_constraint_probe (LIKE public.goal_instances INCLUDING DEFAULTS INCLUDING CONSTRAINTS)");
+    const indexes = await client.query<{ definition: string }>(`SELECT pg_get_indexdef(indexrelid) AS definition
+      FROM pg_index WHERE indrelid='public.goal_instances'::regclass
+      AND indexrelid::regclass::text IN ('goal_instances_scope_goal_attempt_key','goal_instances_scope_single_active_key')`);
+    assert.equal(indexes.rowCount, 2);
+    for (const { definition } of indexes.rows) {
+      assert.ok(definition.includes(" ON public.goal_instances "));
+      await client.query(definition.replace(" ON public.goal_instances ", " ON pg_temp.goal_scope_constraint_probe "));
+    }
+    const trigger = await client.query<{ definition: string }>(`SELECT pg_get_triggerdef(oid) AS definition
+      FROM pg_trigger WHERE tgrelid='public.goal_instances'::regclass AND tgname='goal_instances_terminal_immutable_guard'`);
+    assert.equal(trigger.rowCount, 1);
+    assert.ok(trigger.rows[0]!.definition.includes(" ON public.goal_instances "));
+    await client.query(trigger.rows[0]!.definition.replace(" ON public.goal_instances ", " ON pg_temp.goal_scope_constraint_probe "));
+    if (seedId) await client.query("INSERT INTO pg_temp.goal_scope_constraint_probe SELECT * FROM public.goal_instances WHERE id=$1", [seedId]);
+    return await client.query(sql.replaceAll("goal_instances", "pg_temp.goal_scope_constraint_probe"), values);
+  } finally {
+    try { await client.query("DROP TABLE IF EXISTS pg_temp.goal_scope_constraint_probe"); }
+    finally { client.release(); }
+  }
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
 const skipReason = "requires the isolated PostgreSQL runtime runner";
@@ -118,43 +162,48 @@ test(
   "all three scope kinds materialize with deterministic ids and exactly one anchor",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
+
+    const ids = await cloneGoalRecordFixture(ownerPool);
+    const { world: WORLD, worldline: WORLDLINE, story: STORY } = ids;
+    const recordScope = (recordId: string): GoalRuntimeScope => ({
+      kind: "record", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, recordId,
+    });
     const suffix = randomUUID().replaceAll("-", "");
     const goalKey = `test.scope.${suffix}`;
+    installTestSessionSecret();
+    await seedCapabilitySessionKey(ownerPool, WS);
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [scopeGoalDefinition(goalKey, false)] });
     const storyScope: GoalStoryScope = {
       kind: "story", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, storyId: STORY,
     };
     const worldlineScope: GoalWorldlineScope = {
       kind: "worldline", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE,
     };
-    t.after(async () => {
-      await ownerPool.query(
-        `DELETE FROM goal_instances WHERE workspace_id = $1 AND goal_key = $2`,
-        [WS, goalKey],
-      );
-      await runtimePool.end();
-      await ownerPool.end();
-    });
 
-    const ids = await withWorkspaceTransaction(runtimePool, WS, async (client) => {
-      const recordIds = await materializeGoalInstances(client, recordScope(POSTGRES_DEMO_IDS.record), [
+
+    const materialized = await withWorkspaceTransaction(runtimePool, WS, async (client) => {
+      const recordIds = await materializeScopedGoals(client, recordScope(ids.record), [
         { goalKey, policyVersion: "v1" },
-      ]);
-      const storyIds = await materializeGoalInstances(client, storyScope, [
+      ], trusted.context());
+      const storyIds = await materializeScopedGoals(client, storyScope, [
         { goalKey, policyVersion: "v1" },
-      ]);
-      const worldlineIds = await materializeGoalInstances(client, worldlineScope, [
+      ], trusted.context());
+      const worldlineIds = await materializeScopedGoals(client, worldlineScope, [
         { goalKey, policyVersion: "v1" },
-      ]);
+      ], trusted.context());
       return { recordIds, storyIds, worldlineIds };
     });
 
-    assert.deepEqual(ids.recordIds, [goalInstanceIdFor(recordScope(POSTGRES_DEMO_IDS.record), goalKey)]);
-    assert.deepEqual(ids.storyIds, [goalInstanceIdFor(storyScope, goalKey)]);
-    assert.deepEqual(ids.worldlineIds, [goalInstanceIdFor(worldlineScope, goalKey)]);
-    assert.notEqual(ids.recordIds[0], ids.storyIds[0]);
-    assert.notEqual(ids.storyIds[0], ids.worldlineIds[0]);
+    assert.deepEqual(materialized.recordIds, [goalInstanceIdFor(recordScope(ids.record), goalKey)]);
+    assert.deepEqual(materialized.storyIds, [goalInstanceIdFor(storyScope, goalKey)]);
+    assert.deepEqual(materialized.worldlineIds, [goalInstanceIdFor(worldlineScope, goalKey)]);
+    assert.notEqual(materialized.recordIds[0], materialized.storyIds[0]);
+    assert.notEqual(materialized.storyIds[0], materialized.worldlineIds[0]);
 
     const rows = await ownerPool.query<{
       id: string;
@@ -171,15 +220,15 @@ test(
     );
     assert.deepEqual(rows.rows, [
       {
-        id: ids.recordIds[0],
+        id: materialized.recordIds[0],
         scope_kind: "record",
-        record_id: POSTGRES_DEMO_IDS.record,
+        record_id: ids.record,
         story_id: null,
         attempt: 1,
         supersedes_instance_id: null,
       },
       {
-        id: ids.storyIds[0],
+        id: materialized.storyIds[0],
         scope_kind: "story",
         record_id: null,
         story_id: STORY,
@@ -187,7 +236,7 @@ test(
         supersedes_instance_id: null,
       },
       {
-        id: ids.worldlineIds[0],
+        id: materialized.worldlineIds[0],
         scope_kind: "worldline",
         record_id: null,
         story_id: null,
@@ -198,18 +247,18 @@ test(
 
     // 恰好一个锚：story 行携带 record_id 违反 scope anchor CHECK。
     await assert.rejects(
-      ownerPool.query(
+      probeGoalConstraint(ownerPool,
         `INSERT INTO goal_instances (
            workspace_id, world_id, worldline_id, record_id, story_id, scope_kind,
            id, goal_key, policy_version
          ) VALUES ($1, $2, $3, $4, $5, 'story', $6, $7, 'v1')`,
-        [WS, WORLD, WORLDLINE, POSTGRES_DEMO_IDS.record, STORY, `goal_bad_${suffix}`, `${goalKey}.bad`],
+        [WS, WORLD, WORLDLINE, ids.record, STORY, `goal_bad_${suffix}`, `${goalKey}.bad`],
       ),
       /goal_instances_scope_anchor_check/,
     );
     // worldline 行携带 story 锚同样违反 CHECK。
     await assert.rejects(
-      ownerPool.query(
+      probeGoalConstraint(ownerPool,
         `INSERT INTO goal_instances (
            workspace_id, world_id, worldline_id, record_id, story_id, scope_kind,
            id, goal_key, policy_version
@@ -225,22 +274,27 @@ test(
   "goal instances stay workspace-isolated under FORCE RLS",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 1 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
+
+    const ids = await cloneGoalRecordFixture(ownerPool);
+    const { world: WORLD, worldline: WORLDLINE } = ids;
+    const recordScope = (recordId: string): GoalRuntimeScope => ({
+      kind: "record", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, recordId,
+    });
     const suffix = randomUUID().replaceAll("-", "");
     const goalKey = `test.rls.${suffix}`;
-    const scope = recordScope(POSTGRES_DEMO_IDS.record);
-    t.after(async () => {
-      await ownerPool.query(
-        `DELETE FROM goal_instances WHERE workspace_id = $1 AND goal_key = $2`,
-        [WS, goalKey],
-      );
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+    installTestSessionSecret();
+    await seedCapabilitySessionKey(ownerPool, WS);
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [scopeGoalDefinition(goalKey, false)] });
+    const scope = recordScope(ids.record);
+
 
     const [id] = await withWorkspaceTransaction(runtimePool, WS, (client) =>
-      materializeGoalInstances(client, scope, [{ goalKey, policyVersion: "v1" }]),
+      materializeScopedGoals(client, scope, [{ goalKey, policyVersion: "v1" }], trusted.context()),
     );
 
     // 未设置 workspace GUC：RLS 下零行。
@@ -268,36 +322,40 @@ test(
   "terminal instances are immutable, retry opens a new attempt, and a single active attempt is enforced",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
+
+    const ids = await cloneGoalRecordFixture(ownerPool);
+    const { world: WORLD, worldline: WORLDLINE } = ids;
+    const recordScope = (recordId: string): GoalRuntimeScope => ({
+      kind: "record", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, recordId,
+    });
     const suffix = randomUUID().replaceAll("-", "");
     const goalKey = `test.retry.${suffix}`;
-    const scope = recordScope(POSTGRES_DEMO_IDS.record);
-    t.after(async () => {
-      // supersedes 自引用 FK 为 ON DELETE CASCADE：删除首个 attempt 级联清掉重试行。
-      await ownerPool.query(
-        `DELETE FROM goal_instances WHERE workspace_id = $1 AND goal_key = $2`,
-        [WS, goalKey],
-      );
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+    installTestSessionSecret();
+    await seedCapabilitySessionKey(ownerPool, WS);
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [scopeGoalDefinition(goalKey, true)] });
+    const scope = recordScope(ids.record);
+
 
     const [firstId] = await withWorkspaceTransaction(runtimePool, WS, (client) =>
-      materializeGoalInstances(client, scope, [{ goalKey, policyVersion: "v1" }]),
+      materializeScopedGoals(client, scope, [{ goalKey, policyVersion: "v1" }], trusted.context()),
     );
 
     // active 时拒绝重试（单 active 约束的引擎侧守卫）。
     await assert.rejects(
       withWorkspaceTransaction(runtimePool, WS, (client) =>
-        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }),
+        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }, trusted.context()),
       ),
       (error: unknown) => (error as { code?: string }).code === "GOAL_RETRY_ACTIVE_EXISTS",
     );
     // 内容未声明 retryable 时拒绝重试。
     await assert.rejects(
       withWorkspaceTransaction(runtimePool, WS, (client) =>
-        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1" }),
+        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1" }, trusted.context()),
       ),
       (error: unknown) => (error as { code?: string }).code === "GOAL_RETRY_NOT_ALLOWED",
     );
@@ -329,10 +387,10 @@ test(
       /terminal goal instances are immutable/,
     );
     await assert.rejects(
-      ownerPool.query(
+      probeGoalConstraint(ownerPool,
         `UPDATE goal_instances SET policy_version = 'v2'
          WHERE workspace_id = $1 AND id = $2`,
-        [WS, firstId],
+        [WS, firstId], firstId,
       ),
       /terminal goal instances are immutable/,
     );
@@ -347,7 +405,7 @@ test(
 
     // 重试：新 attempt、新确定性 id、supersedes 指向终态实例。
     const secondId = await withWorkspaceTransaction(runtimePool, WS, (client) =>
-      retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }),
+      retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }, trusted.context()),
     );
     assert.equal(secondId, goalInstanceIdFor(scope, goalKey, 2));
     assert.notEqual(secondId, firstId);
@@ -370,12 +428,12 @@ test(
 
     // 同 scope+goalKey 只能一个 active：并发/错误路径的 DB 兜底。
     await assert.rejects(
-      ownerPool.query(
+      probeGoalConstraint(ownerPool,
         `INSERT INTO goal_instances (
            workspace_id, world_id, worldline_id, record_id, scope_kind,
            id, goal_key, policy_version, attempt
          ) VALUES ($1, $2, $3, $4, 'record', $5, $6, 'v1', 3)`,
-        [WS, WORLD, WORLDLINE, POSTGRES_DEMO_IDS.record, `goal_dup_${suffix}`, goalKey],
+        [WS, WORLD, WORLDLINE, ids.record, `goal_dup_${suffix}`, goalKey], secondId,
       ),
       /goal_instances_scope_single_active_key/,
     );
@@ -383,7 +441,7 @@ test(
     // 再次重试仍被拒绝：最新 attempt 是 active。
     await assert.rejects(
       withWorkspaceTransaction(runtimePool, WS, (client) =>
-        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }),
+        retryGoalInstance(client, scope, { goalKey, policyVersion: "v1", retryable: true }, trusted.context()),
       ),
       (error: unknown) => (error as { code?: string }).code === "GOAL_RETRY_ACTIVE_EXISTS",
     );
@@ -394,7 +452,10 @@ async function createRecordFixture(
   ownerPool: pg.Pool,
   suffix: string,
   label: "b" | "c",
+  ids: Awaited<ReturnType<typeof cloneGoalRecordFixture>> = POSTGRES_DEMO_IDS,
+  worldVersion = "0.0.0-local",
 ): Promise<{ recordId: string; sceneId: string; policyId: string; eventIds: string[] }> {
+  const { world: WORLD, worldline: WORLDLINE, story: STORY } = ids;
   const recordId = `record_goal_scope_${label}_${suffix}`;
   const sceneId = `scene_goal_scope_${label}_${suffix}`;
   const policyId = `policy_goal_scope_${label}_${suffix}`;
@@ -420,9 +481,9 @@ async function createRecordFixture(
   await ownerPool.query(
     `INSERT INTO records (
        workspace_id, world_id, worldline_id, story_id, id, title, status,
-       start_tick, start_ordinal
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 0)`,
-    [WS, WORLD, WORLDLINE, STORY, recordId, `Goal scope fixture ${label}`, baseTick],
+       start_tick, start_ordinal, world_version
+     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 0, $8)`,
+    [WS, WORLD, WORLDLINE, STORY, recordId, `Goal scope fixture ${label}`, baseTick, worldVersion],
   );
   await ownerPool.query(
     `INSERT INTO scenes (
@@ -496,17 +557,17 @@ test(
   "story and worldline scope evidence aggregate committed events across records",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
     const suffix = randomUUID().replaceAll("-", "");
     // events 是 append-only：fixture 的事件/Record 行保留在 scratch 库中
     // （scratch 集群整体销毁）；断言全部设计为对其它套件数据稳健。
     const fixtureB = await createRecordFixture(ownerPool, suffix, "b");
     const fixtureC = await createRecordFixture(ownerPool, suffix, "c");
-    t.after(async () => {
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+
 
     await withWorkspaceTransaction(runtimePool, WS, async (client) => {
       // record scope：精确到单 Record、record_ordinal 序。
@@ -583,22 +644,24 @@ test(
   "settle applies failed/settled terminals, replays duplicates, and stably rejects late results",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async (t) => {
+    const close = fixtureCleanup(t);
     const ownerPool = new pg.Pool({ connectionString: adminConnectionString!, max: 2 });
+    close(() => ownerPool.end());
     const runtimePool = new pg.Pool({ connectionString: runtimeConnectionString!, max: 2 });
+    close(() => runtimePool.end());
+
+    const ids = await cloneGoalRecordFixture(ownerPool);
+    const { world: WORLD, worldline: WORLDLINE } = ids;
+    const recordScope = (recordId: string): GoalRuntimeScope => ({
+      kind: "record", workspaceId: WS, worldId: WORLD, worldlineId: WORLDLINE, recordId,
+    });
     const suffix = randomUUID().replaceAll("-", "");
-    const fixture = await createRecordFixture(ownerPool, suffix, "b");
+    const fixture = await createRecordFixture(ownerPool, suffix, "b", ids, "1.0.0");
     const goalKey = `test.terminal.${suffix}`;
     const scope = recordScope(fixture.recordId);
     const goalInstanceId = goalInstanceIdFor(scope, goalKey);
     const leaseOwner = `test-worker-${suffix}`;
-    t.after(async () => {
-      await ownerPool.query(
-        `DELETE FROM goal_instances WHERE workspace_id = $1 AND goal_key = $2`,
-        [WS, goalKey],
-      );
-      await runtimePool.end();
-      await ownerPool.end();
-    });
+
 
     // 确定性失败 rubric：任一 action.transaction.committed 即 failed。
     const definition: GoalDefinition = {
@@ -620,8 +683,12 @@ test(
       outcome: { result: "lost" },
     };
 
+    installTestSessionSecret();
+    await seedCapabilitySessionKey(ownerPool, WS);
+    const trusted = await trustedGoalFixture(t, { worldId: WORLD, worldVersion: "1.0.0", goals: [definition] });
+
     await withWorkspaceTransaction(runtimePool, WS, (client) =>
-      materializeGoalInstances(client, scope, [{ goalKey, policyVersion: "v1" }]),
+      materializeScopedGoals(client, scope, [{ goalKey, policyVersion: "v1" }], trusted.context()),
     );
     const queue = createPostgresGoalAssessmentJobQueue({
       pool: runtimePool,
@@ -644,7 +711,7 @@ test(
     assert.equal(await queue.enqueue(enqueueInput(jobId1, fixture.eventIds[0]!)), "inserted");
     const report = await runGoalAssessmentOnce({
       repository: queue,
-      resolveDefinition: async () => definition,
+      resolveDefinition: trusted.resolveDefinition,
       now: now(),
     });
     assert.deepEqual(report, { kind: "settled", status: "accepted" });
