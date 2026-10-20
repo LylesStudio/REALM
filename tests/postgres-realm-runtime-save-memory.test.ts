@@ -91,6 +91,22 @@ async function awaitFixtureClients(pool: pg.Pool): Promise<void> {
   await Promise.all(fixtureShutdowns.get(pool) ?? []);
 }
 
+async function awaitFixtureBackends(maintenance: pg.Client, databaseName: string): Promise<void> {
+  // A client's socket end precedes the server backend's catalog disappearance.
+  // Observe the exact disposable database; never terminate unrelated backends.
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    const backends = await maintenance.query(
+      "SELECT pid, state FROM pg_stat_activity WHERE datname = $1", [databaseName],
+    );
+    if (backends.rows.length === 0) return;
+    if (Date.now() >= deadline) {
+      assert.deepEqual(backends.rows, [], "fixture backends must be gone before DROP");
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 25));
+  }
+}
+
 const adminConnectionString = process.env.DATABASE_URL;
 const runtimeConnectionString = process.env.REALM_RUNTIME_DATABASE_URL;
 
@@ -139,15 +155,12 @@ async function createTempDatabase(t: test.TestContext) {
     await ownerPool.end();
     await awaitFixtureClients(runtimePool);
     await awaitFixtureClients(ownerPool);
-    const backends = await maintenance.query(
-      "SELECT pid, state FROM pg_stat_activity WHERE datname = $1",
-      [databaseName],
-    );
-    assert.deepEqual(backends.rows, [], "fixture backends must be gone before DROP");
-    await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)}`,
-    );
-    await maintenance.end();
+    try {
+      await awaitFixtureBackends(maintenance, databaseName);
+      await maintenance.query(`DROP DATABASE ${quoteIdentifier(databaseName)}`);
+    } finally {
+      await maintenance.end();
+    }
   });
 
   for (const filename of (await readdir(migrationDir)).sort()) {
@@ -885,15 +898,12 @@ async function createTempDatabase(t: test.TestContext) {
     await ownerPool.end();
     await awaitFixtureClients(runtimePool);
     await awaitFixtureClients(ownerPool);
-    const backends = await maintenance.query(
-      "SELECT pid, state FROM pg_stat_activity WHERE datname = $1",
-      [databaseName],
-    );
-    assert.deepEqual(backends.rows, [], "fixture backends must be gone before DROP");
-    await maintenance.query(
-      `DROP DATABASE ${quoteIdentifier(databaseName)}`,
-    );
-    await maintenance.end();
+    try {
+      await awaitFixtureBackends(maintenance, databaseName);
+      await maintenance.query(`DROP DATABASE ${quoteIdentifier(databaseName)}`);
+    } finally {
+      await maintenance.end();
+    }
   });
 
   for (const filename of (await readdir(migrationDir)).sort()) {

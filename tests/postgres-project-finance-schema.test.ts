@@ -15,12 +15,29 @@ const TABLES = [
   "project_finance_command_groups",
 ] as const;
 
+async function projectFinanceCounts(owner: pg.Pool) {
+  return owner.query<{ tableName: string; rowCount: string }>(
+    `SELECT 'projects' AS "tableName", count(*)::text AS "rowCount" FROM projects
+     UNION ALL SELECT 'project_milestones', count(*)::text FROM project_milestones
+     UNION ALL SELECT 'project_story_links', count(*)::text FROM project_story_links
+     UNION ALL SELECT 'budget_allocations', count(*)::text FROM budget_allocations
+     UNION ALL SELECT 'finance_accounts', count(*)::text FROM finance_accounts
+     UNION ALL SELECT 'ledger_entries', count(*)::text FROM ledger_entries
+     UNION ALL SELECT 'project_finance_command_groups', count(*)::text FROM project_finance_command_groups
+     ORDER BY "tableName"`,
+  );
+}
+
 test(
   "0062 installs Project/Finance tables with forced RLS, scoped constraints, and least privilege",
   { skip: !adminConnectionString || !runtimeConnectionString ? skipReason : false, timeout: 120_000 },
   async () => {
     const owner = new pg.Pool({ connectionString: adminConnectionString!, max: 1 });
     try {
+      // Earlier runtime suites legitimately retain immutable rows until the
+      // disposable cluster is destroyed. This catalog-only probe must leave
+      // that existing history unchanged, not demand a globally empty database.
+      const initialCounts = await projectFinanceCounts(owner);
       const relationRows = await owner.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
         `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
          FROM pg_class AS c
@@ -103,30 +120,9 @@ test(
         commandGroupUpdate: true,
       });
 
-      const counts = await owner.query<{ tableName: string; rowCount: string }>(
-        `SELECT table_name AS "tableName", table_rows::text AS "rowCount"
-         FROM (
-           SELECT unnest($1::text[]) AS table_name
-         ) AS names
-         CROSS JOIN LATERAL (
-           SELECT CASE names.table_name
-             WHEN 'projects' THEN (SELECT count(*) FROM projects)
-             WHEN 'project_milestones' THEN (SELECT count(*) FROM project_milestones)
-             WHEN 'project_story_links' THEN (SELECT count(*) FROM project_story_links)
-             WHEN 'budget_allocations' THEN (SELECT count(*) FROM budget_allocations)
-             WHEN 'finance_accounts' THEN (SELECT count(*) FROM finance_accounts)
-             WHEN 'ledger_entries' THEN (SELECT count(*) FROM ledger_entries)
-             WHEN 'project_finance_command_groups' THEN (SELECT count(*) FROM project_finance_command_groups)
-           END AS table_rows
-         ) AS rows
-         ORDER BY table_name`,
-        [TABLES],
-      );
+      const counts = await projectFinanceCounts(owner);
       assert.equal(counts.rows.length, TABLES.length);
-      assert.ok(
-        counts.rows.every((row) => row.rowCount === "0"),
-        `Project/Finance scratch data leaked: ${JSON.stringify(counts.rows)}`,
-      );
+      assert.deepEqual(counts.rows, initialCounts.rows, "schema inspection must not change existing Project/Finance history");
     } finally {
       await owner.end();
     }
