@@ -17,6 +17,10 @@
 import { spawn, spawnSync as spawnSync0 } from "node:child_process";
 import { createRequire } from "node:module";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   dockerAvailable,
   startScratchPgCluster,
@@ -208,6 +212,8 @@ async function runNode(scriptArgs, envExtra = {}) {
   });
 }
 
+const providedEvidenceDir = process.env.REALM_R1_EVIDENCE_DIR;
+const evidenceDir = providedEvidenceDir || await mkdtemp(join(tmpdir(), "realm-runtime-evidence-"));
 let exitCode = 0;
 try {
   // realm_dev：建库 → 全链迁移 → seed demo。
@@ -232,29 +238,57 @@ try {
     { DATABASE_URL: adminDbUrl, REALM_SESSION_SECRET: sessionSecretToken },
   );
 
-  console.error(`[scratch] running ${TEST_FILES.length} postgres-runtime files …`);
-  await runNode(
-    [
-      "--experimental-strip-types",
-      "--import",
-      "./tests/helpers/postgres-pool-lifecycle.mjs",
-      "--test",
-      "--test-concurrency=1",
-      ...TEST_FILES,
-    ],
-    {
-      DATABASE_URL: adminDbUrl,
-      REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, "realm_dev"),
-      REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, "realm_dev"),
-      REALM_SESSION_SECRET: sessionSecretToken,
-      REALM_SCRATCH_POSTGRES_CONTAINER: cluster.name,
-    },
-  );
+  // Each Node file already has process isolation; give it the matching SQL
+  // boundary too. Shared demo Goals/queues and large immutable save fixtures
+  // must not change the inputs or cost of a later, otherwise independent file.
+  const maintenance = new pg.Client({ connectionString: cluster.adminUrl });
+  await maintenance.connect();
+  try {
+    console.error(`[scratch] running ${TEST_FILES.length} postgres-runtime files with fresh databases …`);
+    for (const [index, testFile] of TEST_FILES.entries()) {
+      const suiteDatabase = `realm_suite_${index}`;
+      await maintenance.query(`CREATE DATABASE "${suiteDatabase}" TEMPLATE realm_dev`);
+      console.error(`[scratch] [${index + 1}/${TEST_FILES.length}] ${testFile}`);
+      await runNode(
+        [
+          "--experimental-strip-types",
+          "--import",
+          "./tests/helpers/postgres-pool-lifecycle.mjs",
+          "--test",
+          "--test-concurrency=1",
+          testFile,
+        ],
+        {
+          DATABASE_URL: withDb(cluster.adminUrl, suiteDatabase),
+          REALM_RUNTIME_DATABASE_URL: withDb(cluster.runtimeUrl, suiteDatabase),
+          REALM_TRANSFER_DATABASE_URL: withDb(cluster.transferUrl, suiteDatabase),
+          REALM_SESSION_SECRET: sessionSecretToken,
+          REALM_SCRATCH_POSTGRES_CONTAINER: cluster.name,
+          REALM_R1_EVIDENCE_DIR: evidenceDir,
+        },
+      );
+      // Child exit closes its sockets, but the backend catalog can lag briefly.
+      // Wait only for this runner-owned database; never terminate other work.
+      for (let attempt = 0; ; attempt += 1) {
+        const active = await maintenance.query(
+          "SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1",
+          [suiteDatabase],
+        );
+        if (active.rows[0].count === 0) break;
+        if (attempt >= 100) throw new Error(`scratch database ${suiteDatabase} retained a backend after child exit`);
+        await delay(20);
+      }
+      await maintenance.query(`DROP DATABASE "${suiteDatabase}"`);
+    }
+  } finally {
+    await maintenance.end();
+  }
 } catch (error) {
   console.error(`[scratch] FAILED: ${error instanceof Error ? error.message : error}`);
   exitCode = 1;
 } finally {
   await cluster.stop();
+  if (!providedEvidenceDir) await rm(evidenceDir, { recursive: true, force: true });
   console.error("[scratch] cluster destroyed (container and all temp databases).");
 }
 process.exit(exitCode);
