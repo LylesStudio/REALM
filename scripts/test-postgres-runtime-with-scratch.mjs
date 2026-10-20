@@ -244,10 +244,28 @@ try {
   const maintenance = new pg.Client({ connectionString: cluster.adminUrl });
   await maintenance.connect();
   try {
+    // CREATE DATABASE ... TEMPLATE copies objects, not pg_database ACLs.
+    // Preserve the provisioned database contract (notably revoked TEMPORARY)
+    // instead of silently restoring PostgreSQL's permissive PUBLIC defaults.
+    const templateAcl = await maintenance.query(`
+      SELECT CASE WHEN privilege.grantee = 0 THEN 'PUBLIC'
+                  ELSE quote_ident(role.rolname) END AS grantee,
+             privilege.privilege_type, privilege.is_grantable
+      FROM pg_database database
+      CROSS JOIN LATERAL aclexplode(COALESCE(database.datacl, acldefault('d', database.datdba))) privilege
+      LEFT JOIN pg_roles role ON role.oid = privilege.grantee
+      WHERE database.datname = 'realm_dev'`);
     console.error(`[scratch] running ${TEST_FILES.length} postgres-runtime files with fresh databases …`);
     for (const [index, testFile] of TEST_FILES.entries()) {
       const suiteDatabase = `realm_suite_${index}`;
       await maintenance.query(`CREATE DATABASE "${suiteDatabase}" TEMPLATE realm_dev`);
+      await maintenance.query(`REVOKE ALL PRIVILEGES ON DATABASE "${suiteDatabase}" FROM PUBLIC`);
+      for (const privilege of templateAcl.rows) {
+        if (!['CREATE', 'CONNECT', 'TEMPORARY'].includes(privilege.privilege_type) || !privilege.grantee) {
+          throw new Error('Unsupported template database ACL');
+        }
+        await maintenance.query(`GRANT ${privilege.privilege_type} ON DATABASE "${suiteDatabase}" TO ${privilege.grantee}${privilege.is_grantable ? ' WITH GRANT OPTION' : ''}`);
+      }
       console.error(`[scratch] [${index + 1}/${TEST_FILES.length}] ${testFile}`);
       await runNode(
         [

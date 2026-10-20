@@ -16,6 +16,13 @@ test('PostgreSQL scratch files each receive a fresh provisioned database rather 
   assert.doesNotMatch(source, /\.\.\.TEST_FILES/);
 });
 
+test('PostgreSQL scratch clones preserve database-level ACLs as well as schema contents', () => {
+  assert.match(source, /aclexplode\(COALESCE\(database\.datacl, acldefault\('d', database\.datdba\)\)\)/);
+  assert.match(source, /REVOKE ALL PRIVILEGES ON DATABASE/);
+  assert.match(source, /templateAcl\.rows/);
+  assert.match(source, /privilege\.is_grantable/);
+});
+
 test('PostgreSQL scratch entry supplies and cleans a task-owned default evidence directory', () => {
   assert.match(source, /mkdtemp\(join\(tmpdir\(\), ["']realm-runtime-evidence-["']\)\)/);
   assert.match(source, /REALM_R1_EVIDENCE_DIR: evidenceDir/);
